@@ -17,6 +17,21 @@ RUN CGO_ENABLED=0 GOOS=linux \
     -o /out/everyapi-edge .
 
 FROM gcr.io/distroless/static:nonroot
+
+# OCI labels — GHCR reads `org.opencontainers.image.source` to decide
+# which repo to link the package to in the UI (defaults to the
+# pushing workflow's repo, which here is the monorepo). Pointing it
+# at the public mirror surfaces the image on
+# https://github.com/everyapi-ai/everyapi-edge's Packages sidebar
+# and on the package page itself, which is where suppliers actually
+# read from. `licenses` is the OCI standard tag for Apache-2.0.
+ARG VERSION=dev
+LABEL org.opencontainers.image.source="https://github.com/everyapi-ai/everyapi-edge" \
+      org.opencontainers.image.description="EveryAPI BYO-GPU supplier agent — reverse-WS to gateway, forwards inference to local ollama." \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="everyapi-edge" \
+      org.opencontainers.image.version="${VERSION}"
+
 COPY --from=build /out/everyapi-edge /everyapi-edge
 
 # Identity volume — mount /var/lib/everyapi-edge to a host directory
