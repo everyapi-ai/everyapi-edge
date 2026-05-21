@@ -21,7 +21,7 @@
 
 services:
   agent:
-    image: everyapi/edge:${EVERYAPI_EDGE_VERSION:-latest}
+    image: ghcr.io/everyapi-ai/everyapi-edge:${EVERYAPI_EDGE_VERSION:-latest}
     container_name: everyapi-edge-agent
     restart: unless-stopped
     # Reach the host's native ollama. Works out of the box on

@@ -42,7 +42,7 @@ services:
       retries: 5
 
   agent:
-    image: everyapi/edge:${EVERYAPI_EDGE_VERSION:-latest}
+    image: ghcr.io/everyapi-ai/everyapi-edge:${EVERYAPI_EDGE_VERSION:-latest}
     container_name: everyapi-edge-agent
     restart: unless-stopped
     depends_on:
