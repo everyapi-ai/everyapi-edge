@@ -1,0 +1,61 @@
+# EveryAPI BYO-GPU supplier bundle.
+#
+# Two services: ollama serves OpenAI-compatible inference on
+# :11434, the agent connects out to the EveryAPI gateway and
+# forwards every inbound buyer request to ollama. No port is
+# exposed to the public internet — all traffic is the agent's
+# outbound WebSocket.
+#
+# First-run setup:
+#   1. Copy .env.example to .env (or pass via the environment)
+#   2. Get an EVERYAPI_NODE_ID + EVERYAPI_REGISTRATION_TOKEN from
+#      the EveryAPI dashboard: /seller/edge/nodes → New node
+#   3. docker compose up -d
+#   4. Verify the dashboard shows the node as "online" within ~30s
+#
+# After the first successful connect, EVERYAPI_REGISTRATION_TOKEN
+# is consumed server-side and can be removed from .env. Reconnects
+# use the Ed25519 identity at ./data/identity.json.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: everyapi-edge-ollama
+    restart: unless-stopped
+    # GPU passthrough. Required for any meaningful inference work;
+    # the agent will technically still run without it but will be
+    # serving from CPU and that's not what this bundle is for.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ./data/ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  agent:
+    image: everyapi/edge:${EVERYAPI_EDGE_VERSION:-latest}
+    container_name: everyapi-edge-agent
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      EVERYAPI_GATEWAY: ${EVERYAPI_GATEWAY:?gateway URL required}
+      EVERYAPI_NODE_ID: ${EVERYAPI_NODE_ID:?node id required}
+      EVERYAPI_REGISTRATION_TOKEN: ${EVERYAPI_REGISTRATION_TOKEN:-}
+      OLLAMA_URL: http://ollama:11434
+      EVERYAPI_IDENTITY_PATH: /var/lib/everyapi-edge/identity.json
+      EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}
+      EVERYAPI_GPU_MODEL: ${EVERYAPI_GPU_MODEL:-}
+      EVERYAPI_VRAM_GB: ${EVERYAPI_VRAM_GB:-}
+      EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
+    volumes:
+      - ./data/agent:/var/lib/everyapi-edge

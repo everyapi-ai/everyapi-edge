@@ -1,0 +1,62 @@
+# EveryAPI BYO-GPU supplier bundle — AMD ROCm variant.
+#
+# Identical to docker-compose.yml except the GPU passthrough block
+# uses ROCm devices (/dev/kfd, /dev/dri) and the `video` group
+# instead of the NVIDIA container runtime. Use this on AMD Radeon
+# Instinct / RX 7000 / RX 6000 setups with ROCm 5.7+ installed
+# on the host.
+#
+# Pick by file:
+#   docker compose -f docker-compose.rocm.yml up -d
+#
+# Or rename to docker-compose.yml if you want the default
+# `docker compose up` invocation to work.
+
+services:
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: everyapi-edge-ollama
+    restart: unless-stopped
+    # ROCm passthrough — exposes the AMD GPU devices to the
+    # container. Requires the host to have ROCm 5.7+ + rocm-dkms
+    # installed; verify with `rocminfo` on the host before
+    # bringing this up.
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    # SYS_PTRACE is needed by ROCm's profiler tooling that ollama
+    # uses for kernel scheduling. Without it ollama still runs but
+    # falls back to slower paths on some kernel versions.
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    volumes:
+      - ./data/ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  agent:
+    image: everyapi/edge:${EVERYAPI_EDGE_VERSION:-latest}
+    container_name: everyapi-edge-agent
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      EVERYAPI_GATEWAY: ${EVERYAPI_GATEWAY:?gateway URL required}
+      EVERYAPI_NODE_ID: ${EVERYAPI_NODE_ID:?node id required}
+      EVERYAPI_REGISTRATION_TOKEN: ${EVERYAPI_REGISTRATION_TOKEN:-}
+      OLLAMA_URL: http://ollama:11434
+      EVERYAPI_IDENTITY_PATH: /var/lib/everyapi-edge/identity.json
+      EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}
+      EVERYAPI_GPU_MODEL: ${EVERYAPI_GPU_MODEL:-}
+      EVERYAPI_VRAM_GB: ${EVERYAPI_VRAM_GB:-}
+      EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
+    volumes:
+      - ./data/agent:/var/lib/everyapi-edge

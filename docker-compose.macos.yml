@@ -1,0 +1,47 @@
+# EveryAPI BYO-GPU supplier bundle — Apple Silicon (macOS) variant.
+#
+# Ollama's docker images don't expose Apple Silicon's Metal GPU
+# acceleration (the Metal Performance Shaders API is host-only).
+# To use a Mac Studio / Mac mini / MacBook as a GPU supplier the
+# supplier runs ollama NATIVELY on the host and the agent in
+# docker, dialing host.docker.internal:11434 to reach it.
+#
+# Bring-up:
+#
+#   1. Install Homebrew if you haven't already:
+#        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+#   2. brew install ollama
+#   3. brew services start ollama
+#   4. Verify: curl http://localhost:11434/api/tags
+#   5. docker compose -f docker-compose.macos.yml up -d
+#
+# Only the agent runs in docker; the ollama service is the native
+# brew-installed one and persists models in ~/.ollama (NOT in the
+# bundle's ./data/ollama directory).
+
+services:
+  agent:
+    image: everyapi/edge:${EVERYAPI_EDGE_VERSION:-latest}
+    container_name: everyapi-edge-agent
+    restart: unless-stopped
+    # Reach the host's native ollama. Works out of the box on
+    # Docker Desktop for Mac / OrbStack / Colima — they all
+    # provide the host.docker.internal alias.
+    environment:
+      EVERYAPI_GATEWAY: ${EVERYAPI_GATEWAY:?gateway URL required}
+      EVERYAPI_NODE_ID: ${EVERYAPI_NODE_ID:?node id required}
+      EVERYAPI_REGISTRATION_TOKEN: ${EVERYAPI_REGISTRATION_TOKEN:-}
+      OLLAMA_URL: http://host.docker.internal:11434
+      EVERYAPI_IDENTITY_PATH: /var/lib/everyapi-edge/identity.json
+      EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}
+      EVERYAPI_GPU_MODEL: ${EVERYAPI_GPU_MODEL:-Apple Silicon}
+      EVERYAPI_VRAM_GB: ${EVERYAPI_VRAM_GB:-}
+      EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
+    volumes:
+      - ./data/agent:/var/lib/everyapi-edge
+    extra_hosts:
+      # Linux Docker hosts don't auto-resolve host.docker.internal;
+      # this line is a no-op on Mac (where the alias already
+      # exists) but makes the same compose file work in mixed
+      # development environments.
+      - "host.docker.internal:host-gateway"
