@@ -1,5 +1,8 @@
 # EveryAPI BYO-GPU supplier bundle.
 #
+# Image: ghcr.io/everyapi-ai/edge (Apache 2.0, source at
+# https://github.com/everyapi-ai/everyapi-edge).
+#
 # Two services: ollama serves OpenAI-compatible inference on
 # :11434, the agent connects out to the EveryAPI gateway and
 # forwards every inbound buyer request to ollama. No port is

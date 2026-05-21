@@ -138,5 +138,4 @@ identity loss as equivalent to "machine was compromised.")
 ## License + source
 
 Apache 2.0. Full source at
-https://github.com/everyapi-ai/everyapi-edge (mirrored from the
-EveryAPI monorepo's `clients/edge/`). Issues + PRs welcome.
+https://github.com/everyapi-ai/everyapi-edge. Issues + PRs welcome.
