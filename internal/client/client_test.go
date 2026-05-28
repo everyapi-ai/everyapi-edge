@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -177,6 +178,39 @@ func TestWriterLoopExitsOnDone(t *testing.T) {
 		}
 	case <-time.After(shortBudget):
 		t.Fatal("writerLoop did not exit after closeConn — done arm not wired or sendQ-still-closed regression")
+	}
+}
+
+// TestTerminalDisconnectError_AsRoundTrip pins the type's behavior
+// as an error sentinel: main.go's runWithReconnect calls
+// `errors.As(err, &*TerminalDisconnectError{})` to decide whether to
+// exit the reconnect loop. A future refactor that changes this to a
+// non-pointer receiver or breaks the Error() string would silently
+// turn the terminal path into a transient retry.
+func TestTerminalDisconnectError_AsRoundTrip(t *testing.T) {
+	const wantCode = "node_revoked"
+	const wantReason = "node deleted via /api/seller/edge/nodes"
+
+	wrapped := errors.Join(
+		errors.New("ws read context"),
+		&TerminalDisconnectError{Code: wantCode, Reason: wantReason},
+	)
+
+	var got *TerminalDisconnectError
+	if !errors.As(wrapped, &got) {
+		t.Fatalf("errors.As should unwrap a TerminalDisconnectError; got nil")
+	}
+	if got.Code != wantCode || got.Reason != wantReason {
+		t.Fatalf("unwrapped fields drifted: code=%q reason=%q", got.Code, got.Reason)
+	}
+
+	// And the human-readable string carries both fields so docker
+	// logs make the failure mode self-explanatory.
+	msg := got.Error()
+	for _, want := range []string{wantCode, wantReason, "terminal"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("Error() missing %q: %q", want, msg)
+		}
 	}
 }
 

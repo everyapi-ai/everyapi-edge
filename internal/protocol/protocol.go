@@ -99,6 +99,19 @@ type DisconnectBody struct {
 	Reason string `json:"reason"`
 }
 
+// Disconnect codes. Mirrors backend/pkg/edge/protocol.go — see that
+// file for the canonical-source policy. The terminal codes here drive
+// the agent's "stop reconnecting" decision in main.go's
+// runWithReconnect; everything else is treated as transient and
+// retried with exponential backoff.
+const (
+	// DisconnectCodeNodeRevoked — gateway soft-deleted the EdgeNode
+	// row while this session was live. Terminal on the agent side:
+	// persist a sentinel and exit so the seller doesn't have to
+	// chase docker logs to understand the spin loop.
+	DisconnectCodeNodeRevoked = "node_revoked"
+)
+
 // LogBody — single line of agent log output. The agent's logger hooks
 // into Client.SendLog which serialises to a Frame{Type: FrameLog};
 // the gateway's per-session ring buffer (backend/internal/edge) holds

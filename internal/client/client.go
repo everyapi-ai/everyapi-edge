@@ -69,6 +69,22 @@ type Config struct {
 // run in their own goroutine so concurrent requests don't serialise.
 type RequestHandler func(req protocol.RequestBody, send func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody)
 
+// TerminalDisconnectError is the typed wrapper for a gateway-side
+// Disconnect frame whose Code marks the session as unrecoverable
+// (currently: node_revoked). The reconnect loop in main.go checks
+// `errors.As(err, &*TerminalDisconnectError{})` and exits cleanly
+// instead of backing off — the operator's intent on the server side
+// (delete the node row) shouldn't be undone by a tight retry loop
+// on the supplier side.
+type TerminalDisconnectError struct {
+	Code   string
+	Reason string
+}
+
+func (e *TerminalDisconnectError) Error() string {
+	return "gateway disconnect (terminal): " + e.Code + ": " + e.Reason
+}
+
 // Client is a single WebSocket session. New() returns one not yet
 // connected; Run() connects, authenticates, and blocks until the
 // session ends.
@@ -313,7 +329,29 @@ func (c *Client) readerLoop(ctx context.Context) error {
 			go c.handleRequest(frame)
 		case protocol.FrameDisconnect:
 			var body protocol.DisconnectBody
-			_ = json.Unmarshal(frame.Body, &body)
+			if uErr := json.Unmarshal(frame.Body, &body); uErr != nil {
+				// Surface the parse failure on stderr instead of
+				// silently dropping it — a malformed Disconnect body
+				// whose Code field doesn't decode would otherwise fall
+				// to the transient "gateway disconnect" path with an
+				// empty code and the agent would reconnect forever
+				// against a gateway that meant to send a terminal
+				// signal. Treat unparseable Disconnect as transient
+				// (return a generic error) so the next reconnect can
+				// fetch a fresh, parseable frame; but at least the
+				// operator sees the parse error in docker logs.
+				fmt.Fprintf(stderr(), "edge-agent: malformed Disconnect body: %v (frame=%q)\n", uErr, string(frame.Body))
+				return fmt.Errorf("malformed gateway disconnect frame: %w", uErr)
+			}
+			// Terminal codes propagate as typed errors so
+			// runWithReconnect in main.go can stop the reconnect
+			// loop instead of treating them like a generic blip.
+			// Everything else collapses into a generic
+			// "gateway disconnect" wrap and the outer loop retries
+			// with backoff.
+			if body.Code == protocol.DisconnectCodeNodeRevoked {
+				return &TerminalDisconnectError{Code: body.Code, Reason: body.Reason}
+			}
 			return fmt.Errorf("gateway disconnect: %s: %s", body.Code, body.Reason)
 		default:
 			fmt.Fprintf(stderr(), "edge-agent: unexpected frame type %q from gateway\n", frame.Type)

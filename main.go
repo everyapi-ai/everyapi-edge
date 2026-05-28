@@ -17,6 +17,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sync/atomic"
 	"syscall"
@@ -73,6 +74,19 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 	log.Printf("starting %s — %s", Version, cfg.String())
+
+	// Early-exit if a previous session received a terminal Disconnect
+	// frame (node_revoked) and persisted the sentinel. Without this,
+	// docker compose's restart policy ("unless-stopped") would respawn
+	// the container after the agent exited, and the new instance would
+	// just spin on auth-rejected reconnects until the cap. The sentinel
+	// lives alongside the identity file so it survives container
+	// restarts without polluting other paths.
+	if reason, revoked := readRevokedSentinel(cfg.IdentityPath); revoked {
+		log.Printf("node revoked server-side (%s) — agent will not start. "+
+			"Run `everyapi edge remove` on the supplier host to clean up.", reason)
+		return
+	}
 
 	id, err := identity.LoadOrGenerate(cfg.IdentityPath)
 	if err != nil {
@@ -161,6 +175,23 @@ func runWithReconnect(
 		if runErr == nil || errors.Is(runErr, context.Canceled) {
 			return runErr
 		}
+
+		// Terminal codes (currently only node_revoked) write a
+		// sentinel next to the identity file and exit clean. The
+		// docker compose restart policy will respawn the container,
+		// but the next boot reads the sentinel and exits immediately
+		// — so the seller sees one clear "node revoked" line in
+		// docker logs instead of a forever-backoff loop. Must run
+		// BEFORE the backoff-reset block below since we return.
+		var terminal *client.TerminalDisconnectError
+		if errors.As(runErr, &terminal) {
+			log.Printf("terminal disconnect from gateway: %s (%s) — agent will not retry", terminal.Code, terminal.Reason)
+			if writeErr := writeRevokedSentinel(cfg.IdentityPath, terminal.Reason); writeErr != nil {
+				log.Printf("warning: failed to persist revoked sentinel: %v", writeErr)
+			}
+			return nil
+		}
+
 		// Reset the backoff after a stable session so the next
 		// disconnect retries fast. Without this the agent
 		// accumulates exponential delay across the lifetime of the
@@ -182,6 +213,74 @@ func runWithReconnect(
 		}
 		backoff = nextBackoff(backoff)
 	}
+}
+
+// revokedSentinelPath sits next to the identity file so it shares
+// the same volume mount in docker-compose and survives container
+// restarts. Named `.revoked` so a `ls -l` next to identity.json
+// makes the failure mode obvious without grepping logs.
+func revokedSentinelPath(identityPath string) string {
+	return filepath.Join(filepath.Dir(identityPath), ".revoked")
+}
+
+// readRevokedSentinel returns the persisted reason text + true when
+// the sentinel file exists AND has content. Any read error
+// short-circuits to "not revoked" — the worst case is the agent
+// tries (and fails) one more reconnect cycle, which is the pre-PR
+// behavior and not a regression.
+//
+// A zero-byte sentinel is treated as not-revoked: writeRevokedSentinel
+// always appends a newline, so an empty file is either a write that
+// failed mid-flight or someone hand-touched the path. Either way,
+// blocking startup on a reasonless sentinel would be a worse failure
+// mode than retrying once.
+func readRevokedSentinel(identityPath string) (string, bool) {
+	b, err := os.ReadFile(revokedSentinelPath(identityPath))
+	if err != nil {
+		// IsNotExist is the normal "no sentinel here" path. Any
+		// OTHER error (EACCES from a maintainer chmod-ing the file
+		// to 0000, EIO from a flaky disk) gets surfaced on stderr
+		// so the operator sees why the early-exit branch was
+		// silently skipped rather than discovering it from a
+		// runaway reconnect loop. We still return not-revoked so
+		// the agent attempts to start — the alternative (hard-fail
+		// on unreadable sentinel) trades one footgun for another.
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "edge-agent: read .revoked sentinel: %v — continuing as not-revoked\n", err)
+		}
+		return "", false
+	}
+	reason := string(bytes.TrimSpace(b))
+	if reason == "" {
+		return "", false
+	}
+	return reason, true
+}
+
+// maxSentinelBytes caps the on-disk reason. The gateway-side reason
+// is short today ("node deleted via /api/seller/edge/nodes"), but a
+// future protocol bump that lets the gateway send arbitrary operator
+// notes would otherwise let a compromised upstream write unbounded
+// data into the supplier's identity dir. 4 KiB covers any reasonable
+// human-readable reason and stays well under filesystem-block
+// thresholds.
+const maxSentinelBytes = 4 * 1024
+
+// writeRevokedSentinel persists the reason text so a maintainer can
+// `cat .revoked` and see why the agent stopped. Best-effort: a write
+// failure means the next boot will retry one more time, which is
+// fine. 0600 because the file lives in the identity dir which we
+// already enforce as private.
+//
+// Truncates oversize reasons rather than rejecting — the sentinel's
+// presence is what matters for the early-exit decision; the reason
+// is operator-facing context.
+func writeRevokedSentinel(identityPath, reason string) error {
+	payload := reason + "\n"
+	if len(payload) > maxSentinelBytes {
+		payload = payload[:maxSentinelBytes-len("…(truncated)\n")] + "…(truncated)\n"
+	}
+	return os.WriteFile(revokedSentinelPath(identityPath), []byte(payload), 0o600)
 }
 
 // nextBackoff is the conventional doubling-with-cap. Stays linear in
