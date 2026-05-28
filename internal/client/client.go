@@ -75,14 +75,20 @@ type RequestHandler func(req protocol.RequestBody, send func(protocol.ChunkBody)
 type Client struct {
 	cfg Config
 
-	// Mutex protects sendQ access during Close() — the send method
-	// itself uses the channel for ordering. We need the mutex only
-	// to close the channel exactly once.
-	mu       sync.Mutex
-	conn     *websocket.Conn
-	sendQ    chan protocol.Frame
-	closed   bool
-	closeErr error
+	// closeOnce wraps the conn-shutdown + done-fire path so multiple
+	// callers (Run's defer, the reader/writer loop's own error
+	// returns, and any external Close()) can race in without
+	// double-closing the conn or done channel.
+	closeOnce sync.Once
+	conn      *websocket.Conn
+	sendQ     chan protocol.Frame
+	// done is closed exactly once by closeConn. Senders (SendLog,
+	// sendFrame) select on it so a concurrent close doesn't panic
+	// them with "send on closed channel" — instead the send arm
+	// loses the race and the sender exits via the done arm.
+	// writerLoop also selects on it to exit cleanly after closeConn
+	// fires from outside its own error path.
+	done chan struct{}
 
 	// welcomeReceived flips true after the gateway accepts the Auth
 	// frame and we successfully parse a Welcome back. The reconnect
@@ -118,6 +124,7 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		cfg:   cfg,
 		sendQ: make(chan protocol.Frame, 32),
+		done:  make(chan struct{}),
 	}, nil
 }
 
@@ -378,14 +385,27 @@ func (c *Client) SendLog(level, msg string) {
 	// We don't use sendFrame's 5s timeout here because logs fire
 	// from inside the log package's mutex and a 5s stall is a
 	// deadlock vector.
+	//
+	// The done arm covers the close race: if closeConn fires between
+	// the caller's currentClient.Load() and this select, the done
+	// channel races against the send arm. Without it, a concurrent
+	// closeConn that closed sendQ (older design) would panic the
+	// sender with "send on closed channel". Now sendQ is never
+	// closed and done is the close signal.
 	select {
 	case c.sendQ <- frame:
+	case <-c.done:
 	default:
 	}
 }
 
 // writerLoop drains sendQ + heartbeat ticker. Single writer
 // goroutine per gorilla/websocket's concurrency rule.
+//
+// Exits on ctx cancellation or done (closeConn fired). The done arm
+// replaces the older "sendQ closed → ok=false → return" pattern: we
+// no longer close sendQ at all, because senders (SendLog, sendFrame)
+// would panic on a closed channel under reconnect-heavy load.
 func (c *Client) writerLoop(ctx context.Context) error {
 	ticker := time.NewTicker(protocol.HeartbeatInterval)
 	defer ticker.Stop()
@@ -393,10 +413,9 @@ func (c *Client) writerLoop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case frame, ok := <-c.sendQ:
-			if !ok {
-				return nil // closed
-			}
+		case <-c.done:
+			return nil
+		case frame := <-c.sendQ:
 			if err := c.writeFrame(frame); err != nil {
 				return err
 			}
@@ -422,31 +441,42 @@ func (c *Client) writeFrame(frame protocol.Frame) error {
 // the frame on a full queue with a stderr warning — saturation here
 // usually means the gateway-bound link is stalled, which the writer
 // loop will surface as a write error and tear the session down.
+//
+// The done arm is the close-race guard: a concurrent closeConn must
+// not panic an in-flight send. With sendQ never closed (see the
+// writerLoop comment) done is the canonical "we're shutting down"
+// signal for senders.
 func (c *Client) sendFrame(frame protocol.Frame) error {
 	select {
 	case c.sendQ <- frame:
 		return nil
+	case <-c.done:
+		return errors.New("client closed")
 	case <-time.After(5 * time.Second):
 		return errors.New("send queue full for 5s; gateway link stalled")
 	}
 }
 
+// closeConn tears down the WS session exactly once. Idempotent via
+// sync.Once — Run's defer, the reader/writer loop returns, and any
+// external Close() can all race in without double-closing the conn.
+//
+// Closing the done channel signals every active sender to bail out;
+// sendQ is intentionally NOT closed, because a closed channel +
+// concurrent sender = panic, which under reconnect-heavy load is
+// exactly the failure mode we used to hit.
 func (c *Client) closeConn() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return
-	}
-	c.closed = true
-	close(c.sendQ)
-	if c.conn != nil {
-		_ = c.conn.WriteControl(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-			time.Now().Add(time.Second),
-		)
-		_ = c.conn.Close()
-	}
+	c.closeOnce.Do(func() {
+		close(c.done)
+		if c.conn != nil {
+			_ = c.conn.WriteControl(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+				time.Now().Add(time.Second),
+			)
+			_ = c.conn.Close()
+		}
+	})
 }
 
 // wsEndpoint derives wss://host/edge/connect from the configured

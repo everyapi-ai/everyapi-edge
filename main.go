@@ -153,12 +153,25 @@ func runWithReconnect(
 		// token AND no Ed25519 pubkey on file server-side — an
 		// unrecoverable state that requires manual operator
 		// intervention.
-		if cli.WelcomeReceived() {
+		welcomed := cli.WelcomeReceived()
+		if welcomed {
 			registrationToken = ""
 		}
 
 		if runErr == nil || errors.Is(runErr, context.Canceled) {
 			return runErr
+		}
+		// Reset the backoff after a stable session so the next
+		// disconnect retries fast. Without this the agent
+		// accumulates exponential delay across the lifetime of the
+		// process — a fleet that hit a transient gateway outage
+		// would reconnect slowly even after stability returns.
+		// "Stable" = the gateway accepted Auth and sent Welcome;
+		// failures before Welcome (bad token, signature mismatch,
+		// dial refused) keep the backoff growing so we don't hammer
+		// a refusing gateway.
+		if welcomed {
+			backoff = time.Second
 		}
 		log.Printf("session ended: %v (reconnecting in %s)", runErr, backoff)
 

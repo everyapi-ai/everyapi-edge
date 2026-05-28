@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -143,5 +144,72 @@ func TestEncodedPubkey(t *testing.T) {
 	}
 	if string(decoded) != string(id.Public) {
 		t.Fatal("EncodedPubkey doesn't round-trip")
+	}
+}
+
+// TestLoadRefusesSymlink pins the symlink guard added with the perm
+// check. Lstat (not Stat) is what makes this work: a symlink pointing
+// at a 0600 file owned by another user would otherwise pass the perm
+// check by proxy.
+func TestLoadRefusesSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows symlink semantics differ + perm check is skipped
+		// there; the guard is Unix-only by design.
+		t.Skip("symlink guard is Unix-only by design")
+	}
+	dir := t.TempDir()
+	realPath := filepath.Join(dir, "real.json")
+	linkPath := filepath.Join(dir, "id.json")
+
+	// Generate the real file at 0600, then symlink id.json → real.json.
+	_, err := LoadOrGenerate(realPath)
+	if err != nil {
+		t.Fatalf("seed real identity: %v", err)
+	}
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := LoadOrGenerate(linkPath); err == nil {
+		t.Fatal("expected error loading via symlink, got nil")
+	}
+}
+
+// TestLoadRefusesWorldReadableFile pins the perm-validation gate:
+// `cp -p`, a manual chmod, or a sloppy backup restore can widen the
+// 0600 the package wrote on first generate. The agent must refuse to
+// load a key file that other users on the host can read — the
+// private key is the only thing standing between a co-tenant and
+// gateway impersonation of this node.
+func TestLoadRefusesWorldReadableFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "id.json")
+	// Generate a valid file first.
+	_, err := LoadOrGenerate(path)
+	if err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+	// Widen the perms behind the agent's back.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod 0644: %v", err)
+	}
+	_, err = LoadOrGenerate(path)
+	if err == nil {
+		t.Fatal("expected error loading 0644 identity file, got nil")
+	}
+	// Loosen again to group-readable only — also a fail per the
+	// `mode & 0o077 != 0` rule.
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatalf("chmod 0640: %v", err)
+	}
+	_, err = LoadOrGenerate(path)
+	if err == nil {
+		t.Fatal("expected error loading 0640 identity file, got nil")
+	}
+	// Tighten back to 0600 — must load successfully again.
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("chmod 0600: %v", err)
+	}
+	if _, err := LoadOrGenerate(path); err != nil {
+		t.Fatalf("0600 file should load: %v", err)
 	}
 }
