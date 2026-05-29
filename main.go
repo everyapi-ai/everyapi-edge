@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/everyapi-ai/everyapi-edge/internal/client"
 	"github.com/everyapi-ai/everyapi-edge/internal/config"
@@ -275,10 +276,28 @@ const maxSentinelBytes = 4 * 1024
 // Truncates oversize reasons rather than rejecting — the sentinel's
 // presence is what matters for the early-exit decision; the reason
 // is operator-facing context.
+//
+// Truncation walks back to a UTF-8 rune boundary so we never write
+// half a rune into .revoked. The operator-facing reason can carry
+// multi-byte content from any locale (or "…" itself, which is 3
+// bytes), and a malformed-by-truncation file would render as a
+// replacement character or worse in `cat`.
 func writeRevokedSentinel(identityPath, reason string) error {
 	payload := reason + "\n"
 	if len(payload) > maxSentinelBytes {
-		payload = payload[:maxSentinelBytes-len("…(truncated)\n")] + "…(truncated)\n"
+		const trunc = "…(truncated)\n"
+		budget := maxSentinelBytes - len(trunc)
+		// Walk back from the byte-budget cut until we stand ON a
+		// rune-start byte, then slice exclusive at that index so
+		// the preserved prefix ends on the last byte of the
+		// PREVIOUS complete rune. budget==0 is the degenerate exit
+		// (entire payload was continuation bytes, impossible in
+		// real UTF-8 input but defensive); payload[:0] + trunc is
+		// just the marker, still valid UTF-8 and under cap.
+		for budget > 0 && !utf8.RuneStart(payload[budget]) {
+			budget--
+		}
+		payload = payload[:budget] + trunc
 	}
 	return os.WriteFile(revokedSentinelPath(identityPath), []byte(payload), 0o600)
 }

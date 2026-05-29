@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestRevokedSentinelRoundTrip pins the write + read cycle for the
@@ -102,5 +105,55 @@ func TestRevokedSentinelEmptyFileNotRevoked(t *testing.T) {
 	reason, revoked = readRevokedSentinel(identityPath)
 	if revoked {
 		t.Fatalf("whitespace-only sentinel should NOT be treated as revoked; got reason=%q", reason)
+	}
+}
+
+// TestRevokedSentinelTruncatesOnRuneBoundary pins the UTF-8 safety of
+// the truncation path. A reason longer than maxSentinelBytes (e.g. an
+// operator-friendly note in a non-ASCII locale, or one already
+// containing "…") must NOT be sliced mid-rune — the file's
+// human-readable contract is `cat .revoked`, and a half-rune writes
+// a U+FFFD replacement character at the seam or worse.
+//
+// Runs three subtests with different ASCII prefix lengths so the
+// byte offset `maxSentinelBytes - len(trunc)` lands at each of the
+// three possible positions inside a 3-byte rune (% 3 == 0, 1, 2).
+// A single fixed-length run would only exercise one alignment and a
+// regression that broke the off-by-one cases would slip through —
+// see review of #393 for the specific concern.
+func TestRevokedSentinelTruncatesOnRuneBoundary(t *testing.T) {
+	for _, prefixLen := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("prefix=%d", prefixLen), func(t *testing.T) {
+			dir := t.TempDir()
+			identityPath := filepath.Join(dir, "identity.json")
+
+			// "数" is 3 bytes (E6 95 B0). The ASCII prefix shifts
+			// every subsequent rune's start by prefixLen bytes,
+			// so the cut at maxSentinelBytes - len("…(truncated)\n")
+			// hits a different position inside a rune for each
+			// run.
+			reason := strings.Repeat("A", prefixLen) + strings.Repeat("数", maxSentinelBytes)
+			if err := writeRevokedSentinel(identityPath, reason); err != nil {
+				t.Fatalf("writeRevokedSentinel: %v", err)
+			}
+
+			b, err := os.ReadFile(revokedSentinelPath(identityPath))
+			if err != nil {
+				t.Fatalf("read sentinel: %v", err)
+			}
+			if !utf8.Valid(b) {
+				t.Fatalf("truncated sentinel contains invalid UTF-8; %d bytes written\nhead=%q\ntail=%q",
+					len(b), string(b[:min(40, len(b))]), string(b[max(0, len(b)-40):]))
+			}
+			// Must end with the truncation marker so an operator
+			// running `cat .revoked` knows the reason was cut.
+			if !strings.HasSuffix(string(b), "…(truncated)\n") {
+				t.Fatalf("expected truncation suffix; got tail=%q", string(b[max(0, len(b)-20):]))
+			}
+			// And the byte length must respect the cap.
+			if len(b) > maxSentinelBytes {
+				t.Fatalf("sentinel exceeded maxSentinelBytes=%d; got %d", maxSentinelBytes, len(b))
+			}
+		})
 	}
 }
