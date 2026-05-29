@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -302,14 +303,37 @@ func writeRevokedSentinel(identityPath, reason string) error {
 	return os.WriteFile(revokedSentinelPath(identityPath), []byte(payload), 0o600)
 }
 
-// nextBackoff is the conventional doubling-with-cap. Stays linear in
-// the cap window so a persistent gateway outage doesn't drift to
-// minute-long wait times for a transient blip.
+// nextBackoff is the conventional doubling-with-cap WITH ±25%
+// jitter. Stays linear in the cap window so a persistent gateway
+// outage doesn't drift to minute-long wait times for a transient
+// blip.
+//
+// Jitter is the fleet-coordination concern: without it, 100 agents
+// that all lost contact at t=0 would all wake up at t=1s, 2s, 4s,
+// 8s, 16s, 30s, ... in lockstep, and every recovery attempt is a
+// thundering-herd against the just-recovered gateway. ±25% spreads
+// the retries so the gateway sees a smooth load curve as the fleet
+// reconnects. 25% is enough to break sync; tighter risks chasing
+// hot spots in time; wider distorts the doubling shape too much
+// for an operator reading the log to recognise the backoff pattern.
+//
+// math/rand is fine here — we're not seeding cryptographic decisions,
+// just breaking lockstep on a recovering fleet. Go 1.20+'s default
+// rand source is per-call seeded; no global state to coordinate.
 func nextBackoff(b time.Duration) time.Duration {
 	const max = 30 * time.Second
 	doubled := b * 2
 	if doubled > max {
-		return max
+		doubled = max
 	}
-	return doubled
+	// ±25% jitter window around the doubled value.
+	jitter := time.Duration((rand.Float64() - 0.5) * 0.5 * float64(doubled))
+	out := doubled + jitter
+	if out < time.Second {
+		out = time.Second // never under the floor
+	}
+	if out > max {
+		out = max // never over the cap
+	}
+	return out
 }

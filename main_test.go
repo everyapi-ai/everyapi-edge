@@ -7,8 +7,65 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
+
+// TestNextBackoffJittered pins the jitter spread + cap/floor.
+// Calling nextBackoff(prev) 1000 times from a stable prev should
+// produce values in [prev*1.5, prev*2.5] (the ±25% window around
+// the doubled value), clamped to [1s, 30s]. Without jitter the
+// values were always exactly 2×prev — a thundering-herd risk for a
+// fleet that all lost contact at the same instant. The assertion
+// here is a wide range so the test isn't flaky on RNG seeds.
+func TestNextBackoffJittered(t *testing.T) {
+	const prev = 4 * time.Second
+	const trials = 1000
+	distinct := map[time.Duration]bool{}
+	for i := 0; i < trials; i++ {
+		got := nextBackoff(prev)
+		// Doubled is 8s; jitter window ±25% of 8s = ±2s; floor 1s, cap 30s.
+		if got < time.Second || got > 30*time.Second {
+			t.Fatalf("backoff out of [1s, 30s]: got %v", got)
+		}
+		if got < 5*time.Second || got > 11*time.Second {
+			// Wide-but-not-trivial: catches a regression that
+			// drops the jitter (always 8s) OR overshoots the
+			// window. 5s..11s comfortably brackets 8s±25%=6..10s
+			// with slack so the test isn't seed-flaky.
+			t.Fatalf("backoff outside jitter window for prev=4s: got %v", got)
+		}
+		distinct[got] = true
+	}
+	if len(distinct) < 10 {
+		t.Fatalf("only %d distinct backoff values out of %d — jitter is not breaking lockstep", len(distinct), trials)
+	}
+}
+
+// TestNextBackoffCapHonoured pins the 30s cap. Doubling 30s with
+// jitter could overshoot if the clamp at the end of nextBackoff
+// fires after the jitter add — verify the cap holds.
+//
+// Also asserts the lower-bound at saturation: at prev=30s, doubled
+// clamps to 30s and jitter ±25% of doubled = ±7.5s, so the floor
+// after clamping is 22.5s — agents at the cap don't reconnect
+// faster than this. That's a known asymmetry (the ceiling clamp
+// truncates positive jitter while negative jitter passes through);
+// the test pins it so a refactor that breaks the floor surfaces
+// here, and so the asymmetry is documented next to the cap test.
+func TestNextBackoffCapHonoured(t *testing.T) {
+	const cap = 30 * time.Second
+	const expectedFloor = 22500 * time.Millisecond // cap - 25% of cap
+	for i := 0; i < 100; i++ {
+		got := nextBackoff(cap)
+		if got > cap {
+			t.Fatalf("backoff exceeded 30s cap: got %v", got)
+		}
+		if got < expectedFloor {
+			t.Fatalf("at cap, backoff dipped below expected floor of %v: got %v", expectedFloor, got)
+		}
+	}
+}
 
 // TestRevokedSentinelRoundTrip pins the write + read cycle for the
 // terminal-disconnect sentinel: a `node_revoked` Disconnect causes
