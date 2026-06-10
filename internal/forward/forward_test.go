@@ -7,15 +7,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 )
 
 func TestHandleRejectsUnknownPath(t *testing.T) {
 	f := New("http://localhost:11434")
-	_, err := f.Handle(protocol.RequestBody{Path: "/api/admin/exec"}, nopSend)
+	_, err := f.Handle(context.Background(), protocol.RequestBody{Path: "/api/admin/exec"}, nopSend)
 	if err == nil || err.Code != "path_not_allowed" {
 		t.Fatalf("expected path_not_allowed, got %+v", err)
 	}
@@ -35,7 +35,7 @@ func TestHandleForwardsAndStreamsBytes(t *testing.T) {
 	f := New(srv.URL)
 	var chunks []protocol.ChunkBody
 	send := func(c protocol.ChunkBody) error { chunks = append(chunks, c); return nil }
-	done, errBody := f.Handle(protocol.RequestBody{
+	done, errBody := f.Handle(context.Background(), protocol.RequestBody{
 		Method: http.MethodPost,
 		Path:   "/v1/chat/completions",
 		Body:   json.RawMessage(`{"model":"llama"}`),
@@ -78,7 +78,7 @@ func TestHandleEmitsAtLeastOneChunkOnEmptyBody(t *testing.T) {
 	f := New(srv.URL)
 	var chunks []protocol.ChunkBody
 	send := func(c protocol.ChunkBody) error { chunks = append(chunks, c); return nil }
-	_, errBody := f.Handle(protocol.RequestBody{Path: "/v1/chat/completions"}, send)
+	_, errBody := f.Handle(context.Background(), protocol.RequestBody{Path: "/v1/chat/completions"}, send)
 	if errBody != nil {
 		t.Fatalf("Handle: %+v", errBody)
 	}
@@ -93,7 +93,7 @@ func TestHandleEmitsAtLeastOneChunkOnEmptyBody(t *testing.T) {
 func TestHandleSurfacesUpstreamUnreachable(t *testing.T) {
 	// Point at a closed port — DialContext should fail quickly.
 	f := New("http://127.0.0.1:1")
-	_, errBody := f.Handle(protocol.RequestBody{Path: "/v1/chat/completions"}, nopSend)
+	_, errBody := f.Handle(context.Background(), protocol.RequestBody{Path: "/v1/chat/completions"}, nopSend)
 	if errBody == nil || errBody.Code != "upstream_unreachable" {
 		t.Fatalf("expected upstream_unreachable, got %+v", errBody)
 	}
@@ -160,17 +160,33 @@ func TestUsageScannerHandlesBufferOverflow(t *testing.T) {
 	}
 }
 
-func TestContextNotPlumbedYet(t *testing.T) {
-	// Reminder test: until we plumb ctx through Handle, the
-	// requestTimeout constant is the only watchdog. Keep this
-	// stub so a future refactor doesn't forget to add real
-	// context cancellation.
-	if reqTimeout() == 0 {
-		t.Fatal("requestTimeout sentinel is zero")
+func TestHandleAbortsOnCancelledContext(t *testing.T) {
+	// A hung upstream + a cancelled session context must abort the
+	// in-flight forwarded request promptly instead of streaming
+	// forever — this is the goroutine/HTTP leak the per-request
+	// context guards.
+	reached := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(reached)
+		<-r.Context().Done() // hang until the client aborts the request
+	}))
+	defer srv.Close()
+
+	f := New(srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-reached // cancel only once the request is in flight upstream
+		cancel()
+	}()
+
+	start := time.Now()
+	_, errBody := f.Handle(ctx, protocol.RequestBody{Path: "/v1/chat/completions"}, nopSend)
+	if errBody == nil {
+		t.Fatal("expected an error after ctx cancellation, got nil")
 	}
-	// Silence linter; ctx unused in current implementation.
-	_ = context.Background
-	_ = strings.TrimSpace
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Handle did not abort promptly on ctx cancel: took %s", elapsed)
+	}
 }
 
 func nopSend(protocol.ChunkBody) error { return nil }

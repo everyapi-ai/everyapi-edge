@@ -60,6 +60,15 @@ type Config struct {
 	// HTTPClient is used for the challenge endpoint. Defaulted in
 	// New() if nil; injectable for tests.
 	HTTPClient *http.Client
+	// MaxConcurrentRequests caps how many inbound Request frames the
+	// agent forwards at once. A buggy or hostile gateway can stream
+	// Request frames faster than the local GPU drains them; without a
+	// cap each frame would spawn an unbounded goroutine + HTTP call to
+	// Ollama (resource exhaustion on the supplier host). Requests past
+	// the cap are rejected immediately with a "node_busy" Error frame
+	// (the gateway retries them on another channel/node). Defaulted in
+	// New() if <= 0.
+	MaxConcurrentRequests int
 }
 
 // RequestHandler is what main.go installs to forward inbound
@@ -67,7 +76,19 @@ type Config struct {
 // that emits Chunk frames; the handler returns a Done frame body
 // when finished or an Error if forwarding failed. Implementations
 // run in their own goroutine so concurrent requests don't serialise.
-type RequestHandler func(req protocol.RequestBody, send func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody)
+//
+// ctx is the session context: it is cancelled when the WS session
+// ends (clean shutdown or read error), so a long-running forward can
+// abort its in-flight upstream call instead of leaking past the
+// connection it belongs to.
+type RequestHandler func(ctx context.Context, req protocol.RequestBody, send func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody)
+
+// defaultMaxConcurrentRequests bounds in-flight forwarded requests
+// when Config.MaxConcurrentRequests is unset. A single BYO-GPU node
+// rarely benefits from deep concurrency (Ollama serialises on the
+// GPU anyway); the cap exists to stop a frame flood from spawning
+// unbounded goroutines, not to maximise throughput.
+const defaultMaxConcurrentRequests = 16
 
 // TerminalDisconnectError is the typed wrapper for a gateway-side
 // Disconnect frame whose Code marks the session as unrecoverable
@@ -106,6 +127,21 @@ type Client struct {
 	// fires from outside its own error path.
 	done chan struct{}
 
+	// sem bounds concurrent handleRequest goroutines (buffered to
+	// cfg.MaxConcurrentRequests). readerLoop try-acquires a slot before
+	// spawning a handler; on a full pool dispatch rejects the request
+	// with a node_busy Error frame instead of parking the reader (see
+	// dispatch for why blocking here would tear the session down).
+	sem chan struct{}
+	// wg tracks in-flight handlers so Run can drain them before
+	// returning — combined with session-ctx cancellation, no handler
+	// (or its upstream HTTP call) outlives the session it belongs to.
+	wg sync.WaitGroup
+	// inflight is the live handler count, surfaced to the gateway in
+	// each heartbeat (HeartbeatBody.ActiveReqs) so it has back-pressure
+	// visibility into how loaded this node is.
+	inflight atomic.Int64
+
 	// welcomeReceived flips true after the gateway accepts the Auth
 	// frame and we successfully parse a Welcome back. The reconnect
 	// loop in main.go reads this via WelcomeReceived() to decide
@@ -137,10 +173,14 @@ func New(cfg Config) (*Client, error) {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 15 * time.Second}
 	}
+	if cfg.MaxConcurrentRequests <= 0 {
+		cfg.MaxConcurrentRequests = defaultMaxConcurrentRequests
+	}
 	return &Client{
 		cfg:   cfg,
 		sendQ: make(chan protocol.Frame, 32),
 		done:  make(chan struct{}),
+		sem:   make(chan struct{}, cfg.MaxConcurrentRequests),
 	}, nil
 }
 
@@ -151,13 +191,41 @@ func (c *Client) Run(ctx context.Context) error {
 	if err := c.connectAndAuth(ctx); err != nil {
 		return err
 	}
+	// sessionCtx cancels when Run returns for ANY reason (read error,
+	// write error, or parent cancel). In-flight handlers derive their
+	// upstream-call deadline from it, so a gateway-side disconnect
+	// aborts their HTTP work instead of leaving it to run against the
+	// local Ollama after the session is gone.
+	sessionCtx, cancel := context.WithCancel(ctx)
+	// readerDone closes only after readerLoop has fully returned.
+	// Shutdown MUST wait on it before wg.Wait(): every wg.Add happens
+	// on the reader goroutine (inside dispatch), so starting wg.Wait
+	// while the reader is still running races Add against Wait —
+	// either a "sync: WaitGroup misuse" panic or a Wait that returns
+	// while a freshly-spawned handler is still in flight.
+	readerDone := make(chan struct{})
+	// Defers run LIFO: closeConn first (close done + conn → unblock a
+	// parked ReadMessage and any parked sender), then wait for the
+	// reader to exit (after which no further wg.Add can happen), then
+	// cancel (abort in-flight upstream calls), then wg.Wait (drain
+	// handlers) so Run never returns while goroutines it spawned are
+	// still touching the connection.
+	defer c.wg.Wait()
+	defer cancel()
+	defer func() { <-readerDone }()
 	defer c.closeConn()
 
 	readErr := make(chan error, 1)
 	writeErr := make(chan error, 1)
 
-	go func() { readErr <- c.readerLoop(ctx) }()
-	go func() { writeErr <- c.writerLoop(ctx) }()
+	go func() {
+		// readErr is buffered, so the send completes even when Run is
+		// already past its select; readerDone then closes strictly
+		// after readerLoop (and any dispatch it was inside) returned.
+		defer close(readerDone)
+		readErr <- c.readerLoop(sessionCtx)
+	}()
+	go func() { writeErr <- c.writerLoop(sessionCtx) }()
 
 	select {
 	case err := <-readErr:
@@ -326,7 +394,12 @@ func (c *Client) readerLoop(ctx context.Context) error {
 			// Liveness only — read deadline already reset above.
 			continue
 		case protocol.FrameRequest:
-			go c.handleRequest(frame)
+			if err := c.dispatch(ctx, frame); err != nil {
+				if errors.Is(err, errReaderClosed) {
+					return nil
+				}
+				return err
+			}
 		case protocol.FrameDisconnect:
 			var body protocol.DisconnectBody
 			if uErr := json.Unmarshal(frame.Body, &body); uErr != nil {
@@ -359,10 +432,82 @@ func (c *Client) readerLoop(ctx context.Context) error {
 	}
 }
 
+// errReaderClosed is the internal sentinel dispatch returns when the
+// session is closing via the done channel (vs ctx cancellation). The
+// reader loop maps it to a clean (nil) exit, matching the original
+// inline behavior where a done-close meant "stop, no error".
+var errReaderClosed = errors.New("reader closed")
+
+// errCodeNodeBusy is the Error-frame code dispatch emits when the
+// concurrency pool is full. Gateway-side this surfaces as a pre-chunk
+// FrameError: waitForFirstChunk (relay/channel/edge/adaptor.go) fails
+// the DoRequest before any byte reaches the buyer, the relay wraps it
+// as a retryable 500 (ErrorCodeDoRequestFailed), and shouldRetry
+// reroutes the request to another channel/node.
+const errCodeNodeBusy = "node_busy"
+
+// dispatch try-acquires a concurrency slot and starts a handler
+// goroutine for an inbound Request frame. It MUST NOT block on a full
+// pool: the WS read deadline (HeartbeatTimeout, 30s) is only refreshed
+// by successful reads, while forwarded requests run for minutes — a
+// reader parked here would let the deadline expire, so the next
+// ReadMessage after a slot freed would fail with an i/o timeout and
+// tear the whole session down (aborting every in-flight handler).
+// Parking would also stall Disconnect-frame handling (incl.
+// node_revoked) for the duration of the saturation. Instead, a full
+// pool rejects the request immediately with a node_busy Error frame
+// and the reader keeps draining; the gateway retries the buyer request
+// on another node (see errCodeNodeBusy). Returns ctx.Err() if the
+// session context was cancelled, errReaderClosed if closeConn fired,
+// or nil once the frame was either handed to a handler or rejected.
+func (c *Client) dispatch(ctx context.Context, frame protocol.Frame) error {
+	select {
+	case c.sem <- struct{}{}:
+		// Slot acquired — but if done/ctx became ready at the same
+		// time, select picks an arm at random and can land here
+		// mid-shutdown. Re-check before wg.Add so no handler spawns
+		// once the session is closing (Run's reader-exit barrier makes
+		// a late Add safe for wg.Wait, but the handler would only burn
+		// an upstream call against a dead session).
+		select {
+		case <-c.done:
+			<-c.sem
+			return errReaderClosed
+		case <-ctx.Done():
+			<-c.sem
+			return ctx.Err()
+		default:
+		}
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return errReaderClosed
+	default:
+		// Pool full. Reject without blocking the reader: emitError →
+		// sendFrame would park up to 5s if sendQ is saturated, and a
+		// parked reader stops refreshing the WS read deadline — the very
+		// stall this reject path exists to avoid. Drop the reject if the
+		// queue is full; the gateway's first-chunk wait still times out
+		// and reroutes, so it degrades gracefully.
+		c.trySendError(frame.ID, errCodeNodeBusy,
+			fmt.Sprintf("node at max concurrent requests (%d)", c.cfg.MaxConcurrentRequests))
+		return nil
+	}
+	c.wg.Add(1)
+	c.inflight.Add(1)
+	go func() {
+		defer c.wg.Done()
+		defer c.inflight.Add(-1)
+		defer func() { <-c.sem }()
+		c.handleRequest(ctx, frame)
+	}()
+	return nil
+}
+
 // handleRequest is the per-request goroutine: parse, hand to the
 // installed Handler, emit Chunk frames as the handler streams, and
 // terminate with Done/Error.
-func (c *Client) handleRequest(frame protocol.Frame) {
+func (c *Client) handleRequest(ctx context.Context, frame protocol.Frame) {
 	if c.cfg.Handler == nil {
 		// No handler installed — emit an immediate Error so the
 		// gateway doesn't wait HeartbeatTimeout for a dead request.
@@ -381,7 +526,7 @@ func (c *Client) handleRequest(frame protocol.Frame) {
 		}
 		return c.sendFrame(protocol.Frame{Type: protocol.FrameChunk, ID: frame.ID, Body: chunkJSON})
 	}
-	done, errBody := c.cfg.Handler(body, send)
+	done, errBody := c.cfg.Handler(ctx, body, send)
 	if errBody != nil {
 		c.emitError(frame.ID, errBody.Code, errBody.Message)
 		return
@@ -391,10 +536,29 @@ func (c *Client) handleRequest(frame protocol.Frame) {
 }
 
 // emitError centralises the Error-frame send so all error paths
-// produce the same envelope.
+// produce the same envelope. Used from handler goroutines, where the
+// sendFrame 5s timeout is acceptable.
 func (c *Client) emitError(reqID, code, msg string) {
 	errJSON, _ := json.Marshal(protocol.ErrorBody{Code: code, Message: msg})
 	_ = c.sendFrame(protocol.Frame{Type: protocol.FrameError, ID: reqID, Body: errJSON})
+}
+
+// trySendError enqueues an Error frame without ever blocking the
+// caller — the node_busy reject path runs on the reader goroutine,
+// where the sendFrame 5s timeout would stall reads and risk the WS
+// read deadline expiring. Mirrors SendLog's non-blocking enqueue:
+// drop the frame if sendQ is full or the client is closing.
+func (c *Client) trySendError(reqID, code, msg string) {
+	errJSON, err := json.Marshal(protocol.ErrorBody{Code: code, Message: msg})
+	if err != nil {
+		return
+	}
+	frame := protocol.Frame{Type: protocol.FrameError, ID: reqID, Body: errJSON}
+	select {
+	case c.sendQ <- frame:
+	case <-c.done:
+	default:
+	}
 }
 
 // SendLog pushes a log line to the gateway. Non-blocking with a tight
@@ -458,7 +622,16 @@ func (c *Client) writerLoop(ctx context.Context) error {
 				return err
 			}
 		case <-ticker.C:
+			// Carry the live in-flight count so the gateway has
+			// back-pressure visibility; body is best-effort, a marshal
+			// failure just sends a bare heartbeat (liveness still works).
 			beat := protocol.Frame{Type: protocol.FrameHeartbeat}
+			if body, err := json.Marshal(protocol.HeartbeatBody{
+				NowUnixMs:  time.Now().UnixMilli(),
+				ActiveReqs: int(c.inflight.Load()),
+			}); err == nil {
+				beat.Body = body
+			}
 			if err := c.writeFrame(beat); err != nil {
 				return err
 			}

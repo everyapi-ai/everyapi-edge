@@ -13,6 +13,7 @@ package forward
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -86,7 +87,7 @@ var allowedPaths = map[string]bool{
 // in ChunkBytes-sized batches, and returns Done with the token
 // counts parsed off Ollama's final SSE event (when streaming) or
 // JSON body (when not).
-func (f *Forwarder) Handle(req protocol.RequestBody, send func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
+func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
 	if !allowedPaths[req.Path] {
 		return protocol.DoneBody{}, &protocol.ErrorBody{
 			Code:    "path_not_allowed",
@@ -97,8 +98,15 @@ func (f *Forwarder) Handle(req protocol.RequestBody, send func(protocol.ChunkBod
 		req.Method = http.MethodPost
 	}
 
+	// Bound the whole forwarded request: caps a hung or slow upstream
+	// (and aborts immediately if the session ctx is cancelled mid-call)
+	// so neither the goroutine nor the Ollama connection outlives the
+	// session. Matches the gateway's 5-min response watchdog.
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
 	url := f.OllamaURL + req.Path
-	hReq, err := http.NewRequest(req.Method, url, bytes.NewReader(req.Body))
+	hReq, err := http.NewRequestWithContext(ctx, req.Method, url, bytes.NewReader(req.Body))
 	if err != nil {
 		return protocol.DoneBody{}, &protocol.ErrorBody{Code: "request_build_failed", Message: err.Error()}
 	}
@@ -247,10 +255,3 @@ func (u *usageScanner) Tokens() (prompt int, completion int) {
 	}
 	return parsed.PromptTokens, parsed.CompletionTokens
 }
-
-// reqTimeout is exported as a function so a test can swap a shorter
-// deadline in. Currently unused — present for the next iteration
-// when we add a context-aware Handle.
-func reqTimeout() time.Duration { return requestTimeout }
-
-var _ = reqTimeout // keep the symbol around without lint noise

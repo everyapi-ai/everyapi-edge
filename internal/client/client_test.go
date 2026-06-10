@@ -3,12 +3,19 @@ package client
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/everyapi-ai/everyapi-edge/internal/identity"
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
@@ -229,4 +236,322 @@ func newTestClient(t *testing.T) *Client {
 		t.Fatalf("New: %v", err)
 	}
 	return c
+}
+
+// newCappedClient builds a client with MaxConcurrentRequests = cap and
+// a handler that signals `started` then parks until `release` closes —
+// the shared fixture for the saturation tests.
+func newCappedClient(t *testing.T, cap int, started chan struct{}, release chan struct{}) *Client {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	c, err := New(Config{
+		GatewayURL:            "https://localhost",
+		NodeID:                1,
+		Identity:              identity.Decoded{Public: pub, Private: priv},
+		MaxConcurrentRequests: cap,
+		Handler: func(_ context.Context, _ protocol.RequestBody, _ func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
+			started <- struct{}{}
+			<-release
+			return protocol.DoneBody{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return c
+}
+
+// TestDispatchBoundsConcurrency proves a Request-frame flood never
+// runs more than MaxConcurrentRequests handlers at once — the cap
+// that stops an unbounded goroutine + upstream-call leak when a buggy
+// or hostile gateway streams requests faster than the GPU drains them.
+// Requests past the cap are rejected with a node_busy Error frame
+// instead of queueing (see TestDispatchRejectsWhenSaturated for the
+// reject path itself).
+func TestDispatchBoundsConcurrency(t *testing.T) {
+	const cap = 2
+	started := make(chan struct{}, 16)
+	release := make(chan struct{})
+	c := newCappedClient(t, cap, started, release)
+
+	ctx := context.Background()
+	for i := 0; i < cap+2; i++ {
+		if dErr := c.dispatch(ctx, protocol.Frame{Type: protocol.FrameRequest, ID: "req", Body: []byte("{}")}); dErr != nil {
+			t.Fatalf("dispatch: %v", dErr)
+		}
+	}
+
+	// Exactly cap handlers run; the two dispatches past the cap were
+	// rejected (not queued), so no further handler may ever start.
+	for i := 0; i < cap; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("handler %d did not start", i)
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("a handler started beyond MaxConcurrentRequests")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if got := c.inflight.Load(); got != cap {
+		t.Fatalf("inflight = %d, want %d", got, cap)
+	}
+	close(release)
+
+	c.wg.Wait()
+	if got := c.inflight.Load(); got != 0 {
+		t.Fatalf("inflight after drain = %d, want 0", got)
+	}
+}
+
+// TestDispatchRejectsWhenSaturated pins the non-blocking saturation
+// contract that keeps the session alive under load: with every slot
+// busy, dispatch must (1) return promptly instead of parking the
+// reader — a parked reader stops refreshing the WS read deadline
+// (HeartbeatTimeout = 30s) while forwarded requests run for minutes,
+// so the next ReadMessage after a slot freed would hit an expired
+// deadline and tear down the whole session — and (2) emit a node_busy
+// Error frame carrying the request's ID so the gateway can retry the
+// buyer request on another node.
+func TestDispatchRejectsWhenSaturated(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
+	c := newCappedClient(t, 1, started, release)
+
+	ctx := context.Background()
+	if err := c.dispatch(ctx, protocol.Frame{Type: protocol.FrameRequest, ID: "req-held", Body: []byte("{}")}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	// Once the handler signalled, its slot is held until `release`
+	// closes — the pool is deterministically full from here on.
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slot-holding handler did not start")
+	}
+
+	// Saturated dispatch must return promptly, not block until a slot
+	// frees. Run it in a goroutine so a regression to blocking
+	// semantics fails the budget below instead of hanging the test.
+	dispatched := make(chan error, 1)
+	go func() {
+		dispatched <- c.dispatch(ctx, protocol.Frame{Type: protocol.FrameRequest, ID: "req-busy", Body: []byte("{}")})
+	}()
+	select {
+	case err := <-dispatched:
+		if err != nil {
+			t.Fatalf("saturated dispatch returned error: %v", err)
+		}
+	case <-time.After(shortBudget):
+		t.Fatal("dispatch blocked on a full pool — reader would miss its read deadline")
+	}
+
+	// The rejected request must have produced a node_busy Error frame
+	// addressed to its request ID. writerLoop isn't running in this
+	// test, so the frame is still sitting in sendQ.
+	select {
+	case frame := <-c.sendQ:
+		if frame.Type != protocol.FrameError {
+			t.Fatalf("frame type = %q, want %q", frame.Type, protocol.FrameError)
+		}
+		if frame.ID != "req-busy" {
+			t.Fatalf("frame ID = %q, want %q", frame.ID, "req-busy")
+		}
+		var body protocol.ErrorBody
+		if err := json.Unmarshal(frame.Body, &body); err != nil {
+			t.Fatalf("unmarshal error body: %v", err)
+		}
+		if body.Code != errCodeNodeBusy {
+			t.Fatalf("error code = %q, want %q", body.Code, errCodeNodeBusy)
+		}
+	default:
+		t.Fatal("no Error frame enqueued for the rejected request")
+	}
+}
+
+// TestDispatchAfterCloseDoesNotSpawnHandler pins the post-acquire
+// shutdown re-check: when done is closed AND a semaphore slot is free,
+// both select arms are ready and Go picks one at random — the sem arm
+// can win mid-shutdown. dispatch must still notice done, release the
+// slot, and return errReaderClosed WITHOUT calling wg.Add or spawning
+// a handler. Looped so both arms get exercised across iterations.
+func TestDispatchAfterCloseDoesNotSpawnHandler(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		started := make(chan struct{}, 1)
+		release := make(chan struct{})
+		c := newCappedClient(t, 1, started, release)
+		c.closeConn()
+
+		err := c.dispatch(context.Background(), protocol.Frame{Type: protocol.FrameRequest, ID: "req", Body: []byte("{}")})
+		if !errors.Is(err, errReaderClosed) {
+			t.Fatalf("iter %d: dispatch after close = %v, want errReaderClosed", i, err)
+		}
+		// No handler may have spawned, and a slot grabbed by the sem
+		// arm must have been released again.
+		select {
+		case <-started:
+			t.Fatalf("iter %d: handler spawned after close", i)
+		default:
+		}
+		if got := len(c.sem); got != 0 {
+			t.Fatalf("iter %d: semaphore slot leaked: len(sem) = %d", i, got)
+		}
+		if got := c.inflight.Load(); got != 0 {
+			t.Fatalf("iter %d: inflight = %d, want 0", i, got)
+		}
+		// wg must be at zero — Wait returns immediately, no Add leaked.
+		c.wg.Wait()
+		close(release)
+	}
+}
+
+// TestRunSaturationAndShutdown is the end-to-end guard for both
+// session-stability fixes, against a real (in-process) WS gateway:
+//
+//  1. Saturation must not kill the session: with every slot held by a
+//     parked handler, over-cap Request frames are rejected with
+//     node_busy Error frames while the reader keeps draining (the old
+//     blocking dispatch would park the reader, let the read deadline
+//     expire, and tear the session down once a slot freed).
+//  2. Shutdown while saturated must neither panic nor leak handlers:
+//     Run's reader-exit barrier guarantees no wg.Add races wg.Wait
+//     ("sync: WaitGroup misuse"), and wg.Wait guarantees every handler
+//     exited before Run returns.
+//
+// Sequencing is condition-based (welcome → first node_busy at the
+// gateway → cancel → Run return); the timeouts are failure budgets,
+// not synchronization.
+func TestRunSaturationAndShutdown(t *testing.T) {
+	const maxConcurrent = 2
+	const floodFrames = 50 // > maxConcurrent ⇒ guarantees rejects
+
+	upgrader := websocket.Upgrader{}
+	busySeen := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Auth → Welcome handshake.
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		welcome, _ := json.Marshal(protocol.Frame{
+			Type: protocol.FrameWelcome,
+			Body: []byte(`{"session_id":"test","protocol_version":"1.0"}`),
+		})
+		if err := conn.WriteMessage(websocket.TextMessage, welcome); err != nil {
+			return
+		}
+		// Drain inbound (heartbeats, chunk/done frames, rejects) and
+		// flag the first node_busy Error frame. Exits on read error,
+		// i.e. when the agent closes the conn during shutdown.
+		drainDone := make(chan struct{})
+		go func() {
+			defer close(drainDone)
+			for {
+				_, raw, err := conn.ReadMessage()
+				if err != nil {
+					return
+				}
+				var f protocol.Frame
+				if json.Unmarshal(raw, &f) != nil || f.Type != protocol.FrameError {
+					continue
+				}
+				var body protocol.ErrorBody
+				if json.Unmarshal(f.Body, &body) == nil && body.Code == errCodeNodeBusy {
+					select {
+					case busySeen <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}()
+		// Flood more Request frames than the agent has slots.
+		for i := 0; i < floodFrames; i++ {
+			frame, _ := json.Marshal(protocol.Frame{
+				Type: protocol.FrameRequest,
+				ID:   fmt.Sprintf("req-%d", i),
+				Body: []byte(`{"method":"POST","path":"/v1/chat/completions"}`),
+			})
+			if err := conn.WriteMessage(websocket.TextMessage, frame); err != nil {
+				return
+			}
+		}
+		// Keep the session open until the agent disconnects.
+		<-drainDone
+	}))
+	defer srv.Close()
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	var live atomic.Int64
+	c, err := New(Config{
+		GatewayURL:            srv.URL,
+		NodeID:                1,
+		RegistrationToken:     "tok", // skip the challenge HTTP round-trip
+		Identity:              identity.Decoded{Public: pub, Private: priv},
+		MaxConcurrentRequests: maxConcurrent,
+		Handler: func(ctx context.Context, _ protocol.RequestBody, _ func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
+			// Simulate a long Ollama forward: park until the session
+			// context aborts it. Keeps every slot held so the flood
+			// deterministically saturates the pool.
+			live.Add(1)
+			defer live.Add(-1)
+			<-ctx.Done()
+			return protocol.DoneBody{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(ctx) }()
+
+	// A node_busy frame landing at the gateway proves: handshake
+	// completed, maxConcurrent handlers hold their slots, the reader
+	// processed an over-cap frame past them, and the session is still
+	// alive while saturated.
+	select {
+	case <-busySeen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no node_busy Error frame reached the gateway — reader blocked or session died under saturation")
+	}
+	if got := c.inflight.Load(); got != maxConcurrent {
+		t.Fatalf("inflight = %d, want %d", got, maxConcurrent)
+	}
+
+	// Shutdown mid-saturation: Run must return promptly (reader-exit
+	// barrier, then cancel unparks the handlers, then wg.Wait drains
+	// them) without a WaitGroup panic.
+	cancel()
+	select {
+	case err := <-runErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel — shutdown ordering deadlocked")
+	}
+	// Run's deferred wg.Wait ran before it returned, so no handler may
+	// still be live and no in-flight count may linger.
+	if got := live.Load(); got != 0 {
+		t.Fatalf("%d handler(s) still live after Run returned", got)
+	}
+	if got := c.inflight.Load(); got != 0 {
+		t.Fatalf("inflight = %d after Run returned, want 0", got)
+	}
 }
