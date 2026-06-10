@@ -10,6 +10,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 )
 
 // Config is what main.go assembles before constructing the client.
@@ -36,6 +38,11 @@ type Config struct {
 	GPUModel    string
 	VRAMTotalGB int
 	CountryISO2 string
+	// Workloads — capability declaration (EVERYAPI_WORKLOADS, comma-
+	// separated; see protocol.KnownWorkloads). Optional: the gateway
+	// only uses this to backfill nodes whose seller never declared
+	// workloads in the dashboard — the dashboard value wins otherwise.
+	Workloads []string
 }
 
 // Validate returns the first config defect, or nil if the agent
@@ -55,7 +62,22 @@ func (c Config) Validate() error {
 	if c.IdentityPath == "" {
 		return errors.New("EVERYAPI_IDENTITY_PATH must be set or the agent will not persist its keypair")
 	}
+	for _, w := range c.Workloads {
+		if !knownWorkload(w) {
+			return fmt.Errorf("EVERYAPI_WORKLOADS contains unknown value %q (allowed: %s)",
+				w, strings.Join(protocol.KnownWorkloads, ", "))
+		}
+	}
 	return nil
+}
+
+func knownWorkload(w string) bool {
+	for _, k := range protocol.KnownWorkloads {
+		if w == k {
+			return true
+		}
+	}
+	return false
 }
 
 // FromEnv reads every recognised variable. Missing optional fields
@@ -71,7 +93,25 @@ func FromEnv() Config {
 		GPUModel:          os.Getenv("EVERYAPI_GPU_MODEL"),
 		VRAMTotalGB:       int(parseInt64(os.Getenv("EVERYAPI_VRAM_GB"))),
 		CountryISO2:       strings.ToUpper(os.Getenv("EVERYAPI_COUNTRY")),
+		Workloads:         parseWorkloads(os.Getenv("EVERYAPI_WORKLOADS")),
 	}
+}
+
+// parseWorkloads splits the comma-separated declaration, trimming
+// whitespace and lowercasing so ".env hand-edits" like "Chat, CODING"
+// still parse. Unknown values survive parsing and fail Validate() —
+// dropping them here would hide the typo from the supplier.
+func parseWorkloads(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if w := strings.ToLower(strings.TrimSpace(part)); w != "" {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 func parseInt64(s string) int64 {

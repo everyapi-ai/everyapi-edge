@@ -37,6 +37,7 @@ services:
       EVERYAPI_GPU_MODEL: ${EVERYAPI_GPU_MODEL:-Apple Silicon}
       EVERYAPI_VRAM_GB: ${EVERYAPI_VRAM_GB:-}
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
+      EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
     extra_hosts:

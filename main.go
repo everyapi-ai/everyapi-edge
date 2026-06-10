@@ -98,8 +98,9 @@ func main() {
 
 	fwd := forward.New(cfg.OllamaURL)
 	meta := protocol.NodeMeta{
-		Name:     cfg.NodeName,
-		AgentVer: Version,
+		Name:      cfg.NodeName,
+		AgentVer:  Version,
+		Workloads: cfg.Workloads,
 		Hardware: protocol.Hardware{
 			GPUModel:    cfg.GPUModel,
 			VRAMTotalGB: cfg.VRAMTotalGB,
