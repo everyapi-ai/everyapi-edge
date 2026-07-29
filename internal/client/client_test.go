@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -23,6 +24,43 @@ import (
 
 func testFrame() protocol.Frame {
 	return protocol.Frame{Type: protocol.FrameLog, Body: []byte(`{"msg":"x"}`)}
+}
+
+func TestFetchChallengeRejectsOversizedSuccessResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.CopyN(w, endlessSpaces{}, maxChallengeResponseBytes+1)
+		_, _ = io.WriteString(w, `{"success":true,"data":{"challenge":"late"}}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{cfg: Config{GatewayURL: srv.URL, NodeID: 1, HTTPClient: srv.Client()}}
+	_, err := c.fetchChallenge(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "response exceeds") {
+		t.Fatalf("error = %v, want response-size error", err)
+	}
+}
+
+func TestFetchChallengeRejectsOversizedErrorResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.CopyN(w, endlessSpaces{}, maxChallengeResponseBytes+1)
+	}))
+	defer srv.Close()
+
+	c := &Client{cfg: Config{GatewayURL: srv.URL, NodeID: 1, HTTPClient: srv.Client()}}
+	_, err := c.fetchChallenge(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "response exceeds") {
+		t.Fatalf("error = %v, want response-size error", err)
+	}
+}
+
+type endlessSpaces struct{}
+
+func (endlessSpaces) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = ' '
+	}
+	return len(p), nil
 }
 
 // shortBudget is the "this should have returned by now" budget used

@@ -90,6 +90,22 @@ type RequestHandler func(ctx context.Context, req protocol.RequestBody, send fun
 // unbounded goroutines, not to maximise throughput.
 const defaultMaxConcurrentRequests = 16
 
+// The handshake challenge is a compact JSON envelope containing one nonce.
+// Keep a generous ceiling while preventing a hostile gateway or proxy from
+// growing the edge agent without bound before the WebSocket session starts.
+const maxChallengeResponseBytes int64 = 1 << 20
+
+func readChallengeResponse(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxChallengeResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxChallengeResponseBytes {
+		return nil, fmt.Errorf("response exceeds %d bytes", maxChallengeResponseBytes)
+	}
+	return data, nil
+}
+
 // TerminalDisconnectError is the typed wrapper for a gateway-side
 // Disconnect frame whose Code marks the session as unrecoverable
 // (currently: node_revoked). The reconnect loop in main.go checks
@@ -345,8 +361,11 @@ func (c *Client) fetchChallenge(ctx context.Context) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+	raw, err := readChallengeResponse(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read challenge response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("challenge endpoint returned %s: %s", resp.Status, string(raw))
 	}
 	var payload struct {
@@ -355,7 +374,7 @@ func (c *Client) fetchChallenge(ctx context.Context) (string, error) {
 			Challenge string `json:"challenge"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(raw, &payload); err != nil {
 		return "", fmt.Errorf("decode challenge response: %w", err)
 	}
 	if !payload.Success || payload.Data.Challenge == "" {
