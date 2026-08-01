@@ -65,3 +65,26 @@ func TestInstallerRejectsEnvAndPathInjection(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallerDocumentationUsesCDN(t *testing.T) {
+	script, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(script), "https://dl.everyapi.ai/edge/install.sh") {
+		t.Fatal("installer documentation must direct suppliers to the CDN")
+	}
+}
+
+func TestReleasePublishesInstallerToCDN(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/edge-release.yml")
+	if os.IsNotExist(err) {
+		t.Skip("release workflow exists only in the monorepo")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(workflow), `clients/edge/install.sh  "oss://${OSS_BUCKET}/edge/install.sh"`) {
+		t.Fatal("edge release must publish its installer to the CDN")
+	}
+}

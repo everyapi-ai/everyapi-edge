@@ -3,12 +3,12 @@
 #
 # Usage:
 #
-#   curl -fsSL https://everyapi.ai/edge/install.sh | bash -s -- \
+#   curl -fsSL https://dl.everyapi.ai/edge/install.sh | bash -s -- \
 #     --node-id 5 --token edgert_... [--gateway https://api.everyapi.ai] [--name home-rtx4090] [--gpu nvidia|rocm|macos]
 #
 # Or interactive (prompts for the values it doesn't get on the CLI):
 #
-#   curl -fsSL https://everyapi.ai/edge/install.sh | bash
+#   curl -fsSL https://dl.everyapi.ai/edge/install.sh | bash
 #
 # What it does:
 #
