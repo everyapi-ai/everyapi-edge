@@ -21,8 +21,9 @@
 #   5. Tails the agent logs for 15s so the supplier sees the "connected"
 #      line without having to look it up.
 #
-# The script is idempotent: re-running with the same args is a no-op
-# (existing directory + .env are preserved unless --force).
+# The script is idempotent: an existing verified EveryAPI Edge checkout is
+# fast-forwarded and its .env is atomically refreshed. It never recursively
+# deletes a caller-provided path.
 
 set -euo pipefail
 
@@ -81,6 +82,53 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+# ----- Validate untrusted CLI values ----------------------------------------
+
+# Values below are written to a Docker Compose .env file. Reject line breaks
+# before any filesystem or Docker operation so an argument cannot add a second
+# dotenv key (for example COMPOSE_FILE or a substituted image tag).
+validate_no_newlines() {
+  local _name="$1" _value="$2"
+  case "$_value" in
+    *$'\n'*|*$'\r'*) err "$_name must not contain line breaks"; exit 1 ;;
+  esac
+}
+validate_no_newlines "gateway" "$GATEWAY"
+validate_no_newlines "node name" "$NODE_NAME"
+validate_no_newlines "registration token" "$TOKEN"
+validate_no_newlines "install directory" "$INSTALL_DIR"
+
+# Refuse broad or ambiguous targets. In particular, the old --force path ran
+# rm -rf directly on --dir; values such as /, HOME, ., or a symlinked spelling
+# of one of those could destroy unrelated data. Resolve the parent/target now
+# and later accept an existing directory only when it is the expected checkout.
+case "$INSTALL_DIR" in
+  ""|/|.|..|-) err "refusing unsafe install directory: $INSTALL_DIR"; exit 1 ;;
+  -*) err "refusing unsafe install directory beginning with '-': $INSTALL_DIR"; exit 1 ;;
+esac
+INSTALL_PARENT=$(dirname -- "$INSTALL_DIR")
+INSTALL_LEAF=$(basename -- "$INSTALL_DIR")
+case "$INSTALL_LEAF" in
+  ""|.|..) err "refusing unsafe install directory: $INSTALL_DIR"; exit 1 ;;
+esac
+if [ ! -d "$INSTALL_PARENT" ]; then
+  err "install directory parent does not exist: $INSTALL_PARENT"
+  exit 1
+fi
+CANON_PARENT=$(cd "$INSTALL_PARENT" && pwd -P)
+if [ -d "$INSTALL_DIR" ]; then
+  CANON_TARGET=$(cd "$INSTALL_DIR" && pwd -P)
+else
+  CANON_TARGET="$CANON_PARENT/$INSTALL_LEAF"
+fi
+CURRENT_DIR=$(pwd -P)
+case "$CANON_TARGET" in
+  /|"${HOME:-}"|"$CURRENT_DIR")
+    err "refusing unsafe install directory: $CANON_TARGET"
+    exit 1
+    ;;
+esac
 
 # ----- Prerequisites ---------------------------------------------------------
 
@@ -144,27 +192,59 @@ if [ -z "$TOKEN" ]; then
   read -r TOKEN
 fi
 if [ -z "$NODE_NAME" ]; then
-  NODE_NAME="$(hostname 2>/dev/null || echo node-$NODE_ID)"
+  NODE_NAME="$(hostname 2>/dev/null || echo "node-$NODE_ID")"
 fi
 
 case "$NODE_ID" in
   ''|*[!0-9]*) err "node id must be a positive integer (got: $NODE_ID)"; exit 1 ;;
 esac
 case "$TOKEN" in
-  edgert_*) ;;
-  *) err "token must start with 'edgert_' (got: $TOKEN)"; exit 1 ;;
+  edgert_*)
+    if [[ ! "$TOKEN" =~ ^edgert_[A-Za-z0-9_-]+$ ]]; then
+      err "token contains invalid characters"
+      exit 1
+    fi
+    ;;
+  *) err "registration token has an invalid format"; exit 1 ;;
 esac
+if [[ ! "$NODE_NAME" =~ ^[A-Za-z0-9._\ -]{1,128}$ ]]; then
+  err "node name may only contain letters, numbers, spaces, dot, underscore, and hyphen"
+  exit 1
+fi
+if [[ ! "$GATEWAY" =~ ^https://[A-Za-z0-9._:-]+(/[A-Za-z0-9._~:/?@%+=,-]*)?$ ]] &&
+   [[ ! "$GATEWAY" =~ ^http://(localhost|127\.0\.0\.1)(:[0-9]+)?(/[A-Za-z0-9._~:/?@%+=,-]*)?$ ]]; then
+  err "gateway must be HTTPS (plain HTTP is allowed only for localhost)"
+  exit 1
+fi
 
 # ----- Materialise bundle ----------------------------------------------------
 
-if [ -d "$INSTALL_DIR" ] && [ "$FORCE" -ne 1 ]; then
-  info "bundle dir $INSTALL_DIR already exists — pulling latest"
+if [ -d "$INSTALL_DIR" ]; then
+  if [ ! -d "$INSTALL_DIR/.git" ]; then
+    err "refusing existing non-EveryAPI directory: $INSTALL_DIR"
+    exit 1
+  fi
+  EXISTING_REMOTE=$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)
+  case "$EXISTING_REMOTE" in
+    "$BUNDLE_SOURCE"|"$BUNDLE_SOURCE.git") ;;
+    *)
+      err "refusing existing non-EveryAPI directory: $INSTALL_DIR"
+      err "unexpected git origin: ${EXISTING_REMOTE:-<none>}"
+      exit 1
+      ;;
+  esac
+  if [ "$FORCE" -eq 1 ]; then
+    info "--force requested; refreshing the verified checkout without deleting it"
+  fi
+  info "verified existing EveryAPI Edge checkout — pulling latest"
   cd "$INSTALL_DIR"
-  git pull --ff-only || warn "git pull failed; continuing with on-disk version"
+  if ! git pull --ff-only; then
+    err "git pull failed — refusing to continue with an unknown or stale checkout"
+    exit 1
+  fi
 else
   info "cloning bundle to $INSTALL_DIR"
-  rm -rf "$INSTALL_DIR"
-  git clone --depth 1 "$BUNDLE_SOURCE" "$INSTALL_DIR" || {
+  git clone --depth 1 -- "$BUNDLE_SOURCE" "$INSTALL_DIR" || {
     err "failed to clone $BUNDLE_SOURCE"
     err "if the public mirror isn't live yet, set BUNDLE_SOURCE to your own fork URL"
     exit 1
