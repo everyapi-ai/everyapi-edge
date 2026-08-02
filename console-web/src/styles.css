@@ -1,0 +1,42 @@
+@import 'tailwindcss';
+
+/* Design tokens for the control room. The console is dark-only by design — it
+   runs on a supplier's machine next to a terminal, and a theme switcher would
+   add state for a surface nobody keeps open all day. Colours live here, not in
+   component class strings, so a palette change is one edit. */
+@theme {
+  --color-paper: #101512;
+  --color-panel: #171d19;
+  --color-panel-edge: #2b3730;
+  --color-ink: #edf0ea;
+  --color-muted: #939b91;
+  --color-lime: #b8f255;
+  --color-amber: #ffb35c;
+  --color-danger: #ff7770;
+
+  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  --font-display: 'Avenir Next Condensed', 'DIN Condensed', 'Arial Narrow', sans-serif;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    margin: 0;
+    background:
+      radial-gradient(circle at 86% -10%, #2d4228 0, transparent 32rem), var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-mono);
+    font-size: 15px;
+    line-height: 1.45;
+  }
+
+  /* Keyboard focus must stay visible on the dark panels; the browser default
+     ring washes out against #171d19. */
+  :focus-visible {
+    outline: 2px solid var(--color-lime);
+    outline-offset: 2px;
+  }
+}

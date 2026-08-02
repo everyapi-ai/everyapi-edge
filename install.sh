@@ -16,7 +16,8 @@
 #      the matching docker-compose variant.
 #   2. Pulls the latest bundle source from the public mirror (or the
 #      monorepo fallback). Does NOT modify anything outside ./everyapi-edge/.
-#   3. Writes .env with the supplied node id + token + GPU metadata.
+#   3. Writes .env with the supplied node id + token + GPU metadata + the
+#      local Control Room secret.
 #   4. Detects available accelerator memory, pulls a conservatively-sized
 #      Ollama model, and verifies a real local inference request.
 #   5. Starts the agent and waits for its gateway Welcome before declaring
@@ -49,6 +50,8 @@ MODEL_EXPLICIT=0
 FORCE=0
 INSTALL_DIR="./everyapi-edge"
 BUNDLE_SOURCE="https://github.com/everyapi-ai/everyapi-edge"
+GPU_MODEL=""
+VRAM_GB=""
 
 # ----- Pretty print ----------------------------------------------------------
 
@@ -394,8 +397,19 @@ if [ -z "$GPU" ]; then
   fi
 fi
 case "$GPU" in
-  nvidia) COMPOSE_FILE="docker-compose.yml" ;;
-  rocm)   COMPOSE_FILE="docker-compose.rocm.yml" ;;
+  nvidia)
+    COMPOSE_FILE="docker-compose.yml"
+    GPU_MODEL="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 | tr -d '\r\n')"
+    VRAM_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
+    case "$VRAM_MIB" in
+      ''|*[!0-9]*) ;;
+      *) VRAM_GB=$(( (VRAM_MIB + 1023) / 1024 )) ;;
+    esac
+    ;;
+  rocm)
+    COMPOSE_FILE="docker-compose.rocm.yml"
+    GPU_MODEL="$(rocminfo 2>/dev/null | awk -F: '/^[[:space:]]*Name:/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
+    ;;
   macos)
     COMPOSE_FILE="docker-compose.macos.yml"
     ;;
@@ -405,6 +419,11 @@ case "$GPU" in
     ;;
 esac
 ok "GPU profile: $GPU ($COMPOSE_FILE)"
+if [ -n "$VRAM_GB" ]; then
+  ok "model budget: ${VRAM_GB} GiB (${GPU_MODEL:-detected GPU})"
+else
+  warn "could not determine model memory budget; the Control Room will ask before suggesting a model"
+fi
 
 # ----- Prompts (only if not given on CLI) ------------------------------------
 
@@ -489,12 +508,20 @@ fi
 # or fails to start (no half-populated .env that leaves the agent
 # unable to auth but containers nonetheless up and looping).
 info "writing .env"
+CONSOLE_TOKEN="$(od -An -N 32 -tx1 /dev/urandom | tr -d ' \n')"
+if [ "${#CONSOLE_TOKEN}" -ne 64 ]; then
+  err "failed to generate local console token"
+  exit 1
+fi
 TMP_ENV="$(mktemp .env.XXXXXX)"
 cat > "$TMP_ENV" <<EOF
 EVERYAPI_GATEWAY=$GATEWAY
 EVERYAPI_NODE_ID=$NODE_ID
 EVERYAPI_REGISTRATION_TOKEN=$TOKEN
 EVERYAPI_NODE_NAME=$NODE_NAME
+EVERYAPI_GPU_MODEL=$GPU_MODEL
+EVERYAPI_VRAM_GB=$VRAM_GB
+EVERYAPI_CONSOLE_TOKEN=$CONSOLE_TOKEN
 EOF
 chmod 600 "$TMP_ENV"
 mv "$TMP_ENV" .env
@@ -549,6 +576,9 @@ echo "  • Open the EveryAPI dashboard → Seller → Edge nodes"
 echo "    The node is Online and reports model: $SELECTED_MODEL"
 echo "  • To choose a different model on a later install, add:"
 echo "      --model qwen2.5:7b"
+echo "  • Open your local Edge Control Room (models, load, requests and logs):"
+echo "      http://127.0.0.1:8421"
+echo "    Local console token: $CONSOLE_TOKEN"
 echo "  • Logs:"
 echo "      docker compose -f $COMPOSE_FILE logs -f agent"
 

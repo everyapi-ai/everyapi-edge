@@ -38,8 +38,12 @@ services:
       EVERYAPI_VRAM_GB: ${EVERYAPI_VRAM_GB:-}
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
       EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
+      EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
+      EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:-}
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
+    ports:
+      - "127.0.0.1:8421:8421"
     extra_hosts:
       # Linux Docker hosts don't auto-resolve host.docker.internal;
       # this line is a no-op on Mac (where the alias already

@@ -35,6 +35,7 @@ const (
 	FrameChunk      FrameType = "chunk"
 	FrameDone       FrameType = "done"
 	FrameError      FrameType = "error"
+	FrameSettlement FrameType = "settlement"
 	FrameDisconnect FrameType = "disconnect"
 	FrameLog        FrameType = "log"
 )
@@ -75,6 +76,10 @@ type RequestBody struct {
 	Headers map[string]string `json:"headers,omitempty"`
 	Body    json.RawMessage   `json:"body,omitempty"`
 	Stream  bool              `json:"stream,omitempty"`
+	// ConsumerRef is a gateway-generated, node-scoped opaque customer label.
+	// It lets the supplier recognise repeated traffic without exposing a buyer's
+	// account ID, email, token, or any other credential.
+	ConsumerRef string `json:"consumer_ref,omitempty"`
 }
 
 type ChunkBody struct {
@@ -87,6 +92,12 @@ type DoneBody struct {
 	PromptTokens     int   `json:"prompt_tokens,omitempty"`
 	CompletionTokens int   `json:"completion_tokens,omitempty"`
 	DurationMs       int64 `json:"duration_ms,omitempty"`
+}
+
+type SettlementBody struct {
+	RequestID          string `json:"request_id"`
+	SellerAmountMicros int64  `json:"seller_amount_micros"`
+	SettledAtUnixMs    int64  `json:"settled_at_unix_ms"`
 }
 
 type ErrorBody struct {

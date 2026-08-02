@@ -41,6 +41,20 @@ needed — your machine just needs outbound HTTPS to api.everyapi.ai.
    model list automatically. Do not restart it merely to publish a
    model: the installer already handles the authenticated reconnect.
 
+6. **Open Edge Control Room.** Visit http://127.0.0.1:8421 and
+   enter `EVERYAPI_CONSOLE_TOKEN` from `.env`. If you left it blank,
+   the agent creates a persistent token at
+   `./data/agent/console.token` on first start. From there you can
+   download and remove further models, watch active load, inspect recent
+   redacted traffic, and read the local agent log — no container
+   commands required. It reuses the same memory budget the installer
+   probed, so its one-click model choices fit the machine.
+
+   The income card is deliberately receipt-based: it shows only earnings the
+   gateway has already settled for this node (the latest 200 receipts are
+   replayed after reconnect). It is not an estimate and it is not the seller
+   account's total withdrawable balance.
+
 ## Hardware
 
 The default `docker-compose.yml` ships an NVIDIA configuration
@@ -87,8 +101,15 @@ useful for chat workloads, but embeddings can work.
   use a fresh server-issued challenge that you sign with the
   identity from step 1.
 
-- No port is exposed publicly. All traffic is the agent's
-  outbound WebSocket to api.everyapi.ai.
+- Inference traffic is an outbound WebSocket to api.everyapi.ai.
+  The Control Room is published only as `127.0.0.1:8421` and also
+  requires a 32+ character local console token. Do not change the
+  Compose port binding to a public interface.
+
+- Traffic history keeps only model, endpoint, timing, token counts,
+  and a node-scoped opaque customer label. Prompts, responses, API
+  keys, email addresses, and internal user IDs are never stored in
+  the agent.
 
 - The agent enforces a path whitelist on inbound requests. Even
   if the gateway were compromised, it could not coerce your
@@ -129,6 +150,42 @@ identity loss as equivalent to "machine was compromised.")
 
 - It does not run arbitrary code. The path whitelist above is
   enforced inside the agent binary, not inside ollama.
+
+## Building the Control Room UI
+
+Building the agent needs **only the Go toolchain**:
+
+```bash
+go build ./...
+```
+
+That works because the Control Room's compiled UI is committed at
+`internal/console/web/index.html` and embedded with `//go:embed`. The
+`go:embed` directive requires the asset to exist at compile time, so the build
+output is a checked-in artifact rather than something produced on demand.
+
+Its source is the Vite app in `console-web/` (React 19, TanStack Router +
+Query, Tailwind v4, Zustand, Zod). Touch anything under `console-web/src/` and
+you must rebuild the bundle in the same commit:
+
+```bash
+cd console-web
+bun install
+bun run build       # writes ../internal/console/web/index.html
+bun run typecheck
+```
+
+CI rejects a pull request whose committed bundle does not match its source, so
+a forgotten rebuild fails the build instead of silently shipping the old UI.
+
+For UI work, `bun run dev` (port 5175) proxies `/api` to a locally running
+agent on `127.0.0.1:8421`, so the console can be iterated without recompiling
+Go. Point it elsewhere with `EDGE_CONSOLE_TARGET`.
+
+The whole app is inlined into that one HTML file — no external script, style or
+font requests. The Control Room is meant to work on a machine with no Internet
+access beyond the gateway, and a single file keeps the committed artifact
+reviewable.
 
 ## License + source
 

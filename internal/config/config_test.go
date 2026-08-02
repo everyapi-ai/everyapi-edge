@@ -11,6 +11,7 @@ func validBase() Config {
 		NodeID:       7,
 		OllamaURL:    "http://ollama:11434",
 		IdentityPath: "/var/lib/everyapi-edge/identity.json",
+		ConsoleAddr:  "127.0.0.1:8421",
 	}
 }
 
@@ -53,5 +54,29 @@ func TestValidateRejectsUnknownWorkload(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "EVERYAPI_WORKLOADS") {
 		t.Errorf("error should name the env var, got: %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidConsoleAddress(t *testing.T) {
+	cfg := validBase()
+	cfg.ConsoleAddr = "not an address"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "EVERYAPI_CONSOLE_ADDR") {
+		t.Fatalf("expected console address error, got %v", err)
+	}
+}
+
+func TestValidateRejectsShortConfiguredConsoleToken(t *testing.T) {
+	cfg := validBase()
+	cfg.ConsoleToken = "too-short"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "EVERYAPI_CONSOLE_TOKEN") {
+		t.Fatalf("expected console token error, got %v", err)
+	}
+}
+
+func TestValidateRejectsNegativeVRAM(t *testing.T) {
+	cfg := validBase()
+	cfg.VRAMTotalGB = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "EVERYAPI_VRAM_GB") {
+		t.Fatalf("expected VRAM error, got %v", err)
 	}
 }

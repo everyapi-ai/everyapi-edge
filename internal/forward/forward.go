@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
@@ -29,13 +30,56 @@ import (
 // Forwarder is what main.go constructs and hands to the WS client
 // as the RequestHandler.
 type Forwarder struct {
-	OllamaURL  string        // e.g. http://ollama:11434
-	HTTPClient *http.Client  // defaulted in New() if nil
+	OllamaURL  string       // e.g. http://ollama:11434
+	HTTPClient *http.Client // defaulted in New() if nil
+	// Observer receives redacted request lifecycle events for the local Edge
+	// console. It never receives request bodies or headers.
+	Observer Observer
+	sequence atomic.Uint64
 	// ChunkBytes caps each base64-encoded Chunk frame payload.
 	// Ollama emits SSE in ~60-200 byte chunks; we batch up to this
 	// many DECODED bytes per Chunk frame to limit JSON envelope
 	// overhead without piling memory on slow gateway links.
 	ChunkBytes int
+}
+
+// RequestEvent is safe to retain locally: it contains operational metadata and
+// Ollama usage only, never a buyer prompt, API key, or forwarded headers.
+type RequestEvent struct {
+	ID               string
+	Consumer         string
+	Model            string
+	Path             string
+	StartedAt        time.Time
+	Duration         time.Duration
+	PromptTokens     int
+	CompletionTokens int
+	Error            string
+}
+
+// Observer observes redacted forwarded-request lifecycle events.
+type Observer interface {
+	Started(RequestEvent)
+	Finished(RequestEvent)
+}
+
+// ObserverFuncs makes small integrations and tests ergonomic without adding a
+// callback dependency to the forwarding hot path.
+type ObserverFuncs struct {
+	StartedFunc  func(RequestEvent)
+	FinishedFunc func(RequestEvent)
+}
+
+func (o ObserverFuncs) Started(event RequestEvent) {
+	if o.StartedFunc != nil {
+		o.StartedFunc(event)
+	}
+}
+
+func (o ObserverFuncs) Finished(event RequestEvent) {
+	if o.FinishedFunc != nil {
+		o.FinishedFunc(event)
+	}
 }
 
 const (
@@ -59,7 +103,7 @@ const (
 // New constructs a Forwarder with defaults filled in.
 func New(ollamaURL string) *Forwarder {
 	return &Forwarder{
-		OllamaURL: strings.TrimRight(ollamaURL, "/"),
+		OllamaURL:  strings.TrimRight(ollamaURL, "/"),
 		HTTPClient: &http.Client{
 			// No client-level timeout — we use a per-request context
 			// timeout in Handle so streaming long completions
@@ -87,7 +131,7 @@ var allowedPaths = map[string]bool{
 // in ChunkBytes-sized batches, and returns Done with the token
 // counts parsed off Ollama's final SSE event (when streaming) or
 // JSON body (when not).
-func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
+func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send func(protocol.ChunkBody) error) (done protocol.DoneBody, fault *protocol.ErrorBody) {
 	if !allowedPaths[req.Path] {
 		return protocol.DoneBody{}, &protocol.ErrorBody{
 			Code:    "path_not_allowed",
@@ -96,6 +140,19 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	}
 	if req.Method == "" {
 		req.Method = http.MethodPost
+	}
+	event := RequestEvent{ID: fmt.Sprintf("local-%d", f.sequence.Add(1)), Consumer: req.ConsumerRef, Model: requestModel(req.Body), Path: req.Path, StartedAt: time.Now().UTC()}
+	if f.Observer != nil {
+		f.Observer.Started(event)
+		defer func() {
+			event.Duration = time.Since(event.StartedAt)
+			event.PromptTokens = done.PromptTokens
+			event.CompletionTokens = done.CompletionTokens
+			if fault != nil {
+				event.Error = fault.Code
+			}
+			f.Observer.Finished(event)
+		}()
 	}
 
 	// Bound the whole forwarded request: caps a hung or slow upstream
@@ -182,6 +239,20 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	usage.PromptTokens, usage.CompletionTokens = tee.Tokens()
 	usage.DurationMs = time.Since(started).Milliseconds()
 	return usage, nil
+}
+
+// requestModel extracts only the public model selector. A malformed body is
+// forwarded unchanged to Ollama, but the console renders it as "unknown";
+// copying the body merely to make telemetry prettier would violate the local
+// privacy boundary.
+func requestModel(body []byte) string {
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || strings.TrimSpace(payload.Model) == "" {
+		return "unknown"
+	}
+	return payload.Model
 }
 
 // usageScanner sniffs Ollama's response for token counts so the

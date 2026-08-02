@@ -7,6 +7,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -43,6 +44,14 @@ type Config struct {
 	// only uses this to backfill nodes whose seller never declared
 	// workloads in the dashboard — the dashboard value wins otherwise.
 	Workloads []string
+	// ConsoleAddr is the local HTTP listener for the embedded supplier console.
+	// A direct binary defaults to loopback; Compose deliberately overrides it to
+	// 0.0.0.0 inside the container while publishing the port only on host loopback.
+	ConsoleAddr string
+	// ConsoleToken authorizes model-management and telemetry API calls. The
+	// installer creates it automatically; main persists a secure fallback for
+	// existing manual installations.
+	ConsoleToken string
 }
 
 // Validate returns the first config defect, or nil if the agent
@@ -61,6 +70,15 @@ func (c Config) Validate() error {
 	}
 	if c.IdentityPath == "" {
 		return errors.New("EVERYAPI_IDENTITY_PATH must be set or the agent will not persist its keypair")
+	}
+	if _, _, err := net.SplitHostPort(c.ConsoleAddr); err != nil {
+		return fmt.Errorf("EVERYAPI_CONSOLE_ADDR must be host:port: %w", err)
+	}
+	if c.ConsoleToken != "" && len(c.ConsoleToken) < 32 {
+		return errors.New("EVERYAPI_CONSOLE_TOKEN must be at least 32 characters")
+	}
+	if c.VRAMTotalGB < 0 {
+		return errors.New("EVERYAPI_VRAM_GB must not be negative")
 	}
 	for _, w := range c.Workloads {
 		if !knownWorkload(w) {
@@ -94,6 +112,8 @@ func FromEnv() Config {
 		VRAMTotalGB:       int(parseInt64(os.Getenv("EVERYAPI_VRAM_GB"))),
 		CountryISO2:       strings.ToUpper(os.Getenv("EVERYAPI_COUNTRY")),
 		Workloads:         parseWorkloads(os.Getenv("EVERYAPI_WORKLOADS")),
+		ConsoleAddr:       defaultStr(os.Getenv("EVERYAPI_CONSOLE_ADDR"), "127.0.0.1:8421"),
+		ConsoleToken:      strings.TrimSpace(os.Getenv("EVERYAPI_CONSOLE_TOKEN")),
 	}
 }
 
@@ -141,7 +161,7 @@ func (c Config) String() string {
 		hadToken = "yes (length=" + strconv.Itoa(len(c.RegistrationToken)) + ")"
 	}
 	return fmt.Sprintf(
-		"Config{Gateway=%s NodeID=%d Ollama=%s Identity=%s NodeName=%q Country=%s RegistrationToken=%s}",
-		c.GatewayURL, c.NodeID, c.OllamaURL, c.IdentityPath, c.NodeName, c.CountryISO2, hadToken,
+		"Config{Gateway=%s NodeID=%d Ollama=%s Identity=%s ConsoleAddr=%s ConsoleToken=%t NodeName=%q Country=%s RegistrationToken=%s}",
+		c.GatewayURL, c.NodeID, c.OllamaURL, c.IdentityPath, c.ConsoleAddr, c.ConsoleToken != "", c.NodeName, c.CountryISO2, hadToken,
 	)
 }

@@ -74,6 +74,12 @@ type Config struct {
 	// (the gateway retries them on another channel/node). Defaulted in
 	// New() if <= 0.
 	MaxConcurrentRequests int
+	// Log receives agent diagnostics that would otherwise only go to stderr.
+	// main routes this into both docker logs and the supplier-local console.
+	Log func(level, message string)
+	// Settlement receives gateway-committed seller receipts. It must be
+	// idempotent because reconnect replay can deliver a receipt twice.
+	Settlement func(protocol.SettlementBody)
 }
 
 // RequestHandler is what main.go installs to forward inbound
@@ -212,6 +218,7 @@ func (c *Client) Run(ctx context.Context) error {
 	if err := c.connectAndAuth(ctx); err != nil {
 		return err
 	}
+	c.log("info", "gateway session authenticated")
 	// sessionCtx cancels when Run returns for ANY reason (read error,
 	// write error, or parent cancel). In-flight handlers derive their
 	// upstream-call deadline from it, so a gateway-side disconnect
@@ -326,13 +333,8 @@ func (c *Client) connectAndAuth(ctx context.Context) error {
 		return fmt.Errorf("decode welcome envelope: %w", err)
 	}
 	if welcome.Type != protocol.FrameWelcome {
-		// Likely a close/disconnect frame with a reason. Surface it.
-		preview := string(msg)
-		if len(preview) > 200 {
-			preview = preview[:200] + "…"
-		}
 		_ = conn.Close()
-		return fmt.Errorf("expected welcome, got %q (%s)", welcome.Type, preview)
+		return unexpectedHandshakeFrameError()
 	}
 	// Clear the deadline — heartbeat reset takes over from here.
 	_ = conn.SetReadDeadline(time.Time{})
@@ -374,7 +376,7 @@ func (c *Client) fetchChallenge(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("read challenge response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("challenge endpoint returned %s: %s", resp.Status, string(raw))
+		return "", fmt.Errorf("challenge endpoint returned %s", resp.Status)
 	}
 	var payload struct {
 		Success bool `json:"success"`
@@ -389,6 +391,10 @@ func (c *Client) fetchChallenge(ctx context.Context) (string, error) {
 		return "", errors.New("challenge endpoint returned empty challenge")
 	}
 	return payload.Data.Challenge, nil
+}
+
+func unexpectedHandshakeFrameError() error {
+	return errors.New("unexpected gateway handshake frame")
 }
 
 // readerLoop drains inbound frames, routing Request → Handler,
@@ -413,7 +419,7 @@ func (c *Client) readerLoop(ctx context.Context) error {
 		if err := json.Unmarshal(raw, &frame); err != nil {
 			// Malformed inbound from the gateway is a bug worth
 			// surfacing but not session-terminating.
-			fmt.Fprintf(stderr(), "edge-agent: malformed inbound frame: %v\n", err)
+			c.log("warn", "malformed inbound frame from gateway")
 			continue
 		}
 		switch frame.Type {
@@ -440,8 +446,11 @@ func (c *Client) readerLoop(ctx context.Context) error {
 				// (return a generic error) so the next reconnect can
 				// fetch a fresh, parseable frame; but at least the
 				// operator sees the parse error in docker logs.
-				fmt.Fprintf(stderr(), "edge-agent: malformed Disconnect body: %v (frame=%q)\n", uErr, string(frame.Body))
-				return fmt.Errorf("malformed gateway disconnect frame: %w", uErr)
+				// Do not copy frame.Body into a local log: a malformed remote
+				// peer controls it, and the Control Room must not become a
+				// secret-bearing frame dump.
+				c.log("warn", "malformed Disconnect frame from gateway")
+				return errors.New("malformed gateway disconnect frame")
 			}
 			// Terminal codes propagate as typed errors so
 			// runWithReconnect in main.go can stop the reconnect
@@ -450,12 +459,25 @@ func (c *Client) readerLoop(ctx context.Context) error {
 			// "gateway disconnect" wrap and the outer loop retries
 			// with backoff.
 			if body.Code == protocol.DisconnectCodeNodeRevoked {
-				return &TerminalDisconnectError{Code: body.Code, Reason: body.Reason}
+				return &TerminalDisconnectError{Code: body.Code, Reason: "node revoked server-side"}
 			}
-			return fmt.Errorf("gateway disconnect: %s: %s", body.Code, body.Reason)
+			return errors.New("gateway disconnect")
+		case protocol.FrameSettlement:
+			c.handleSettlement(frame.Body)
 		default:
-			fmt.Fprintf(stderr(), "edge-agent: unexpected frame type %q from gateway\n", frame.Type)
+			c.log("warn", "unexpected gateway frame type")
 		}
+	}
+}
+
+func (c *Client) handleSettlement(body json.RawMessage) {
+	var receipt protocol.SettlementBody
+	if err := json.Unmarshal(body, &receipt); err != nil || receipt.RequestID == "" || receipt.SettledAtUnixMs <= 0 {
+		c.log("warn", "malformed settlement receipt from gateway")
+		return
+	}
+	if c.cfg.Settlement != nil {
+		c.cfg.Settlement(receipt)
 	}
 }
 
@@ -757,3 +779,11 @@ func (c *Client) challengeEndpoint() (*url.URL, error) {
 }
 
 func stderr() io.Writer { return os.Stderr }
+
+func (c *Client) log(level, message string) {
+	if c.cfg.Log != nil {
+		c.cfg.Log(level, message)
+		return
+	}
+	_, _ = fmt.Fprintf(stderr(), "edge-agent: [%s] %s\n", level, message)
+}

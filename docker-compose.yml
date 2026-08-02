@@ -61,5 +61,14 @@ services:
       EVERYAPI_VRAM_GB: ${EVERYAPI_VRAM_GB:-}
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
       EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
+      EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
+      # Empty is allowed for existing manual bundles: the agent persists a
+      # fresh 0600 token beside identity.json on first start. The installer
+      # always supplies a generated value in .env.
+      EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:-}
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
+    ports:
+      # Supplier-only management surface. Do not change this to "8421:8421":
+      # model deletion and download controls must never be Internet-exposed.
+      - "127.0.0.1:8421:8421"

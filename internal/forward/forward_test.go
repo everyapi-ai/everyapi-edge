@@ -69,6 +69,36 @@ func TestHandleForwardsAndStreamsBytes(t *testing.T) {
 	}
 }
 
+func TestHandleReportsRedactedRequestMetrics(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":3,"completion_tokens":5}}`))
+	}))
+	defer srv.Close()
+
+	var started RequestEvent
+	var finished RequestEvent
+	f := New(srv.URL)
+	f.Observer = ObserverFuncs{
+		StartedFunc:  func(event RequestEvent) { started = event },
+		FinishedFunc: func(event RequestEvent) { finished = event },
+	}
+	_, errBody := f.Handle(context.Background(), protocol.RequestBody{
+		Method: http.MethodPost,
+		Path:   "/v1/chat/completions",
+		ConsumerRef: "customer-opaque",
+		Body:   json.RawMessage(`{"model":"qwen3:8b","messages":[{"role":"user","content":"do not persist this"}]}`),
+	}, nopSend)
+	if errBody != nil {
+		t.Fatalf("Handle: %+v", errBody)
+	}
+	if started.Model != "qwen3:8b" || started.Path != "/v1/chat/completions" || started.Consumer != "customer-opaque" {
+		t.Fatalf("started = %+v", started)
+	}
+	if finished.PromptTokens != 3 || finished.CompletionTokens != 5 || finished.Error != "" {
+		t.Fatalf("finished = %+v", finished)
+	}
+}
+
 func TestHandleEmitsAtLeastOneChunkOnEmptyBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

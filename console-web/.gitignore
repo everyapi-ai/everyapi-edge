@@ -1,0 +1,6 @@
+# Dependencies and tooling state. The console's build OUTPUT is committed at
+# ../internal/console/web/index.html on purpose (Go embeds it, and the public
+# mirror must build with the Go toolchain alone) — but nothing here is.
+node_modules/
+*.tsbuildinfo
+.vite/

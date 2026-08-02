@@ -54,6 +54,56 @@ func TestFetchChallengeRejectsOversizedErrorResponse(t *testing.T) {
 	}
 }
 
+func TestFetchChallengeErrorDoesNotIncludeRemoteBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":"api-key-should-never-reach-the-console"}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{cfg: Config{GatewayURL: srv.URL, NodeID: 1, HTTPClient: srv.Client()}}
+	_, err := c.fetchChallenge(context.Background())
+	if err == nil || strings.Contains(err.Error(), "api-key-should-never-reach-the-console") {
+		t.Fatalf("error leaked remote response body: %v", err)
+	}
+}
+
+func TestUnexpectedHandshakeFrameErrorIsFixedText(t *testing.T) {
+	if got := unexpectedHandshakeFrameError().Error(); got != "unexpected gateway handshake frame" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestClientUsesConfiguredLogSink(t *testing.T) {
+	var gotLevel, gotMessage string
+	c := &Client{cfg: Config{Log: func(level, message string) { gotLevel, gotMessage = level, message }}}
+	c.log("warn", "malformed gateway frame")
+	if gotLevel != "warn" || gotMessage != "malformed gateway frame" {
+		t.Fatalf("log sink received %q/%q", gotLevel, gotMessage)
+	}
+}
+
+func TestSettlementReceiptIsParsedAndMalformedInputIsDropped(t *testing.T) {
+	var receipts []protocol.SettlementBody
+	var warnings int
+	c := &Client{cfg: Config{
+		Settlement: func(receipt protocol.SettlementBody) { receipts = append(receipts, receipt) },
+		Log: func(level, _ string) {
+			if level == "warn" {
+				warnings++
+			}
+		},
+	}}
+	c.handleSettlement(json.RawMessage(`{"request_id":"receipt-1","seller_amount_micros":125000,"settled_at_unix_ms":1700000000000}`))
+	c.handleSettlement(json.RawMessage(`{"seller_amount_micros":125000}`))
+	if len(receipts) != 1 || receipts[0].RequestID != "receipt-1" || receipts[0].SellerAmountMicros != 125000 {
+		t.Fatalf("receipts = %+v", receipts)
+	}
+	if warnings != 1 {
+		t.Fatalf("warnings = %d", warnings)
+	}
+}
+
 type endlessSpaces struct{}
 
 func (endlessSpaces) Read(p []byte) (int, error) {

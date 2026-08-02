@@ -11,12 +11,15 @@ package main
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,6 +28,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -32,6 +36,7 @@ import (
 
 	"github.com/everyapi-ai/everyapi-edge/internal/client"
 	"github.com/everyapi-ai/everyapi-edge/internal/config"
+	"github.com/everyapi-ai/everyapi-edge/internal/console"
 	"github.com/everyapi-ai/everyapi-edge/internal/forward"
 	"github.com/everyapi-ai/everyapi-edge/internal/identity"
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
@@ -48,6 +53,7 @@ const maxOllamaTagsResponseBytes int64 = 1 << 20
 // — log.Printf is called from many goroutines, the reconnect loop
 // swaps from one — so there's no mutex contention.
 var currentClient atomic.Pointer[client.Client]
+var currentConsoleStore atomic.Pointer[console.Store]
 
 // logTee writes to the underlying writer (stderr) AND, when a WS
 // client is live, fires a FrameLog through it. The send is async +
@@ -57,11 +63,14 @@ var currentClient atomic.Pointer[client.Client]
 type logTee struct{ underlying io.Writer }
 
 func (t *logTee) Write(p []byte) (int, error) {
+	msg := string(bytes.TrimRight(p, "\n"))
+	if store := currentConsoleStore.Load(); store != nil && msg != "" {
+		store.Log("info", msg)
+	}
 	if cli := currentClient.Load(); cli != nil {
 		// Strip the trailing newline the log package adds — the
 		// dashboard renders one line per LogBody and would
 		// otherwise show double-spaced lines.
-		msg := string(bytes.TrimRight(p, "\n"))
 		if msg != "" {
 			cli.SendLog("info", msg)
 		}
@@ -103,7 +112,35 @@ func main() {
 	}
 	log.Printf("identity loaded; pubkey=%s", id.EncodedPubkey())
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	consoleToken, err := loadOrGenerateConsoleToken(cfg.IdentityPath, cfg.ConsoleToken)
+	if err != nil {
+		log.Fatalf("console token: %v", err)
+	}
+	store := console.NewStore(200)
+	currentConsoleStore.Store(store)
+	defer currentConsoleStore.Store(nil)
+	consoleServer, err := startConsole(ctx, cfg.ConsoleAddr, cfg.OllamaURL, cfg.VRAMTotalGB, consoleToken, store)
+	if err != nil {
+		log.Fatalf("console: %v", err)
+	}
+	defer shutdownConsole(consoleServer)
+	log.Printf("local control room: http://%s (token: %s)", cfg.ConsoleAddr, consoleTokenPath(cfg.IdentityPath))
+
 	fwd := forward.New(cfg.OllamaURL)
+	var requests sync.Map
+	fwd.Observer = forward.ObserverFuncs{
+		StartedFunc: func(event forward.RequestEvent) {
+			requests.Store(event.ID, store.Start(console.RequestStart{ID: event.ID, Consumer: event.Consumer, Model: event.Model, Path: event.Path, StartedAt: event.StartedAt}))
+		},
+		FinishedFunc: func(event forward.RequestEvent) {
+			if handle, ok := requests.LoadAndDelete(event.ID); ok {
+				store.Finish(handle.(console.RequestHandle), console.RequestFinish{CompletedAt: time.Now().UTC(), PromptTokens: event.PromptTokens, CompletionTokens: event.CompletionTokens, Duration: event.Duration, Error: event.Error})
+			}
+		},
+	}
 	meta := protocol.NodeMeta{
 		Name:      cfg.NodeName,
 		AgentVer:  Version,
@@ -116,13 +153,73 @@ func main() {
 		Location: protocol.Location{CountryISO2: cfg.CountryISO2},
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
 	if err := runWithReconnect(ctx, cfg, id, meta, fwd); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("fatal: %v", err)
 	}
 	log.Print("shutting down cleanly")
+}
+
+func consoleTokenPath(identityPath string) string {
+	return filepath.Join(filepath.Dir(identityPath), "console.token")
+}
+
+// loadOrGenerateConsoleToken keeps the management secret alongside the agent
+// identity (both are 0600). Installers normally set it in .env; generating a
+// persistent fallback keeps upgrades safe without asking an existing supplier
+// to learn a new configuration knob.
+func loadOrGenerateConsoleToken(identityPath, configured string) (string, error) {
+	path := consoleTokenPath(identityPath)
+	if configured != "" {
+		return configured, persistConsoleToken(path, configured)
+	}
+	if b, err := os.ReadFile(path); err == nil && len(bytes.TrimSpace(b)) >= 32 {
+		return string(bytes.TrimSpace(b)), nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	secret := make([]byte, 32)
+	if _, err := cryptorand.Read(secret); err != nil {
+		return "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(secret)
+	if err := persistConsoleToken(path, token); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func persistConsoleToken(path, token string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func startConsole(ctx context.Context, addr, ollamaURL string, vramTotalGB int, token string, store *console.Store) (*http.Server, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	server := &http.Server{Handler: console.NewHandler(console.Config{OllamaURL: ollamaURL, Token: token, VRAMTotalGB: vramTotalGB}, store), ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("local control room stopped: %v", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownConsole(server)
+	}()
+	return server, nil
+}
+
+func shutdownConsole(server *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = server.Shutdown(ctx)
 }
 
 // discoverOllamaModels reads the native Ollama tag list immediately before a
@@ -213,11 +310,23 @@ func runWithReconnect(
 			NodeID:            cfg.NodeID,
 			RegistrationToken: registrationToken,
 			Identity:          id,
-			Meta:              sessionMeta,
+			// sessionMeta, not meta: it carries the models discovered from
+			// Ollama just above, which the gateway turns into routable
+			// abilities.
+			Meta: sessionMeta,
 			OnConnected: func() {
 				log.Printf("connected to gateway with %d models", len(sessionMeta.Models))
 			},
 			Handler: fwd.Handle,
+			Log: func(level, message string) {
+				log.Printf("[%s] %s", level, message)
+			},
+			Settlement: func(receipt protocol.SettlementBody) {
+				store := currentConsoleStore.Load()
+				if store != nil {
+					store.Settle(console.Settlement{RequestID: receipt.RequestID, SellerAmountMicros: receipt.SellerAmountMicros, SettledAt: time.UnixMilli(receipt.SettledAtUnixMs).UTC()})
+				}
+			},
 		})
 		if err != nil {
 			return fmt.Errorf("client.New: %w", err)

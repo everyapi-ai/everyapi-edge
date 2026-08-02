@@ -1,0 +1,5 @@
+# index.html here is a build artifact (see ../../../console-web), not
+# hand-written source. Marking it -text stops Git from reporting whitespace
+# "errors" for minifier output and from offering a line-level diff nobody can
+# review — the meaningful review unit is the console-web source next to it.
+index.html -text -diff

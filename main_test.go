@@ -237,3 +237,33 @@ func TestRevokedSentinelTruncatesOnRuneBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestConsoleTokenPersistsNextToIdentity(t *testing.T) {
+	dir := t.TempDir()
+	identityPath := filepath.Join(dir, "identity.json")
+	first, err := loadOrGenerateConsoleToken(identityPath, "")
+	if err != nil || len(first) < 32 {
+		t.Fatalf("generated console token = %q, err=%v", first, err)
+	}
+	second, err := loadOrGenerateConsoleToken(identityPath, "")
+	if err != nil || second != first {
+		t.Fatalf("persistent console token: got %q, want %q, err=%v", second, first, err)
+	}
+	if got := consoleTokenPath(identityPath); got != filepath.Join(dir, "console.token") {
+		t.Fatalf("console token path = %q", got)
+	}
+}
+
+func TestConfiguredConsoleTokenIsPersistedForOperatorRecovery(t *testing.T) {
+	dir := t.TempDir()
+	identityPath := filepath.Join(dir, "identity.json")
+	configured := "0123456789abcdef0123456789abcdef"
+	got, err := loadOrGenerateConsoleToken(identityPath, configured)
+	if err != nil || got != configured {
+		t.Fatalf("configured console token = %q, err=%v", got, err)
+	}
+	onDisk, err := os.ReadFile(consoleTokenPath(identityPath))
+	if err != nil || strings.TrimSpace(string(onDisk)) != configured {
+		t.Fatalf("persisted configured console token = %q, err=%v", onDisk, err)
+	}
+}
