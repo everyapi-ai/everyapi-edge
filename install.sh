@@ -15,7 +15,10 @@
 #   1. Detects the GPU (nvidia-smi / rocminfo / Darwin host) and picks
 #      the matching docker-compose variant.
 #   2. Pulls the latest bundle source from the public mirror (or the
-#      monorepo fallback). Does NOT modify anything outside ./everyapi-edge/.
+#      monorepo fallback) into $HOME/everyapi-edge (override with --dir).
+#      Does NOT modify anything outside that directory, and refuses to
+#      install into a git working tree so the agent's credentials never
+#      land in a source checkout.
 #   3. Writes .env with the supplied node id + token + GPU metadata + the
 #      local Control Room secret.
 #   4. Detects available accelerator memory, pulls a conservatively-sized
@@ -48,7 +51,14 @@ GPU=""
 MODEL=""
 MODEL_EXPLICIT=0
 FORCE=0
-INSTALL_DIR="./everyapi-edge"
+# A node is a long-lived service, so it belongs at a stable path rather than
+# wherever the operator happened to be standing. The old "./everyapi-edge"
+# default planted a running agent — .env with node credentials, data/ with the
+# Ed25519 identity — into the current directory, which for anyone running the
+# documented `curl … | bash` one-liner is unpredictable. Falls back to the old
+# relative default only when HOME is unset (containers, some CI shells).
+INSTALL_DIR="${HOME:+$HOME/everyapi-edge}"
+INSTALL_DIR="${INSTALL_DIR:-./everyapi-edge}"
 BUNDLE_SOURCE="https://github.com/everyapi-ai/everyapi-edge"
 GPU_MODEL=""
 VRAM_GB=""
@@ -137,6 +147,32 @@ case "$CANON_TARGET" in
     exit 1
     ;;
 esac
+
+# Refuse to plant a running service inside somebody's source checkout. The
+# checks above only reject the cwd ITSELF, so `cd ~/src/some-repo && curl … |
+# bash` sailed through and left an agent — .env with node credentials, data/
+# with the Ed25519 identity — sitting in the repo's working tree, showing up in
+# git status and one careless `git add` away from being committed.
+#
+# A HOME that is itself a git worktree is the dotfiles pattern, not a source
+# checkout, so it stays allowed — otherwise the new default would refuse to run
+# for everyone who manages their home directory that way.
+if command -v git >/dev/null 2>&1; then
+  GIT_WORKTREE_ROOT=$(cd "$CANON_PARENT" && git rev-parse --show-toplevel 2>/dev/null || true)
+  # Compare canonicalised paths on both sides: git reports a resolved toplevel
+  # while $HOME may still carry a symlinked spelling (/var vs /private/var on
+  # macOS), and a mismatch there would fire the guard on a dotfiles HOME.
+  CANON_HOME=""
+  if [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
+    CANON_HOME=$(cd "$HOME" && pwd -P)
+  fi
+  if [ -n "$GIT_WORKTREE_ROOT" ] && [ "$GIT_WORKTREE_ROOT" != "$CANON_HOME" ]; then
+    err "refusing to install inside the git working tree at $GIT_WORKTREE_ROOT"
+    err "the agent stores credentials (.env) and its identity (data/) — keep them out of a source checkout"
+    err "pass --dir with a path outside that repository, for example --dir \"\$HOME/everyapi-edge\""
+    exit 1
+  fi
+fi
 
 # ----- Prerequisites ---------------------------------------------------------
 
