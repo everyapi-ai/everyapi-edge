@@ -76,6 +76,12 @@ type Config struct {
 	MaxConcurrentRequests int
 	// Log receives agent diagnostics that would otherwise only go to stderr.
 	// main routes this into both docker logs and the supplier-local console.
+	// OllamaURL is the local model runtime, used only by the auto-pull
+	// path: the gateway's Welcome frame names models this node is missing
+	// from its owner's declared target set, and the agent pulls them here.
+	// Empty disables auto-pull.
+	OllamaURL string
+
 	Log func(level, message string)
 	// Settlement receives gateway-committed seller receipts. It must be
 	// idempotent because reconnect replay can deliver a receipt twice.
@@ -345,6 +351,16 @@ func (c *Client) connectAndAuth(ctx context.Context) error {
 	// reconnect loop's token burn so an Auth rejection earlier in the
 	// handshake (before Welcome) doesn't lose the token for retry.
 	c.welcomeReceived.Store(true)
+
+	// Auto-pull whatever the gateway says this node is missing from its
+	// owner's declared target set. Off the handshake goroutine: a pull runs
+	// for minutes to hours, and the session must start serving buyer
+	// traffic with the models already present rather than waiting.
+	var welcomeBody protocol.WelcomeBody
+	if err := json.Unmarshal(welcome.Body, &welcomeBody); err == nil && len(welcomeBody.RecommendedModels) > 0 {
+		go c.pullRecommendedModels(ctx, welcomeBody.RecommendedModels)
+	}
+
 	if c.cfg.OnConnected != nil {
 		c.cfg.OnConnected()
 	}

@@ -307,6 +307,7 @@ func runWithReconnect(
 		}
 		cli, err := client.New(client.Config{
 			GatewayURL:        cfg.GatewayURL,
+			OllamaURL:         cfg.OllamaURL,
 			NodeID:            cfg.NodeID,
 			RegistrationToken: registrationToken,
 			Identity:          id,
