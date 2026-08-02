@@ -38,6 +38,11 @@ const (
 	FrameSettlement FrameType = "settlement"
 	FrameDisconnect FrameType = "disconnect"
 	FrameLog        FrameType = "log"
+
+	// FrameModelPull is agent → gateway, fire-and-forget: one per model the
+	// agent was asked to pull, reporting how that pull ended. Mirrors the
+	// gateway's backend/pkg/edge definition.
+	FrameModelPull FrameType = "model_pull"
 )
 
 type Frame struct {
@@ -131,4 +136,21 @@ type LogBody struct {
 	UnixMs int64  `json:"unix_ms"`
 	Level  string `json:"level,omitempty"`
 	Msg    string `json:"msg"`
+}
+
+// Model pull outcomes reported by FrameModelPull.
+const (
+	ModelPullPending = "pending"
+	ModelPullReady   = "ready"
+	ModelPullFailed  = "failed"
+)
+
+// ModelPullBody — one model's pull outcome. Mirrors the gateway's copy in
+// backend/pkg/edge; keep the json tags identical or the receipt silently
+// decodes to a zero value.
+type ModelPullBody struct {
+	UnixMs int64  `json:"unix_ms"`
+	Model  string `json:"model"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
 }

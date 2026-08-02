@@ -7,7 +7,50 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 )
+
+// A receipt must never delay the download it is reporting on.
+//
+// reportModelPull first used sendFrame, which waits up to 5s for room in
+// the send queue. That is the right tolerance for a frame that matters, but
+// this runs inside the pull loop at two receipts per model, so a full
+// Welcome set on a stalled link spent 20 x 2 x 5s doing nothing — enough to
+// push the cap test above past the 2-minute CI timeout.
+//
+// Both cases below leave the queue unusable in the two ways production can:
+// a client with no live session at all, and one whose link has backed up.
+func TestReportModelPullNeverBlocks(t *testing.T) {
+	cases := map[string]*Client{
+		// sendQ and done are both nil, as in the cap test. A nil channel
+		// blocks forever, so a waiting implementation hangs outright.
+		"no session": {cfg: Config{Log: func(string, string) {}}},
+		"queue full": func() *Client {
+			c := &Client{cfg: Config{Log: func(string, string) {}}, sendQ: make(chan protocol.Frame, 2)}
+			for range cap(c.sendQ) {
+				c.sendQ <- protocol.Frame{Type: protocol.FrameLog}
+			}
+			return c
+		}(),
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			returned := make(chan struct{})
+			go func() {
+				defer close(returned)
+				c.reportModelPull("llama3", protocol.ModelPullPending, "")
+			}()
+			select {
+			case <-returned:
+			case <-time.After(2 * time.Second):
+				t.Fatal("reportModelPull blocked instead of dropping the receipt")
+			}
+		})
+	}
+}
 
 // TestPullOllamaModelDrainsStream covers the happy path: a streaming pull
 // is drained to completion and reported as success.

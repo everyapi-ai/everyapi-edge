@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 )
 
 // Auto-pull: the gateway's Welcome frame carries the models this node is
@@ -62,11 +64,17 @@ func (c *Client) pullRecommendedModels(ctx context.Context, models []string) {
 			return
 		}
 		c.log("info", fmt.Sprintf("auto-pull: downloading %s", model))
+		// Report before the download, not just after: a large weight can take
+		// many minutes, and without this the seller's node row shows the model
+		// simply missing with no indication anything is happening.
+		c.reportModelPull(model, protocol.ModelPullPending, "")
 		if err := pullOllamaModel(ctx, c.cfg.OllamaURL, model); err != nil {
 			c.log("info", fmt.Sprintf("auto-pull: %s failed: %v", model, err))
+			c.reportModelPull(model, protocol.ModelPullFailed, err.Error())
 			continue
 		}
 		c.log("info", fmt.Sprintf("auto-pull: %s ready", model))
+		c.reportModelPull(model, protocol.ModelPullReady, "")
 	}
 }
 
@@ -114,4 +122,33 @@ func pullOllamaModel(ctx context.Context, ollamaURL, model string) error {
 		return err
 	}
 	return nil
+}
+
+// reportModelPull tells the gateway how one pull ended.
+//
+// Best-effort: the receipt is an improvement on top of the download, and
+// losing one must not cost the seller a model.
+//
+// Non-blocking for real, using the same enqueue as SendLog and trySendError
+// rather than sendFrame. sendFrame waits up to 5s for room in the queue,
+// which is the right tolerance for a frame that matters — but this runs
+// inside the pull loop, twice per model. On a stalled link a full Welcome
+// set would spend 20 x 2 x 5s not downloading anything, so a receipt that
+// cannot be queued right now is dropped instead.
+func (c *Client) reportModelPull(model, status, reason string) {
+	body, err := json.Marshal(protocol.ModelPullBody{
+		UnixMs: time.Now().UnixMilli(),
+		Model:  model,
+		Status: status,
+		Reason: reason,
+	})
+	if err != nil {
+		return
+	}
+	frame := protocol.Frame{Type: protocol.FrameModelPull, Body: body}
+	select {
+	case c.sendQ <- frame:
+	case <-c.done:
+	default:
+	}
 }
