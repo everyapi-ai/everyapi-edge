@@ -30,19 +30,16 @@ needed — your machine just needs outbound HTTPS to api.everyapi.ai.
    to `online`. From this point, any buyer routing through your
    channel sends traffic to your GPU.
 
-5. **Pull the models you want to serve.** Inside the running
-   container:
+5. **The installer selects and verifies a model for you.** It probes
+   accelerator memory and free disk space, picks a conservative Qwen
+   model, pulls it, then runs one short local inference request before
+   reporting success. If the first automatic choice cannot run, it
+   tries smaller models. To select a particular model yourself, add
+   `--model qwen2.5:7b` to the installer command.
 
-   ```bash
-   docker compose exec ollama ollama pull llama3.1:8b
-   docker compose exec ollama ollama pull qwen2.5:14b
-   # ...whatever fits your VRAM
-   ```
-
-   The agent reports the model list to the gateway on every
-   reconnect, so the dashboard learns about new models the next
-   time the agent reconnects (or immediately on `docker compose
-   restart agent`).
+   The agent reconnects after model setup, so the gateway receives the
+   model list automatically. Do not restart it merely to publish a
+   model: the installer already handles the authenticated reconnect.
 
 ## Hardware
 
@@ -63,14 +60,12 @@ docker compose -f docker-compose.rocm.yml up -d     # AMD
 docker compose -f docker-compose.macos.yml up -d    # macOS
 ```
 
-The macOS variant runs the agent in docker but expects ollama to
-be installed natively (Metal acceleration isn't available through
-the docker container). One-time setup on the Mac:
-
-```bash
-brew install ollama
-brew services start ollama
-```
+The macOS variant runs the agent in docker but runs Ollama natively
+(Metal acceleration isn't available through the docker container).
+The installer installs Ollama with Homebrew when needed, starts it,
+then verifies the selected model. If Homebrew is unavailable, it
+stops with the official Ollama download link rather than starting an
+Edge node that cannot serve requests.
 
 The agent's `OLLAMA_URL` resolves to `host.docker.internal:11434`
 in that file, which Docker Desktop / OrbStack / Colima all expose

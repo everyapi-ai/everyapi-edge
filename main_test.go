@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,6 +14,25 @@ import (
 	"time"
 	"unicode/utf8"
 )
+
+func TestDiscoverOllamaModelsUsesTagNamesAndDeduplicates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			t.Fatalf("path = %q, want /api/tags", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"models":[{"name":"qwen2.5:7b"},{"name":"llama3.1:8b"},{"name":"qwen2.5:7b"},{"name":""}]}`)
+	}))
+	defer srv.Close()
+
+	got, err := discoverOllamaModels(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("discoverOllamaModels: %v", err)
+	}
+	want := []string{"llama3.1:8b", "qwen2.5:7b"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("models = %v, want %v", got, want)
+	}
+}
 
 // TestNextBackoffJittered pins the jitter spread + cap/floor.
 // Calling nextBackoff(prev) 1000 times from a stable prev should

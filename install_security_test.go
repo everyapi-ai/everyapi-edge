@@ -76,6 +76,43 @@ func TestInstallerDocumentationUsesCDN(t *testing.T) {
 	}
 }
 
+func TestInstallerPreparesAndVerifiesAutoSelectedModel(t *testing.T) {
+	script, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"--model)",
+		"detect_model_memory_gb",
+		"model_candidates_for_memory",
+		"ensure_macos_ollama",
+		"ollama_command pull",
+		"/api/generate",
+		"--since",
+	} {
+		if !strings.Contains(string(script), required) {
+			t.Errorf("installer is missing model onboarding step %q", required)
+		}
+	}
+}
+
+func TestInstallerClearsConsumedTokenOnlyAfterGatewayConnection(t *testing.T) {
+	script, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(script)
+	for _, required := range []string{
+		"clear_consumed_registration_token",
+		"connected to gateway",
+		"EVERYAPI_REGISTRATION_TOKEN=",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Errorf("installer is missing post-connection credential handling %q", required)
+		}
+	}
+}
+
 func TestReleasePublishesInstallerToCDN(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/edge-release.yml")
 	if os.IsNotExist(err) {

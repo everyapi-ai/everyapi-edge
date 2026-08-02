@@ -4,7 +4,7 @@
 # Usage:
 #
 #   curl -fsSL https://dl.everyapi.ai/edge/install.sh | bash -s -- \
-#     --node-id 5 --token edgert_... [--gateway https://api.everyapi.ai] [--name home-rtx4090] [--gpu nvidia|rocm|macos]
+#     --node-id 5 --token edgert_... [--gateway https://api.everyapi.ai] [--name home-rtx4090] [--gpu nvidia|rocm|macos] [--model qwen2.5:7b]
 #
 # Or interactive (prompts for the values it doesn't get on the CLI):
 #
@@ -17,9 +17,10 @@
 #   2. Pulls the latest bundle source from the public mirror (or the
 #      monorepo fallback). Does NOT modify anything outside ./everyapi-edge/.
 #   3. Writes .env with the supplied node id + token + GPU metadata.
-#   4. docker compose pull && docker compose up -d
-#   5. Tails the agent logs for 15s so the supplier sees the "connected"
-#      line without having to look it up.
+#   4. Detects available accelerator memory, pulls a conservatively-sized
+#      Ollama model, and verifies a real local inference request.
+#   5. Starts the agent and waits for its gateway Welcome before declaring
+#      success. The one-time registration token is then removed from .env.
 #
 # The script is idempotent: an existing verified EveryAPI Edge checkout is
 # fast-forwarded and its .env is atomically refreshed. It never recursively
@@ -43,6 +44,8 @@ NODE_ID=""
 TOKEN=""
 NODE_NAME=""
 GPU=""
+MODEL=""
+MODEL_EXPLICIT=0
 FORCE=0
 INSTALL_DIR="./everyapi-edge"
 BUNDLE_SOURCE="https://github.com/everyapi-ai/everyapi-edge"
@@ -70,6 +73,7 @@ while [ $# -gt 0 ]; do
     --gateway)  GATEWAY="$2"; shift 2 ;;
     --name)     NODE_NAME="$2"; shift 2 ;;
     --gpu)      GPU="$2"; shift 2 ;;
+    --model)    MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
     --dir)      INSTALL_DIR="$2"; shift 2 ;;
     --force)    FORCE=1; shift ;;
     -h|--help)
@@ -98,6 +102,7 @@ validate_no_newlines "gateway" "$GATEWAY"
 validate_no_newlines "node name" "$NODE_NAME"
 validate_no_newlines "registration token" "$TOKEN"
 validate_no_newlines "install directory" "$INSTALL_DIR"
+validate_no_newlines "model" "$MODEL"
 
 # Refuse broad or ambiguous targets. In particular, the old --force path ran
 # rm -rf directly on --dir; values such as /, HOME, ., or a symlinked spelling
@@ -139,6 +144,231 @@ require() {
   fi
 }
 
+ollama_api_ready() {
+  curl -fsS --connect-timeout 3 --max-time 5 http://localhost:11434/api/tags >/dev/null 2>&1
+}
+
+wait_for_macos_ollama() {
+  local deadline=$(( $(date +%s) + 30 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if ollama_api_ready; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+ensure_macos_ollama() {
+  if ! command -v ollama >/dev/null 2>&1; then
+    if ! command -v brew >/dev/null 2>&1; then
+      err "Ollama is required on macOS and Homebrew is not installed"
+      err "Install Ollama from https://ollama.com/download, then run this command again"
+      exit 1
+    fi
+    info "installing Ollama for native Apple Silicon inference…"
+    brew install ollama
+  fi
+
+  if ! ollama_api_ready; then
+    info "starting Ollama…"
+    if command -v brew >/dev/null 2>&1 && brew list --formula ollama >/dev/null 2>&1; then
+      brew services start ollama >/dev/null 2>&1 || true
+    else
+      nohup ollama serve >"${TMPDIR:-/tmp}/everyapi-ollama.log" 2>&1 &
+    fi
+  fi
+
+  if ! wait_for_macos_ollama; then
+    err "Ollama did not become ready at http://localhost:11434"
+    exit 1
+  fi
+  ok "native Ollama is ready"
+}
+
+# Returns a conservative usable memory budget in GiB. On multi-GPU Linux machines we
+# deliberately use the smallest GPU: it is safer to select a model that runs
+# on every advertised device than to assume the runtime will shard it.
+detect_model_memory_gb() {
+  case "$GPU" in
+    macos)
+      local bytes physical_gb reserve_gb
+      bytes=$(sysctl -n hw.memsize 2>/dev/null || true)
+      if [[ "$bytes" =~ ^[0-9]+$ ]]; then
+        physical_gb=$(( bytes / 1024 / 1024 / 1024 ))
+        reserve_gb=$(( physical_gb / 4 ))
+        if [ "$reserve_gb" -lt 4 ]; then
+          reserve_gb=4
+        fi
+        if [ "$physical_gb" -gt "$reserve_gb" ]; then
+          echo $(( physical_gb - reserve_gb ))
+        else
+          echo 0
+        fi
+      else
+        echo 0
+      fi
+      ;;
+    nvidia)
+      nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
+        | awk 'BEGIN { min = 0 } /^[0-9]+$/ { if (min == 0 || $1 < min) min = $1 } END { print int(min / 1024) }'
+      ;;
+    rocm)
+      rocm-smi --showmeminfo vram 2>/dev/null \
+        | awk '/Total Memory/ { value = $NF; gsub(/[^0-9]/, "", value); if (value > 0 && (min == 0 || value < min)) min = value } END { print int(min / 1024 / 1024 / 1024) }'
+      ;;
+    *) echo 0 ;;
+  esac
+}
+
+# Prints the candidate models from largest to smallest. Qwen's sizes are
+# deliberately conservative: the selected model must leave capacity for the
+# OS, Ollama's context cache, and concurrent marketplace requests.
+model_candidates_for_memory() {
+  local memory_gb="$1"
+  if [ "$MODEL_EXPLICIT" -eq 1 ]; then
+    printf '%s\n' "$MODEL"
+  elif [ "$memory_gb" -ge 48 ]; then
+    printf '%s\n' qwen2.5:32b qwen2.5:14b qwen2.5:7b qwen2.5:3b
+  elif [ "$memory_gb" -ge 24 ]; then
+    printf '%s\n' qwen2.5:14b qwen2.5:7b qwen2.5:3b
+  elif [ "$memory_gb" -ge 12 ]; then
+    printf '%s\n' qwen2.5:7b qwen2.5:3b
+  else
+    printf '%s\n' qwen2.5:3b
+  fi
+}
+
+model_download_size_gb() {
+  case "$1" in
+    qwen2.5:3b)  echo 2 ;;
+    qwen2.5:7b)  echo 5 ;;
+    qwen2.5:14b) echo 10 ;;
+    qwen2.5:32b) echo 21 ;;
+    *)            echo 0 ;;
+  esac
+}
+
+has_model_disk_space() {
+  local model="$1" estimate_gb available_kb required_kb storage_path
+  estimate_gb=$(model_download_size_gb "$model")
+  if [ "$estimate_gb" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$GPU" = "macos" ]; then
+    storage_path="${OLLAMA_MODELS:-$HOME/.ollama}"
+  else
+    storage_path="./data/ollama"
+    mkdir -p "$storage_path"
+  fi
+  available_kb=$(df -Pk "$storage_path" | awk 'NR == 2 { print $4 }')
+  required_kb=$(( estimate_gb * 1024 * 1024 ))
+  if [[ ! "$available_kb" =~ ^[0-9]+$ ]] || [ "$available_kb" -lt "$required_kb" ]; then
+    warn "not enough free disk for $model (needs about ${estimate_gb}GB)"
+    return 1
+  fi
+  return 0
+}
+
+ollama_command() {
+  if [ "$GPU" = "macos" ]; then
+    ollama "$@"
+  else
+    docker compose -f "$COMPOSE_FILE" exec -T ollama ollama "$@"
+  fi
+}
+
+verify_selected_model() {
+  local model="$1"
+  if [ "$GPU" = "macos" ]; then
+    curl -fsS --connect-timeout 5 --max-time 120 \
+      -H 'Content-Type: application/json' \
+      --data "{\"model\":\"$model\",\"prompt\":\"Reply with OK.\",\"stream\":false,\"options\":{\"num_predict\":1}}" \
+      http://localhost:11434/api/generate >/dev/null
+  else
+    ollama_command run "$model" 'Reply with OK.' >/dev/null
+  fi
+}
+
+prepare_model() {
+  local memory_gb candidate
+  memory_gb=$(detect_model_memory_gb)
+  if [[ ! "$memory_gb" =~ ^[0-9]+$ ]]; then
+    memory_gb=0
+  fi
+  if [ "$MODEL_EXPLICIT" -eq 1 ]; then
+    info "using requested model: $MODEL"
+  else
+    info "detected ${memory_gb}GiB accelerator memory; selecting a conservative model"
+  fi
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if ! has_model_disk_space "$candidate"; then
+      if [ "$MODEL_EXPLICIT" -eq 1 ]; then
+        err "free disk space is insufficient for requested model $candidate"
+        return 1
+      fi
+      continue
+    fi
+    info "pulling model $candidate…"
+    if ! ollama_command pull "$candidate"; then
+      if [ "$MODEL_EXPLICIT" -eq 1 ]; then
+        err "could not pull requested model $candidate"
+        return 1
+      fi
+      warn "could not pull $candidate; trying a smaller model"
+      continue
+    fi
+    info "verifying local inference with $candidate…"
+    if verify_selected_model "$candidate"; then
+      SELECTED_MODEL="$candidate"
+      ok "model $candidate is ready"
+      return 0
+    fi
+    if [ "$MODEL_EXPLICIT" -eq 1 ]; then
+      err "requested model $candidate could not complete a local inference request"
+      return 1
+    fi
+    warn "$candidate did not run successfully; trying a smaller model"
+  done < <(model_candidates_for_memory "$memory_gb")
+
+  err "no model could be prepared for this machine"
+  return 1
+}
+
+clear_consumed_registration_token() {
+  [ -n "$TOKEN" ] || return 0
+  local tmp_env
+  tmp_env=$(mktemp .env.XXXXXX)
+  grep -v '^EVERYAPI_REGISTRATION_TOKEN=' .env >"$tmp_env" || true
+  chmod 600 "$tmp_env"
+  mv "$tmp_env" .env
+  TOKEN=""
+  ok "stored the node identity; removed the consumed registration token"
+}
+
+wait_for_agent_connection() {
+  local agent_id="$1" log_since="$2" require_models="${3:-0}"
+  local deadline=$(( $(date +%s) + 30 )) logs
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    logs=$(docker logs --since "$log_since" "$agent_id" 2>&1 || true)
+    if printf '%s\n' "$logs" | grep -q 'connected to gateway'; then
+      if [ "$require_models" -eq 1 ] && ! printf '%s\n' "$logs" | grep -Eq 'connected to gateway with [1-9][0-9]* models'; then
+        printf '%s\n' "$logs" >&2
+        return 1
+      fi
+      return 0
+    fi
+    if printf '%s\n' "$logs" | grep -q 'session ended:\|fatal:\|authentication failed\|node revoked'; then
+      printf '%s\n' "$logs" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 info "checking prerequisites…"
 require docker || exit 1
 if ! docker compose version >/dev/null 2>&1; then
@@ -168,11 +398,6 @@ case "$GPU" in
   rocm)   COMPOSE_FILE="docker-compose.rocm.yml" ;;
   macos)
     COMPOSE_FILE="docker-compose.macos.yml"
-    if ! command -v ollama >/dev/null 2>&1; then
-      warn "ollama is not installed on the host"
-      echo "  Install it before running the agent (or it will have nothing to forward to):"
-      echo "    brew install ollama && brew services start ollama"
-    fi
     ;;
   *)
     err "unsupported --gpu value: $GPU (expected nvidia / rocm / macos)"
@@ -209,6 +434,10 @@ case "$TOKEN" in
 esac
 if [[ ! "$NODE_NAME" =~ ^[A-Za-z0-9._\ -]{1,128}$ ]]; then
   err "node name may only contain letters, numbers, spaces, dot, underscore, and hyphen"
+  exit 1
+fi
+if [ -n "$MODEL" ] && [[ ! "$MODEL" =~ ^[A-Za-z0-9._:/-]+$ ]]; then
+  err "model may only contain letters, numbers, dot, underscore, colon, slash, and hyphen"
   exit 1
 fi
 if [[ ! "$GATEWAY" =~ ^https://[A-Za-z0-9._:-]+(/[A-Za-z0-9._~:/?@%+=,-]*)?$ ]] &&
@@ -273,32 +502,53 @@ ok "wrote .env (mode 0600)"
 
 # ----- Bring up --------------------------------------------------------------
 
+if [ "$GPU" = "macos" ]; then
+  ensure_macos_ollama
+fi
+
 info "pulling images…"
 docker compose -f "$COMPOSE_FILE" pull
 
 info "starting bundle…"
+AGENT_LOG_SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 docker compose -f "$COMPOSE_FILE" up -d
+AGENT_CONTAINER_ID=$(docker compose -f "$COMPOSE_FILE" ps -q agent)
+if [ -z "$AGENT_CONTAINER_ID" ]; then
+  err "agent container was not created"
+  exit 1
+fi
 
-# ----- Smoke wait ------------------------------------------------------------
+# ----- Connect, prepare a model, then reconnect with durable identity --------
 
-info "waiting up to 15s for the agent to connect…"
-DEADLINE=$(( $(date +%s) + 15 ))
-while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  if docker compose -f "$COMPOSE_FILE" logs --tail=200 agent 2>/dev/null \
-     | grep -q "identity loaded"; then
-    ok "agent started and loaded identity"
-    break
-  fi
-  sleep 1
-done
+info "waiting for the agent to authenticate with the gateway…"
+if ! wait_for_agent_connection "$AGENT_CONTAINER_ID" "$AGENT_LOG_SINCE"; then
+  err "agent did not connect to the gateway; registration token was kept for recovery"
+  exit 1
+fi
+clear_consumed_registration_token
+
+if ! prepare_model; then
+  err "agent remains running, but no verified model is available"
+  exit 1
+fi
+
+info "restarting the agent so the gateway receives model $SELECTED_MODEL…"
+AGENT_LOG_SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+docker compose -f "$COMPOSE_FILE" up -d --force-recreate agent
+AGENT_CONTAINER_ID=$(docker compose -f "$COMPOSE_FILE" ps -q agent)
+if [ -z "$AGENT_CONTAINER_ID" ] || ! wait_for_agent_connection "$AGENT_CONTAINER_ID" "$AGENT_LOG_SINCE" 1; then
+  err "agent did not reconnect with its persisted identity"
+  exit 1
+fi
+ok "agent connected and model $SELECTED_MODEL is ready"
 
 ok "done"
 echo
 echo "Next steps:"
 echo "  • Open the EveryAPI dashboard → Seller → Edge nodes"
-echo "    The row should flip to Online within 30s of agent startup."
-echo "  • Pull the models you want to serve (inside this dir):"
-echo "      docker compose -f $COMPOSE_FILE exec ollama ollama pull llama3.1:8b"
+echo "    The node is Online and reports model: $SELECTED_MODEL"
+echo "  • To choose a different model on a later install, add:"
+echo "      --model qwen2.5:7b"
 echo "  • Logs:"
 echo "      docker compose -f $COMPOSE_FILE logs -f agent"
 

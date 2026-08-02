@@ -57,6 +57,11 @@ type Config struct {
 	// the agent that the request is done. A nil Handler drops
 	// Request frames on the floor (test-only).
 	Handler RequestHandler
+	// OnConnected runs immediately after the gateway accepts the Auth
+	// frame and sends Welcome. Callers must return promptly; it is used
+	// by the agent entrypoint to make a successful first registration
+	// observable to its installer.
+	OnConnected func()
 	// HTTPClient is used for the challenge endpoint. Defaulted in
 	// New() if nil; injectable for tests.
 	HTTPClient *http.Client
@@ -338,6 +343,9 @@ func (c *Client) connectAndAuth(ctx context.Context) error {
 	// reconnect loop's token burn so an Auth rejection earlier in the
 	// handshake (before Welcome) doesn't lose the token for retry.
 	c.welcomeReceived.Store(true)
+	if c.cfg.OnConnected != nil {
+		c.cfg.OnConnected()
+	}
 	return nil
 }
 

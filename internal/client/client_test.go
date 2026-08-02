@@ -534,12 +534,16 @@ func TestRunSaturationAndShutdown(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 	var live atomic.Int64
+	connected := make(chan struct{}, 1)
 	c, err := New(Config{
 		GatewayURL:            srv.URL,
 		NodeID:                1,
 		RegistrationToken:     "tok", // skip the challenge HTTP round-trip
 		Identity:              identity.Decoded{Public: pub, Private: priv},
 		MaxConcurrentRequests: maxConcurrent,
+		OnConnected: func() {
+			connected <- struct{}{}
+		},
 		Handler: func(ctx context.Context, _ protocol.RequestBody, _ func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
 			// Simulate a long Ollama forward: park until the session
 			// context aborts it. Keeps every slot held so the flood
@@ -567,6 +571,11 @@ func TestRunSaturationAndShutdown(t *testing.T) {
 	case <-busySeen:
 	case <-time.After(5 * time.Second):
 		t.Fatal("no node_busy Error frame reached the gateway — reader blocked or session died under saturation")
+	}
+	select {
+	case <-connected:
+	case <-time.After(shortBudget):
+		t.Fatal("OnConnected was not called after the gateway Welcome frame")
 	}
 	if got := c.inflight.Load(); got != maxConcurrent {
 		t.Fatalf("inflight = %d, want %d", got, maxConcurrent)

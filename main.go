@@ -11,15 +11,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -34,6 +39,8 @@ import (
 
 // Version is patched at build time via -ldflags "-X main.Version=...".
 var Version = "dev"
+
+const maxOllamaTagsResponseBytes int64 = 1 << 20
 
 // currentClient holds the WS client active inside the reconnect loop.
 // The log-tee writer reads it on every Write and forwards the line to
@@ -118,6 +125,57 @@ func main() {
 	log.Print("shutting down cleanly")
 }
 
+// discoverOllamaModels reads the native Ollama tag list immediately before a
+// gateway handshake. The gateway uses this list to create routable channel
+// abilities, so reporting a static or stale list would make an online node
+// appear healthy while accepting no buyer traffic.
+func discoverOllamaModels(ctx context.Context, ollamaURL string) ([]string, error) {
+	endpoint, err := url.Parse(ollamaURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse Ollama URL: %w", err)
+	}
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/api/tags"
+	endpoint.RawQuery = ""
+	endpoint.Fragment = ""
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build Ollama tag request: %w", err)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request Ollama tags: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Ollama tags returned %s", resp.Status)
+	}
+
+	var payload struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxOllamaTagsResponseBytes)).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode Ollama tags: %w", err)
+	}
+	models := make([]string, 0, len(payload.Models))
+	seen := make(map[string]struct{}, len(payload.Models))
+	for _, model := range payload.Models {
+		name := strings.TrimSpace(model.Name)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		models = append(models, name)
+	}
+	sort.Strings(models)
+	return models, nil
+}
+
 // runWithReconnect drives one client lifecycle after another with
 // exponential backoff capped at 30s. The reconnect loop is here (not
 // inside Client) so a future test can stub the client without also
@@ -142,13 +200,24 @@ func runWithReconnect(
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		sessionMeta := meta
+		models, modelErr := discoverOllamaModels(ctx, cfg.OllamaURL)
+		if modelErr != nil {
+			log.Printf("warning: could not discover Ollama models: %v", modelErr)
+		} else {
+			sessionMeta.Models = models
+			log.Printf("discovered %d Ollama models", len(models))
+		}
 		cli, err := client.New(client.Config{
 			GatewayURL:        cfg.GatewayURL,
 			NodeID:            cfg.NodeID,
 			RegistrationToken: registrationToken,
 			Identity:          id,
-			Meta:              meta,
-			Handler:           fwd.Handle,
+			Meta:              sessionMeta,
+			OnConnected: func() {
+				log.Printf("connected to gateway with %d models", len(sessionMeta.Models))
+			},
+			Handler: fwd.Handle,
 		})
 		if err != nil {
 			return fmt.Errorf("client.New: %w", err)
