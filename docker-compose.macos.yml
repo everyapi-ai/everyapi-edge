@@ -44,7 +44,8 @@ services:
       - ./data/agent:/var/lib/everyapi-edge
       - ${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}:/models
     ports:
-      - "127.0.0.1:8421:8421"
+      # Local-network management surface. Keep it on a trusted LAN only.
+      - "${EVERYAPI_CONSOLE_PORT:-8421}:8421"
     extra_hosts:
       # Linux Docker hosts don't auto-resolve host.docker.internal;
       # this line is a no-op on Mac (where the alias already

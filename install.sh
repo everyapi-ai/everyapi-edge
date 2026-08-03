@@ -19,8 +19,8 @@
 #      Does NOT modify anything outside that directory, and refuses to
 #      install into a git working tree so the agent's credentials never
 #      land in a source checkout.
-#   3. Writes .env with the supplied node id + token + GPU metadata + the
-#      local Control Room secret.
+#   3. Writes .env with the supplied node id + token + GPU metadata and the
+#      model storage location used by the local Control Room.
 #   4. Detects available accelerator memory, pulls a conservatively-sized
 #      Ollama model, and verifies a real local inference request.
 #   5. Starts the agent and waits for its gateway Welcome before declaring
@@ -620,7 +620,8 @@ echo "    The node is Online and reports model: $SELECTED_MODEL"
 echo "  • To choose a different model on a later install, add:"
 echo "      --model qwen2.5:7b"
 echo "  • Open your local Edge Control Room (models, load, requests and logs):"
-echo "      http://127.0.0.1:8421"
+echo "      http://<this-node-LAN-IP>:8421"
+echo "    (or http://127.0.0.1:8421 on this node; use only on a trusted LAN)"
 echo "  • Logs:"
 echo "      docker compose -f $COMPOSE_FILE logs -f agent"
 

@@ -54,7 +54,8 @@ type Config struct {
 	Workloads []string
 	// ConsoleAddr is the local HTTP listener for the embedded supplier console.
 	// A direct binary defaults to loopback; Compose deliberately overrides it to
-	// 0.0.0.0 inside the container while publishing the port only on host loopback.
+	// 0.0.0.0 inside the container while Compose publishes the port on the
+	// supplier's trusted LAN. A direct binary remains loopback-only by default.
 	ConsoleAddr string
 	// OllamaStoragePath is the model root visible to the agent process. It is
 	// used by the local console for storage inspection and migration planning.

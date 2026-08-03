@@ -6,7 +6,7 @@ import { useMutation } from '@tanstack/react-query'
 import { useModels, useStartStorageMigration, useStorage, useStorageMigration } from '@/api/queries'
 import { postJSONResponse } from '@/api/client'
 import { migrationPlanSchema, storagePickerSchema } from '@/api/schemas'
-import { Button, Input, PageHeader, Panel, QueryState } from '@/components/primitives'
+import { Button, PageHeader, Panel, QueryState } from '@/components/primitives'
 import { useTranslation } from '@/i18n/useTranslation'
 import { formatGigabytes } from '@/lib/format'
 
@@ -52,6 +52,8 @@ const StoragePage = () => {
   const job = migration.data
   const copyPercent = job?.total ? Math.min(100, Math.round((job.completed / job.total) * 100)) : job?.done ? 100 : 0
   const modelsOutsideEdgeStorage = Boolean(storage.data?.accessible && storage.data.used_bytes === 0 && models.data?.length)
+  const diskUsedPercent = storage.data?.total_bytes ? Math.min(100, Math.round(((storage.data.total_bytes - storage.data.available_bytes) / storage.data.total_bytes) * 100)) : 0
+  const selectedSource = source || storage.data?.path || ''
 
   return (
     <div className='flex flex-col gap-5'>
@@ -64,6 +66,25 @@ const StoragePage = () => {
               <dt className='text-muted'>{t('storage.used')}</dt>
               <dd className='text-ink'>{storage.data?.accessible ? formatGigabytes(storage.data.used_bytes) : t('common.unknown')}</dd>
             </dl>
+            {storage.data?.accessible && storage.data.total_bytes > 0 ? (
+              <section data-storage-capacity className='mt-5 border-t border-line pt-4'>
+                <h3 className='text-sm font-medium text-ink'>{t('storage.capacity')}</h3>
+                <dl className='mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-xs'>
+                  <div>
+                    <dt className='text-faint'>{t('storage.total')}</dt>
+                    <dd className='mt-1 font-medium text-ink'>{formatGigabytes(storage.data.total_bytes)}</dd>
+                  </div>
+                  <div>
+                    <dt className='text-faint'>{t('storage.available')}</dt>
+                    <dd className='mt-1 font-medium text-good'>{formatGigabytes(storage.data.available_bytes)}</dd>
+                  </div>
+                </dl>
+                <div role='progressbar' aria-label={t('storage.capacity')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={diskUsedPercent} className='mt-3 h-2 overflow-hidden rounded-full bg-surface-2'>
+                  <span className='block h-full rounded-full bg-accent transition-[width] duration-300' style={{ width: `${diskUsedPercent}%` }} />
+                </div>
+                <p className='mt-2 text-xs leading-5 text-muted'>{t('storage.capacityHint')}</p>
+              </section>
+            ) : null}
             {!storage.data?.accessible ? <p className='mt-3 text-sm text-warn'>{storage.data?.error || t('storage.unavailable')}</p> : null}
             {modelsOutsideEdgeStorage ? (
               <div data-external-models className='mt-4 rounded-md border border-warn/30 bg-warn/8 p-3'>
@@ -84,42 +105,24 @@ const StoragePage = () => {
           </Panel>
           <Panel title={t('storage.migration')}>
             <form onSubmit={prepare}>
-              <label htmlFor='storage-source' className='mb-2 block text-sm font-medium text-ink-2'>{t('storage.source')}</label>
-              <Button
-                type='button'
-                variant='ghost'
-                data-native-storage-picker='source'
+              <DirectoryChoice
+                label={t('storage.source')}
+                path={selectedSource}
+                picker='source'
+                action={picker.isPending ? t('storage.choosingFolder') : t('storage.chooseSourceFolder')}
+                description={t('storage.sourceHint')}
                 disabled={picker.isPending}
-                onClick={() => chooseFolder('source')}
-              >
-                {picker.isPending ? t('storage.choosingFolder') : t('storage.chooseSourceFolder')}
-              </Button>
-              <Input
-                id='storage-source'
-                value={source}
-                onChange={(event) => setSource(event.target.value)}
-                placeholder={storage.data?.path || '/Volumes/legacy-models'}
-                className='mt-2'
+                onChoose={() => chooseFolder('source')}
               />
-              <p className='mt-2 text-xs leading-5 text-muted'>{t('storage.sourceHint')}</p>
-              <label htmlFor='storage-destination' className='mb-2 block text-sm font-medium text-ink-2'>{t('storage.destination')}</label>
-              <Button
-                type='button'
-                variant='ghost'
-                data-native-storage-picker='destination'
+              <DirectoryChoice
+                label={t('storage.destination')}
+                path={destination}
+                picker='destination'
+                action={picker.isPending ? t('storage.choosingFolder') : t('storage.chooseDestinationFolder')}
+                description={t('storage.destinationHint')}
                 disabled={picker.isPending}
-                onClick={() => chooseFolder('destination')}
-              >
-                {picker.isPending ? t('storage.choosingFolder') : t('storage.chooseDestinationFolder')}
-              </Button>
-              <Input
-                id='storage-destination'
-                value={destination}
-                onChange={(event) => setDestination(event.target.value)}
-                placeholder='/Volumes/models/everyapi'
-                className='mt-2'
+                onChoose={() => chooseFolder('destination')}
               />
-              <p className='mt-2 text-xs leading-5 text-muted'>{t('storage.destinationHint')}</p>
               <Button type='submit' disabled={!destination.trim() || plan.isPending} className='mt-4'>{t('storage.prepare')}</Button>
             </form>
             {picker.isError ? <p role='alert' className='mt-3 text-sm text-danger'>{picker.error.message}</p> : null}
@@ -164,6 +167,49 @@ const StoragePage = () => {
         </div>
       </QueryState>
     </div>
+  )
+}
+
+function DirectoryChoice({
+  label,
+  path,
+  picker,
+  action,
+  description,
+  disabled,
+  onChoose,
+}: {
+  label: string
+  path: string
+  picker: 'source' | 'destination'
+  action: string
+  description: string
+  disabled: boolean
+  onChoose: () => void
+}) {
+  return (
+    <section className='border-line border-b pb-4 first:pt-0 last:border-b-0'>
+      <div className='flex flex-wrap items-center justify-between gap-2'>
+        <h3 className='text-sm font-medium text-ink-2'>{label}</h3>
+        <Button
+          type='button'
+          variant='ghost'
+          data-native-storage-picker={picker}
+          disabled={disabled}
+          onClick={onChoose}
+        >
+          {action}
+        </Button>
+      </div>
+      <output
+        data-storage-source={picker === 'source' ? true : undefined}
+        data-storage-destination={picker === 'destination' ? true : undefined}
+        className='mt-2 block min-h-10 break-all rounded-md border border-line bg-surface-1 px-3 py-2 font-mono text-xs leading-5 text-ink'
+      >
+        {path || '—'}
+      </output>
+      <p className='mt-2 text-xs leading-5 text-muted'>{description}</p>
+    </section>
   )
 }
 

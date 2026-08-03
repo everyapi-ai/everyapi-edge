@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,6 +29,11 @@ type Config struct {
 	DiffusersURL string
 	StoragePath  string
 	VRAMTotalGB  int
+	NodeName     string
+	AgentVersion string
+	GPUModel     string
+	Platform     string
+	CountryISO2  string
 	Version      string
 	Update       func(context.Context, func(UpdateStatus)) error
 }
@@ -36,6 +42,17 @@ type UpdateStatus struct {
 	State   string `json:"state"`
 	Version string `json:"version,omitempty"`
 	Error   string `json:"error,omitempty"`
+}
+
+// NodeProfile is the startup identity of this local agent. It intentionally
+// contains no credentials, gateway URL, or host filesystem details.
+type NodeProfile struct {
+	Name         string `json:"name"`
+	AgentVersion string `json:"agent_version"`
+	GPUModel     string `json:"gpu_model"`
+	Platform     string `json:"platform"`
+	CountryISO2  string `json:"country_iso2"`
+	VRAMTotalGB  int    `json:"vram_total_gb"`
 }
 
 type Model struct {
@@ -76,10 +93,12 @@ type ImageRuntime struct {
 // path is supplied by the bundle rather than inferred from Ollama's HTTP API:
 // Ollama deliberately does not disclose host filesystem paths over HTTP.
 type Storage struct {
-	Path       string `json:"path"`
-	Accessible bool   `json:"accessible"`
-	UsedBytes  int64  `json:"used_bytes"`
-	Error      string `json:"error,omitempty"`
+	Path           string `json:"path"`
+	Accessible     bool   `json:"accessible"`
+	UsedBytes      int64  `json:"used_bytes"`
+	TotalBytes     int64  `json:"total_bytes"`
+	AvailableBytes int64  `json:"available_bytes"`
+	Error          string `json:"error,omitempty"`
 }
 
 type MigrationPlan struct {
@@ -128,6 +147,16 @@ type ModelCapabilities struct {
 	Capabilities []string `json:"capabilities"`
 }
 
+// ModelBenchmark is a one-token local generation measurement. It reports the
+// runtime's own token counters instead of guessing from model parameter size.
+type ModelBenchmark struct {
+	Model           string  `json:"model"`
+	EvalCount       int     `json:"eval_count"`
+	EvalDurationNS  int64   `json:"eval_duration_ns"`
+	TotalDurationNS int64   `json:"total_duration_ns"`
+	TokensPerSecond float64 `json:"tokens_per_second"`
+}
+
 type playgroundInput struct {
 	Model       string              `json:"model"`
 	Messages    []PlaygroundMessage `json:"messages"`
@@ -145,14 +174,18 @@ type playgroundStreamEvent struct {
 }
 
 type pullJob struct {
-	Name      string `json:"name"`
-	Status    string `json:"status"`
-	Completed int64  `json:"completed,omitempty"`
-	Total     int64  `json:"total,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Done      bool   `json:"done"`
-	cancelled bool
-	cancel    context.CancelFunc
+	Name               string  `json:"name"`
+	Status             string  `json:"status"`
+	Completed          int64   `json:"completed,omitempty"`
+	Total              int64   `json:"total,omitempty"`
+	RateBytesPerSecond float64 `json:"rate_bytes_per_second,omitempty"`
+	SecondsRemaining   int64   `json:"seconds_remaining,omitempty"`
+	Error              string  `json:"error,omitempty"`
+	Done               bool    `json:"done"`
+	cancelled          bool
+	cancel             context.CancelFunc
+	sampledAt          time.Time
+	sampledBytes       int64
 }
 
 type pullQueueSnapshot struct {
@@ -162,21 +195,34 @@ type pullQueueSnapshot struct {
 }
 
 type handler struct {
-	cfg         Config
-	store       *Store
-	httpClient  *http.Client
-	mu          sync.RWMutex
-	pull        *pullJob
-	pullQueue   []*pullJob
-	latestPull  *pullJob
-	migration   *migrationJob
-	storage     Storage
-	storageAt   time.Time
-	pickStorage func() (string, error)
-	update      UpdateStatus
+	cfg              Config
+	store            *Store
+	httpClient       *http.Client
+	mu               sync.RWMutex
+	pull             *pullJob
+	pullQueue        []*pullJob
+	latestPull       *pullJob
+	migration        *migrationJob
+	storage          Storage
+	storageAt        time.Time
+	pickStorage      func() (string, error)
+	storageAvailable func(string) (int64, error)
+	update           UpdateStatus
 }
 
 var validModelName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$`)
+
+const (
+	imageEditingUnavailableMessage = "Image editing is unavailable on this node"
+	imageEditingGPURequiredMessage = "A CUDA-capable GPU is required for image editing."
+)
+
+func safeImageRuntimeError(message string) string {
+	if message == imageEditingGPURequiredMessage {
+		return message
+	}
+	return imageEditingUnavailableMessage
+}
 
 func NewHandler(cfg Config, store *Store) http.Handler {
 	return newHandler(cfg, store, chooseStorageDirectory)
@@ -188,7 +234,7 @@ func newHandler(cfg Config, store *Store, picker func() (string, error)) http.Ha
 	if store == nil {
 		store = NewStore(200)
 	}
-	h := &handler{cfg: cfg, store: store, httpClient: &http.Client{Timeout: 10 * time.Second}, pickStorage: picker}
+	h := &handler{cfg: cfg, store: store, httpClient: &http.Client{Timeout: 10 * time.Second}, pickStorage: picker, storageAvailable: availableStorageBytes}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h.index)
 	mux.HandleFunc("/api/", h.api)
@@ -221,6 +267,8 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		h.overview(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/update":
 		h.startUpdate(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/node":
+		h.nodeProfile(w)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/requests":
 		writeJSON(w, http.StatusOK, h.store.Requests())
 	case r.Method == http.MethodGet && r.URL.Path == "/api/logs":
@@ -239,6 +287,8 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		h.selectImageRuntimeModel(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/image/edit":
 		h.imageEdit(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/unload-all":
+		h.unloadAllRuntimeModels(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/unload":
 		h.unloadRuntimeModel(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/storage":
@@ -255,6 +305,8 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		h.playgroundChat(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/models/pull":
 		h.startPull(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/models/benchmark":
+		h.benchmarkModel(w, r)
 	case r.Method == http.MethodDelete && r.URL.Path == "/api/models":
 		h.deleteModel(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/models/pull":
@@ -264,6 +316,17 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (h *handler) nodeProfile(w http.ResponseWriter) {
+	writeJSON(w, http.StatusOK, NodeProfile{
+		Name:         h.cfg.NodeName,
+		AgentVersion: h.cfg.AgentVersion,
+		GPUModel:     h.cfg.GPUModel,
+		Platform:     h.cfg.Platform,
+		CountryISO2:  h.cfg.CountryISO2,
+		VRAMTotalGB:  h.cfg.VRAMTotalGB,
+	})
 }
 
 func (h *handler) modelCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -320,29 +383,111 @@ func supportsCapability(capabilities ModelCapabilities, wanted string) bool {
 	return false
 }
 
+func (h *handler) benchmarkModel(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Model         string `json:"model"`
+		ReleaseLoaded bool   `json:"release_loaded"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&input); err != nil || !validModelName.MatchString(input.Model) {
+		writeError(w, http.StatusBadRequest, errors.New("a valid local model name is required"))
+		return
+	}
+	if h.store.Overview().ActiveRequests > 0 {
+		writeError(w, http.StatusConflict, errors.New("wait until current local requests finish before benchmarking a model"))
+		return
+	}
+	resident, err := h.loadedRuntimeModels(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	for _, model := range resident {
+		if model.Name == input.Model && !input.ReleaseLoaded {
+			writeError(w, http.StatusConflict, errors.New("release the resident model before running a quick benchmark"))
+			return
+		}
+	}
+	result, err := h.runModelBenchmark(r.Context(), input.Model)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *handler) runModelBenchmark(ctx context.Context, model string) (ModelBenchmark, error) {
+	payload, err := json.Marshal(struct {
+		Model     string `json:"model"`
+		Prompt    string `json:"prompt"`
+		Stream    bool   `json:"stream"`
+		KeepAlive int    `json:"keep_alive"`
+		Options   struct {
+			NumPredict int `json:"num_predict"`
+		} `json:"options"`
+	}{
+		Model: model, Prompt: "Reply with OK.", Stream: false, KeepAlive: 0,
+		Options: struct {
+			NumPredict int `json:"num_predict"`
+		}{NumPredict: 1},
+	})
+	if err != nil {
+		return ModelBenchmark{}, err
+	}
+	benchmarkContext, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	request, err := http.NewRequestWithContext(benchmarkContext, http.MethodPost, h.cfg.OllamaURL+"/api/generate", bytes.NewReader(payload))
+	if err != nil {
+		return ModelBenchmark{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 5 * time.Minute}).Do(request)
+	if err != nil {
+		return ModelBenchmark{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return ModelBenchmark{}, fmt.Errorf("local runtime returned %s", response.Status)
+	}
+	var output struct {
+		EvalCount     int   `json:"eval_count"`
+		EvalDuration  int64 `json:"eval_duration"`
+		TotalDuration int64 `json:"total_duration"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 512<<10)).Decode(&output); err != nil {
+		return ModelBenchmark{}, fmt.Errorf("decode local benchmark result: %w", err)
+	}
+	if output.EvalCount <= 0 || output.EvalDuration <= 0 {
+		return ModelBenchmark{}, errors.New("local runtime returned no generation timing")
+	}
+	return ModelBenchmark{
+		Model: model, EvalCount: output.EvalCount, EvalDurationNS: output.EvalDuration, TotalDurationNS: output.TotalDuration,
+		TokensPerSecond: float64(output.EvalCount) * float64(time.Second) / float64(output.EvalDuration),
+	}, nil
+}
+
 func (h *handler) imageRuntime(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.DiffusersURL == "" {
-		writeJSON(w, http.StatusOK, ImageRuntime{Status: "unavailable", Models: []string{}, Error: "Diffusers runtime is not configured"})
+		writeJSON(w, http.StatusOK, ImageRuntime{Status: "unavailable", Models: []string{}, Error: imageEditingUnavailableMessage})
 		return
 	}
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, h.cfg.DiffusersURL+"/health", nil)
 	if err != nil {
-		writeJSON(w, http.StatusOK, ImageRuntime{Status: "offline", Models: []string{}, Error: err.Error()})
+		writeJSON(w, http.StatusOK, ImageRuntime{Status: "offline", Models: []string{}, Error: imageEditingUnavailableMessage})
 		return
 	}
 	response, err := h.httpClient.Do(request)
 	if err != nil {
-		writeJSON(w, http.StatusOK, ImageRuntime{Status: "offline", Models: []string{}, Error: err.Error()})
+		writeJSON(w, http.StatusOK, ImageRuntime{Status: "offline", Models: []string{}, Error: imageEditingUnavailableMessage})
 		return
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		writeJSON(w, http.StatusOK, ImageRuntime{Status: "offline", Models: []string{}, Error: fmt.Sprintf("Diffusers returned %s", response.Status)})
+		writeJSON(w, http.StatusOK, ImageRuntime{Status: "offline", Models: []string{}, Error: imageEditingUnavailableMessage})
 		return
 	}
 	var runtime ImageRuntime
 	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&runtime); err != nil {
-		writeJSON(w, http.StatusOK, ImageRuntime{Status: "offline", Models: []string{}, Error: fmt.Sprintf("decode Diffusers health: %v", err)})
+		writeJSON(w, http.StatusOK, ImageRuntime{Status: "offline", Models: []string{}, Error: imageEditingUnavailableMessage})
 		return
 	}
 	if runtime.Status == "" {
@@ -351,12 +496,15 @@ func (h *handler) imageRuntime(w http.ResponseWriter, r *http.Request) {
 	if runtime.Models == nil {
 		runtime.Models = []string{}
 	}
+	if runtime.Error != "" {
+		runtime.Error = safeImageRuntimeError(runtime.Error)
+	}
 	writeJSON(w, http.StatusOK, runtime)
 }
 
 func (h *handler) selectImageRuntimeModel(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.DiffusersURL == "" {
-		writeError(w, http.StatusServiceUnavailable, errors.New("image runtime is not configured"))
+		writeError(w, http.StatusServiceUnavailable, errors.New(imageEditingUnavailableMessage))
 		return
 	}
 	var input struct {
@@ -371,23 +519,23 @@ func (h *handler) selectImageRuntimeModel(w http.ResponseWriter, r *http.Request
 	}{Model: input.Model})
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.cfg.DiffusersURL+"/v1/models/select", bytes.NewReader(payload))
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeError(w, http.StatusBadGateway, errors.New(imageEditingUnavailableMessage))
 		return
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := h.httpClient.Do(request)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("image runtime: %w", err))
+		writeError(w, http.StatusBadGateway, errors.New(imageEditingUnavailableMessage))
 		return
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("image runtime returned %s", response.Status))
+		writeError(w, http.StatusBadGateway, errors.New(imageEditingUnavailableMessage))
 		return
 	}
 	var runtime ImageRuntime
 	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&runtime); err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("decode image runtime model selection: %w", err))
+		writeError(w, http.StatusBadGateway, errors.New(imageEditingUnavailableMessage))
 		return
 	}
 	if runtime.Status == "" {
@@ -401,7 +549,7 @@ func (h *handler) selectImageRuntimeModel(w http.ResponseWriter, r *http.Request
 
 func (h *handler) imageEdit(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.DiffusersURL == "" {
-		writeError(w, http.StatusServiceUnavailable, errors.New("Diffusers runtime is not configured"))
+		writeError(w, http.StatusServiceUnavailable, errors.New(imageEditingUnavailableMessage))
 		return
 	}
 	if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
@@ -410,16 +558,20 @@ func (h *handler) imageEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.cfg.DiffusersURL+"/v1/images/edits", io.LimitReader(r.Body, 32<<20))
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeError(w, http.StatusBadGateway, errors.New(imageEditingUnavailableMessage))
 		return
 	}
 	request.Header.Set("Content-Type", r.Header.Get("Content-Type"))
 	response, err := h.httpClient.Do(request)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("Diffusers runtime: %w", err))
+		writeError(w, http.StatusBadGateway, errors.New(imageEditingUnavailableMessage))
 		return
 	}
 	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		writeError(w, http.StatusBadGateway, errors.New(imageEditingUnavailableMessage))
+		return
+	}
 	w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(response.Body, 16<<20))
@@ -433,28 +585,70 @@ func (h *handler) unloadRuntimeModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("a valid local model name is required"))
 		return
 	}
+	if err := h.unloadRuntimeModelByName(r.Context(), input.Model); err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) unloadAllRuntimeModels(w http.ResponseWriter, r *http.Request) {
+	models, err := h.loadedRuntimeModels(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	for _, model := range models {
+		if err := h.unloadRuntimeModelByName(r.Context(), model.Name); err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) unloadRuntimeModelByName(ctx context.Context, name string) error {
 	payload, _ := json.Marshal(struct {
 		Model     string `json:"model"`
 		KeepAlive int    `json:"keep_alive"`
 		Stream    bool   `json:"stream"`
-	}{Model: input.Model, KeepAlive: 0, Stream: false})
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.cfg.OllamaURL+"/api/generate", bytes.NewReader(payload))
+	}{Model: name, KeepAlive: 0, Stream: false})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, h.cfg.OllamaURL+"/api/generate", bytes.NewReader(payload))
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
+		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := h.httpClient.Do(request)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
+		return err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("local runtime returned %s", response.Status))
-		return
+		return fmt.Errorf("local runtime returned %s", response.Status)
 	}
-	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (h *handler) loadedRuntimeModels(ctx context.Context) ([]RuntimeModel, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, h.cfg.OllamaURL+"/api/ps", nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := h.httpClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("local runtime returned %s", response.Status)
+	}
+	var payload struct {
+		Models []RuntimeModel `json:"models"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode local runtime state: %w", err)
+	}
+	return payload.Models, nil
 }
 
 func (h *handler) playgroundChat(w http.ResponseWriter, r *http.Request) {
@@ -496,6 +690,15 @@ func (h *handler) playgroundChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.System != "" {
 		input.Messages = append([]PlaygroundMessage{{Role: "system", Content: input.System}}, input.Messages...)
+	}
+	canLoad, err := h.canStartPlaygroundModel(r.Context(), input.Model)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	if !canLoad {
+		writeError(w, http.StatusConflict, errors.New("not enough available local memory to load this model; unload another model first"))
+		return
 	}
 	startedAt := time.Now().UTC()
 	containsImages := false
@@ -610,6 +813,39 @@ func (h *handler) playgroundChat(w http.ResponseWriter, r *http.Request) {
 	}
 	finish(output.Usage, "")
 	writeJSON(w, http.StatusOK, PlaygroundResponse{Model: output.Model, Content: output.Choices[0].Message.Content, Usage: output.Usage})
+}
+
+// canStartPlaygroundModel prevents local chat from bypassing the same memory
+// budget shown in the model library. A loaded model is already accounted for;
+// a cold model is conservatively estimated from its installed artifact size.
+func (h *handler) canStartPlaygroundModel(ctx context.Context, model string) (bool, error) {
+	if h.cfg.VRAMTotalGB <= 0 {
+		return true, nil
+	}
+	loaded, err := h.loadedRuntimeModels(ctx)
+	if err != nil {
+		return false, err
+	}
+	var loadedBytes int64
+	for _, resident := range loaded {
+		if resident.Name == model {
+			return true, nil
+		}
+		loadedBytes += resident.SizeVRAM
+	}
+	installed, err := h.localModels(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, candidate := range installed {
+		if candidate.Name != model {
+			continue
+		}
+		available := availableMemoryBytes(h.cfg.VRAMTotalGB, loadedBytes, memoryReserveBytes(h.cfg.VRAMTotalGB))
+		return candidate.Size <= available, nil
+	}
+	// Let the runtime report an unknown model in its own normal response.
+	return true, nil
 }
 
 func (h *handler) playgroundImageChat(w http.ResponseWriter, r *http.Request, input playgroundInput, finish func(PlaygroundUsage, string)) {
@@ -1030,7 +1266,12 @@ func inspectStorage(path string) Storage {
 		status.Error = err.Error()
 		return status
 	}
-	status.Accessible, status.UsedBytes = true, used
+	total, available, err := storageCapacity(path)
+	if err != nil {
+		status.Error = err.Error()
+		return status
+	}
+	status.Accessible, status.UsedBytes, status.TotalBytes, status.AvailableBytes = true, used, total, available
 	return status
 }
 
@@ -1086,6 +1327,9 @@ func (h *handler) overview(w http.ResponseWriter, r *http.Request) {
 	overview := h.store.Overview()
 	overview.VRAMTotalGB = h.cfg.VRAMTotalGB
 	overview.AgentVersion = h.cfg.Version
+	if overview.AgentVersion == "" {
+		overview.AgentVersion = h.cfg.AgentVersion
+	}
 	h.mu.RLock()
 	overview.UpdateState = h.update.State
 	overview.UpdateVersion = h.update.Version
@@ -1345,12 +1589,17 @@ func (h *handler) runPull(job *pullJob) {
 				for scanner.Scan() {
 					var update pullJob
 					if json.Unmarshal(scanner.Bytes(), &update) == nil {
+						if storageErr := h.pullStorageError(update); storageErr != nil {
+							err = storageErr
+							cancel()
+							break
+						}
 						h.mu.Lock()
-						job.Status, job.Completed, job.Total = update.Status, update.Completed, update.Total
+						updatePullProgress(job, update, time.Now())
 						h.mu.Unlock()
 					}
 				}
-				if scanErr := scanner.Err(); scanErr != nil {
+				if scanErr := scanner.Err(); scanErr != nil && err == nil {
 					err = scanErr
 				}
 			}
@@ -1382,6 +1631,73 @@ func (h *handler) runPull(job *pullJob) {
 	if next != nil {
 		go h.runPull(next)
 	}
+}
+
+func availableStorageBytes(path string) (int64, error) {
+	_, available, err := storageCapacity(path)
+	return available, err
+}
+
+// pullStorageError compares only the remaining bytes in the current layer with
+// free space. Bytes already written must not be counted twice, and an
+// unavailable capacity probe must not turn into a false rejection.
+func (h *handler) pullStorageError(update pullJob) error {
+	if update.Total <= update.Completed || h.cfg.StoragePath == "" {
+		return nil
+	}
+	available := h.storageAvailable
+	if available == nil {
+		available = availableStorageBytes
+	}
+	free, err := available(h.cfg.StoragePath)
+	if err != nil || update.Total-update.Completed <= free {
+		return nil
+	}
+	return fmt.Errorf("not enough free disk space for this model download (%s remaining, %s available)", formatByteCount(update.Total-update.Completed), formatByteCount(free))
+}
+
+func formatByteCount(bytes int64) string {
+	const gigabyte = 1024 * 1024 * 1024
+	const megabyte = 1024 * 1024
+	if bytes >= gigabyte {
+		return fmt.Sprintf("%.1f GB", float64(bytes)/gigabyte)
+	}
+	return fmt.Sprintf("%d MB", bytes/megabyte)
+}
+
+// updatePullProgress turns the runtime's byte counters into a conservative
+// transfer estimate. The counters can reset between layers, so only forward
+// progress contributes to the rate and a reset clears the prior sample.
+func updatePullProgress(job *pullJob, update pullJob, observedAt time.Time) {
+	job.Status, job.Completed, job.Total = update.Status, update.Completed, update.Total
+	if job.Total <= 0 || job.Completed < 0 {
+		job.RateBytesPerSecond, job.SecondsRemaining = 0, 0
+		job.sampledAt, job.sampledBytes = observedAt, job.Completed
+		return
+	}
+	if job.sampledAt.IsZero() || job.Completed < job.sampledBytes {
+		job.RateBytesPerSecond, job.SecondsRemaining = 0, 0
+		job.sampledAt, job.sampledBytes = observedAt, job.Completed
+		return
+	}
+	elapsed := observedAt.Sub(job.sampledAt).Seconds()
+	if elapsed <= 0 || job.Completed == job.sampledBytes {
+		return
+	}
+	rate := float64(job.Completed-job.sampledBytes) / elapsed
+	// Pull status arrives per layer. An exponential moving average prevents a
+	// tiny finishing layer from making the ETA jump wildly.
+	if job.RateBytesPerSecond > 0 {
+		rate = job.RateBytesPerSecond*0.65 + rate*0.35
+	}
+	job.RateBytesPerSecond = rate
+	remaining := job.Total - job.Completed
+	if remaining > 0 && rate > 0 {
+		job.SecondsRemaining = int64(math.Ceil(float64(remaining) / rate))
+	} else {
+		job.SecondsRemaining = 0
+	}
+	job.sampledAt, job.sampledBytes = observedAt, job.Completed
 }
 
 func (h *handler) deleteModel(w http.ResponseWriter, r *http.Request) {

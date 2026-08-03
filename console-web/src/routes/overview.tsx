@@ -1,16 +1,17 @@
 import { createRoute, useNavigate } from '@tanstack/react-router'
 import { Boxes, HardDrive, MessageSquareText, RefreshCw, ShieldCheck } from 'lucide-react'
 
-import { useModels, useOverview, useRuntime, useSettlements, useStorage, useUpdateAgent } from '@/api/queries'
+import { useModels, useNodeProfile, useOverview, useRuntime, useSettlements, useStorage, useUpdateAgent } from '@/api/queries'
 import { Button, PageHeader, Panel, QueryState, StatCard } from '@/components/primitives'
 import { useTranslation } from '@/i18n/useTranslation'
-import { formatCount, formatGigabytes, formatTime, formatUSDMicros } from '@/lib/format'
+import { formatCount, formatGigabytes, formatTime, formatUSDMicros, formatVRAMGigabytes } from '@/lib/format'
 
 import { rootRoute } from './root'
 
 const OverviewPage = () => {
   const { t, locale } = useTranslation()
   const overview = useOverview()
+  const nodeProfile = useNodeProfile()
   const settlements = useSettlements()
   const models = useModels()
   const runtime = useRuntime()
@@ -19,6 +20,8 @@ const OverviewPage = () => {
   const navigate = useNavigate()
 
   const stats = overview.data
+  const profile = nodeProfile.data
+  const profileHardware = [profile?.gpu_model, profile?.vram_total_gb ? `${profile.vram_total_gb} GB` : ''].filter(Boolean).join(' · ') || t('common.unknown')
   const placeholder = t('common.unknown')
   const gatewayStatus = stats?.gateway_state === 'online'
     ? t('gateway.connected')
@@ -29,6 +32,8 @@ const OverviewPage = () => {
       : t('gateway.connecting')
   const runtimeCount = runtime.data?.models.length
   const modelCount = models.data?.length
+  const modelDirectoryMismatch = Boolean(storage.data?.accessible && storage.data.used_bytes === 0 && modelCount)
+  const scheduledReconnect = stats?.gateway_state === 'offline' && Boolean(stats.gateway_reconnect_attempt && stats.gateway_next_reconnect_at)
   const updateStateLabel = stats?.update_state
     ? ({
         checking: t('update.state.checking'),
@@ -38,7 +43,9 @@ const OverviewPage = () => {
         failed: t('update.state.failed'),
       } as Record<string, string>)[stats.update_state] ?? stats.update_state
     : ''
-  const modelDirectoryMismatch = Boolean(storage.data?.accessible && storage.data.used_bytes === 0 && modelCount)
+  const updateAgent = () => {
+    if (window.confirm(t('update.confirm'))) update.mutate()
+  }
   const readiness = [
     { label: t('overview.readinessGateway'), value: gatewayStatus, tone: stats?.gateway_state === 'online' ? 'text-good' : stats?.gateway_state === 'offline' ? 'text-danger' : stats?.gateway_state === 'preview' ? 'text-accent' : 'text-warn' },
     { label: t('overview.readinessRuntime'), value: runtime.isError ? t('overview.unavailable') : runtimeCount === undefined ? t('common.unknown') : t('overview.loadedModels', { count: formatCount(runtimeCount, locale) }), tone: runtime.isError ? 'text-danger' : 'text-ink' },
@@ -62,7 +69,7 @@ const OverviewPage = () => {
           />
           <StatCard
             label={t('stat.vram')}
-            value={stats ? formatGigabytes(stats.loaded_vram_bytes) : placeholder}
+            value={stats ? formatVRAMGigabytes(stats.loaded_vram_bytes) : placeholder}
             hint={t('stat.vramHint')}
           />
           <StatCard
@@ -93,6 +100,12 @@ const OverviewPage = () => {
           <dl className='mt-4 grid grid-cols-[auto_1fr] gap-x-5 gap-y-3 text-sm'>
             <dt className='text-muted'>{t('gateway.lastConnected')}</dt>
             <dd className='text-ink'>{stats?.gateway_last_connected_at ? formatTime(stats.gateway_last_connected_at, locale) : t('common.unknown')}</dd>
+            {scheduledReconnect ? (
+              <div data-gateway-reconnect className='contents'>
+                <dt className='text-muted'>{t('gateway.nextRetry')}</dt>
+                <dd className='text-ink'>{formatTime(stats!.gateway_next_reconnect_at!, locale)} · {t('gateway.reconnectAttempt', { attempt: stats!.gateway_reconnect_attempt })}</dd>
+              </div>
+            ) : null}
           </dl>
           {stats?.gateway_last_error ? <p className='mt-3 text-xs leading-5 text-muted'>{stats.gateway_last_error}</p> : null}
         </Panel>
@@ -106,6 +119,20 @@ const OverviewPage = () => {
             ))}
           </dl>
         </Panel>
+        <Panel title={t('nodeProfile.title')}>
+          <dl data-node-profile className='grid grid-cols-[auto_1fr] gap-x-5 gap-y-3 text-sm'>
+            <dt className='text-muted'>{t('nodeProfile.name')}</dt>
+            <dd className='font-medium text-ink'>{profile?.name || t('common.unknown')}</dd>
+            <dt className='text-muted'>{t('nodeProfile.hardware')}</dt>
+            <dd className='text-ink'>{profileHardware}</dd>
+            <dt className='text-muted'>{t('nodeProfile.platform')}</dt>
+            <dd className='font-mono text-xs text-ink'>{profile?.platform || t('common.unknown')}</dd>
+            <dt className='text-muted'>{t('nodeProfile.agent')}</dt>
+            <dd className='font-mono text-xs text-ink'>{profile?.agent_version || t('common.unknown')}</dd>
+            <dt className='text-muted'>{t('nodeProfile.location')}</dt>
+            <dd className='text-ink'>{profile?.country_iso2 || t('common.unknown')}</dd>
+          </dl>
+        </Panel>
         <Panel title={t('update.title')}>
           <dl className='grid grid-cols-[auto_1fr] gap-x-5 gap-y-3 text-sm'>
             <dt className='text-muted'>{t('update.currentVersion')}</dt>
@@ -113,7 +140,7 @@ const OverviewPage = () => {
             {stats?.update_state ? <><dt className='text-muted'>{t('update.status')}</dt><dd className='text-right text-ink'>{updateStateLabel}</dd></> : null}
           </dl>
           {stats?.update_error || update.error ? <p role='alert' className='mt-3 text-sm text-danger'>{stats?.update_error || update.error?.message}</p> : null}
-          <Button type='button' onClick={() => update.mutate()} disabled={update.isPending || ['checking', 'downloading', 'restarting'].includes(stats?.update_state ?? '')} className='mt-4 inline-flex items-center gap-2'>
+          <Button type='button' onClick={updateAgent} disabled={update.isPending || ['checking', 'downloading', 'restarting'].includes(stats?.update_state ?? '')} className='mt-4 inline-flex items-center gap-2'>
             <RefreshCw className='size-3.5' aria-hidden='true' />
             {t('update.action')}
           </Button>

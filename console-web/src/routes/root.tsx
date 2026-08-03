@@ -23,6 +23,7 @@ const ConnectionState = () => {
   const { t, locale } = useTranslation()
   const overview = useOverview()
   const gateway = overview.data
+  const scheduledReconnect = gateway?.gateway_state === 'offline' && Boolean(gateway.gateway_reconnect_attempt && gateway.gateway_next_reconnect_at)
   const label = overview.isError
     ? t('header.localUnavailable')
     : overview.isPending
@@ -42,6 +43,7 @@ const ConnectionState = () => {
         <span className={`inline-block size-1.5 rounded-full ${dotColor}`} aria-hidden='true' />
         <span aria-live='polite'>{label}</span>
       </p>
+      {scheduledReconnect ? <p data-sidebar-gateway-reconnect className='mt-1 text-ink-faint'>{t('gateway.reconnectAttempt', { attempt: gateway!.gateway_reconnect_attempt })} · {t('gateway.nextRetry')}: {formatTime(gateway!.gateway_next_reconnect_at!, locale)}</p> : null}
       {gateway?.gateway_state === 'offline' && gateway.gateway_last_error ? <p title={gateway.gateway_last_error} className='mt-1 truncate text-ink-faint'>{gateway.gateway_last_error}</p> : overview.dataUpdatedAt ? <p className='mt-1 text-ink-faint'>{t('header.updated', { time: formatTime(new Date(overview.dataUpdatedAt), locale) })}</p> : null}
     </div>
   )

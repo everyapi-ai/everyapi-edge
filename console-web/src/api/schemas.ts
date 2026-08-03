@@ -19,7 +19,7 @@ const timestamp = z
   })
 
 export const overviewSchema = z.object({
-  agent_version: z.string(),
+  agent_version: z.string().optional().default(''),
   update_state: z.string().optional().default(''),
   update_version: z.string().optional().default(''),
   update_error: z.string().optional().default(''),
@@ -37,6 +37,17 @@ export const overviewSchema = z.object({
   gateway_state: z.enum(['connecting', 'online', 'offline', 'preview']).default('connecting'),
   gateway_last_connected_at: timestamp,
   gateway_last_error: z.string().optional().default(''),
+  gateway_reconnect_attempt: z.number().int().nonnegative().optional().default(0),
+  gateway_next_reconnect_at: timestamp,
+})
+
+export const nodeProfileSchema = z.object({
+  name: z.string().optional().default(''),
+  agent_version: z.string().optional().default(''),
+  gpu_model: z.string().optional().default(''),
+  platform: z.string().optional().default(''),
+  country_iso2: z.string().optional().default(''),
+  vram_total_gb: z.number().int().nonnegative().optional().default(0),
 })
 
 export const modelSchema = z.object({
@@ -61,6 +72,14 @@ export const modelCapabilitiesSchema = z.object({
   capabilities: z.array(z.string()).nullish().transform((capabilities) => capabilities ?? []),
 })
 
+export const modelBenchmarkSchema = z.object({
+  model: z.string(),
+  eval_count: z.number(),
+  eval_duration_ns: z.number(),
+  total_duration_ns: z.number(),
+  tokens_per_second: z.number(),
+})
+
 export const runtimeModelSchema = z.object({
   name: z.string(),
   size_vram: z.number(),
@@ -83,6 +102,8 @@ export const storageSchema = z.object({
   path: z.string(),
   accessible: z.boolean(),
   used_bytes: z.number(),
+  total_bytes: z.number().optional().default(0),
+  available_bytes: z.number().optional().default(0),
   error: z.string().optional().default(''),
 })
 
@@ -159,6 +180,8 @@ export const pullJobSchema = z.object({
   status: z.string(),
   completed: z.number().optional().default(0),
   total: z.number().optional().default(0),
+  rate_bytes_per_second: z.number().optional().default(0),
+  seconds_remaining: z.number().optional().default(0),
   error: z.string().optional().default(''),
   done: z.boolean(),
 })
@@ -183,9 +206,11 @@ export const settlementListSchema = nullableList(settlementSchema)
 export const errorEnvelopeSchema = z.object({ error: z.string() })
 
 export type Overview = z.infer<typeof overviewSchema>
+export type NodeProfile = z.infer<typeof nodeProfileSchema>
 export type ImageRuntime = z.infer<typeof imageRuntimeSchema>
 export type Model = z.infer<typeof modelSchema>
 export type ModelCapabilities = z.infer<typeof modelCapabilitiesSchema>
+export type ModelBenchmark = z.infer<typeof modelBenchmarkSchema>
 export type Runtime = z.infer<typeof runtimeSchema>
 export type RuntimeModel = z.infer<typeof runtimeModelSchema>
 export type Storage = z.infer<typeof storageSchema>

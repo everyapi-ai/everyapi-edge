@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +15,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 )
 
 func TestDiscoverOllamaModelsUsesTagNamesAndDeduplicates(t *testing.T) {
@@ -31,6 +35,64 @@ func TestDiscoverOllamaModelsUsesTagNamesAndDeduplicates(t *testing.T) {
 	want := []string{"llama3.1:8b", "qwen2.5:7b"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("models = %v, want %v", got, want)
+	}
+}
+
+func TestRemoteControlHandlerAllowsOnlyModelManagementEndpoints(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/models" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`[{"name":"qwen3"}]`))
+	})
+	control := remoteControlHandler(handler)
+	response, errBody := control(context.Background(), protocol.ControlRequestBody{Method: http.MethodGet, Path: "/api/models"})
+	if errBody != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("response = %#v, error = %#v", response, errBody)
+	}
+	payload, err := base64.StdEncoding.DecodeString(response.Bytes)
+	if err != nil || !bytes.Equal(payload, []byte(`[{"name":"qwen3"}]`)) {
+		t.Fatalf("payload = %q, error = %v", payload, err)
+	}
+	_, errBody = control(context.Background(), protocol.ControlRequestBody{Method: http.MethodGet, Path: "/etc/passwd"})
+	if errBody == nil || errBody.Code != "control_forbidden" {
+		t.Fatalf("forbidden error = %#v", errBody)
+	}
+}
+
+func TestRemoteControlHandlerAllowsQuickBenchmarkButNotMethodEscalation(t *testing.T) {
+	if !isAllowedRemoteControl(http.MethodPost, "/api/models/benchmark") {
+		t.Fatal("quick benchmark should be available to the constrained remote management surface")
+	}
+	if isAllowedRemoteControl(http.MethodGet, "/api/models/benchmark") {
+		t.Fatal("benchmark must not be reachable with an unexpected read method")
+	}
+}
+
+func TestRemoteControlHandlerAllowsImageRuntimeSelectionButNotImageGeneration(t *testing.T) {
+	if !isAllowedRemoteControl(http.MethodGet, "/api/image-runtime") {
+		t.Fatal("image runtime status should be available to remote model management")
+	}
+	if !isAllowedRemoteControl(http.MethodPost, "/api/image-runtime/model") {
+		t.Fatal("image runtime model selection should be available to remote model management")
+	}
+	if isAllowedRemoteControl(http.MethodPost, "/api/image/edit") {
+		t.Fatal("remote model management must not proxy arbitrary image edits")
+	}
+}
+
+func TestRemoteControlHandlerAllowsNativeStorageSelectionAndMigrationOnly(t *testing.T) {
+	if !isAllowedRemoteControl(http.MethodPost, "/api/storage/pick") {
+		t.Fatal("native storage selection should be available to constrained remote management")
+	}
+	if !isAllowedRemoteControl(http.MethodGet, "/api/storage/migrate") {
+		t.Fatal("storage migration progress should be available to constrained remote management")
+	}
+	if !isAllowedRemoteControl(http.MethodPost, "/api/storage/migrate") {
+		t.Fatal("storage migration start should be available to constrained remote management")
+	}
+	if isAllowedRemoteControl(http.MethodGet, "/api/storage/pick") {
+		t.Fatal("native storage selection must not be reachable with an unexpected read method")
 	}
 }
 

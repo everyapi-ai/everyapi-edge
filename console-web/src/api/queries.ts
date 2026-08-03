@@ -5,8 +5,10 @@ import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tan
 import { del, getJSON, postJSON, postJSONResponse } from './client'
 import {
   logListSchema,
+  modelBenchmarkSchema,
   modelCapabilitiesSchema,
   modelListSchema,
+  nodeProfileSchema,
   imageRuntimeSchema,
   overviewSchema,
   pullQueueSchema,
@@ -19,6 +21,7 @@ import {
   type LogEntry,
   type Model,
   type ModelCapabilities,
+  type NodeProfile,
   type ImageRuntime,
   type Overview,
   type PullQueue,
@@ -39,6 +42,7 @@ const IDLE_REFETCH_MS = 15_000
 
 export const queryKeys = {
   overview: ['overview'] as const,
+  nodeProfile: ['node-profile'] as const,
   models: ['models'] as const,
   modelCapabilities: (name: string) => ['models', 'capabilities', name] as const,
   requests: ['requests'] as const,
@@ -56,6 +60,13 @@ export const useOverview = (): UseQueryResult<Overview> =>
     queryKey: queryKeys.overview,
     queryFn: () => getJSON('/api/overview', overviewSchema),
     refetchInterval: LIVE_REFETCH_MS,
+  })
+
+export const useNodeProfile = (): UseQueryResult<NodeProfile> =>
+  useQuery({
+    queryKey: queryKeys.nodeProfile,
+    queryFn: () => getJSON('/api/node', nodeProfileSchema),
+    staleTime: 60_000,
   })
 
 export const useUpdateAgent = () => {
@@ -194,10 +205,37 @@ export const useDeleteModel = () => {
   })
 }
 
+export const useBenchmarkModel = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ model, releaseLoaded }: { model: string; releaseLoaded: boolean }) =>
+      postJSONResponse('/api/models/benchmark', { model, release_loaded: releaseLoaded }, modelBenchmarkSchema),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.runtime }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.overview }),
+      ])
+    },
+  })
+}
+
 export const useUnloadRuntimeModel = () => {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (model: string) => postJSON('/api/runtime/unload', { model }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.runtime }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.overview }),
+      ])
+    },
+  })
+}
+
+export const useUnloadAllRuntimeModels = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => postJSON('/api/runtime/unload-all', {}),
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.runtime }),

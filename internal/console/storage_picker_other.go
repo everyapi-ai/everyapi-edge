@@ -1,9 +1,9 @@
-//go:build !darwin
+//go:build !darwin && !linux && !windows
 
 package console
 
 import "fmt"
 
 func chooseStorageDirectory() (string, error) {
-	return "", fmt.Errorf("use the target directory field to choose a path on this platform")
+	return "", fmt.Errorf("native directory picker is not available on this platform")
 }

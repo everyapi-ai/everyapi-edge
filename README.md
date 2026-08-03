@@ -41,11 +41,13 @@ needed — your machine just needs outbound HTTPS to api.everyapi.ai.
    model list automatically. Do not restart it merely to publish a
    model: the installer already handles the authenticated reconnect.
 
-6. **Open Edge Control Room.** Visit http://127.0.0.1:8421. From
-   there you can download and remove further models, watch active load,
-   inspect recent redacted traffic, and read the local agent log — no
-   container commands required. It reuses the same memory budget the
-   installer probed, so its one-click model choices fit the machine.
+6. **Open Edge Control Room.** Visit `http://<node-LAN-IP>:8421`
+   from any device on the same trusted LAN (or `http://127.0.0.1:8421`
+   on the node itself). From there you can download and remove further
+   models, watch active load, inspect recent redacted traffic, and read
+   the local agent log — no container commands required. It reuses the
+   same memory budget the installer probed, so its one-click model choices
+   fit the machine.
 
    The income card is deliberately receipt-based: it shows only earnings the
    gateway has already settled for this node (the latest 200 receipts are
@@ -99,8 +101,11 @@ useful for chat workloads, but embeddings can work.
   identity from step 1.
 
 - Inference traffic is an outbound WebSocket to api.everyapi.ai.
-  The Control Room is published only as `127.0.0.1:8421`. Do not
-  change the Compose port binding to a public interface.
+  The Control Room is published on the node's LAN interface as
+  `:8421` and intentionally has no login. It can download, unload,
+  and remove local models, so put the node only on a trusted LAN and
+  never expose port 8421 to the Internet. Set `EVERYAPI_CONSOLE_PORT`
+  to use another host port.
 
 - Traffic history keeps only model, endpoint, timing, token counts,
   and a node-scoped opaque customer label. Prompts, responses, API
@@ -187,7 +192,10 @@ a forgotten rebuild fails the build instead of silently shipping the old UI.
 
 For UI work, `bun run dev` (port 5175) proxies `/api` to a locally running
 agent on `127.0.0.1:8421`, so the console can be iterated without recompiling
-Go. Point it elsewhere with `EDGE_CONSOLE_TARGET`.
+Go. To inspect the latest development UI from another device on the same
+trusted LAN, use `bun run dev -- --host 0.0.0.0`, then open
+`http://<node-LAN-IP>:5175`. Point the proxy elsewhere with
+`EDGE_CONSOLE_TARGET`.
 
 The whole app is inlined into that one HTML file — no external script, style or
 font requests. The Control Room is meant to work on a machine with no Internet

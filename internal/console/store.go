@@ -82,6 +82,8 @@ type Overview struct {
 	GatewayState             string    `json:"gateway_state"`
 	GatewayLastConnectedAt   time.Time `json:"gateway_last_connected_at,omitempty"`
 	GatewayLastError         string    `json:"gateway_last_error,omitempty"`
+	GatewayReconnectAttempt  int       `json:"gateway_reconnect_attempt"`
+	GatewayNextReconnectAt   time.Time `json:"gateway_next_reconnect_at,omitempty"`
 }
 
 // Settlement is a gateway-committed, node-specific seller receipt. Amount is
@@ -163,7 +165,27 @@ func (s *Store) SetGatewayState(state, reason string) {
 	if state == "online" {
 		s.overview.GatewayLastConnectedAt = time.Now().UTC()
 		s.overview.GatewayLastError = ""
+		s.overview.GatewayReconnectAttempt = 0
+		s.overview.GatewayNextReconnectAt = time.Time{}
 	}
+	if state == "preview" {
+		s.overview.GatewayReconnectAttempt = 0
+		s.overview.GatewayNextReconnectAt = time.Time{}
+	}
+}
+
+// ScheduleGatewayReconnect records a retry the agent has actually scheduled.
+// It intentionally does not derive a date from a generic offline state: an
+// authentication or terminal failure must never be presented as a promised
+// reconnect that the process will not make.
+func (s *Store) ScheduleGatewayReconnect(next time.Time, attempt int) {
+	if next.IsZero() || attempt < 1 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.overview.GatewayReconnectAttempt = attempt
+	s.overview.GatewayNextReconnectAt = next.UTC()
 }
 
 // Settle stores one final receipt. It is deliberately idempotent because the

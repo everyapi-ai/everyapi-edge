@@ -37,6 +37,11 @@ services:
               capabilities: [gpu]
     volumes:
       - ${EVERYAPI_IMAGE_MODEL_PATH:-${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}/images}:/models/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8188/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
   ollama:
     image: ollama/ollama:latest
@@ -72,6 +77,8 @@ services:
     container_name: everyapi-edge-agent
     restart: unless-stopped
     depends_on:
+      diffusers:
+        condition: service_healthy
       ollama:
         condition: service_healthy
     environment:
@@ -91,6 +98,6 @@ services:
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
     ports:
-      # Supplier-only management surface. Do not change this to "8421:8421":
-      # model deletion and download controls must never be Internet-exposed.
-      - "127.0.0.1:8421:8421"
+      # Local-network management surface. It has no login because it is for
+      # the supplier's trusted LAN; never expose this port to the Internet.
+      - "${EVERYAPI_CONSOLE_PORT:-8421}:8421"

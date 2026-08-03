@@ -11,6 +11,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -85,6 +87,12 @@ func setConsoleGatewayState(state, reason string) {
 	}
 }
 
+func scheduleConsoleGatewayReconnect(next time.Time, attempt int) {
+	if store := currentConsoleStore.Load(); store != nil {
+		store.ScheduleGatewayReconnect(next, attempt)
+	}
+}
+
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmicroseconds)
 	log.SetPrefix("[edge-agent] ")
@@ -142,7 +150,24 @@ func main() {
 	store := console.NewStore(200)
 	currentConsoleStore.Store(store)
 	defer currentConsoleStore.Store(nil)
-	consoleServer, err := startConsole(ctx, cfg.ConsoleAddr, cfg.OllamaURL, cfg.DiffusersURL, cfg.OllamaStoragePath, consoleMemoryGB, store, updateManager)
+	consoleHandler := console.NewHandler(console.Config{
+		OllamaURL:    cfg.OllamaURL,
+		DiffusersURL: cfg.DiffusersURL,
+		StoragePath:  cfg.OllamaStoragePath,
+		VRAMTotalGB:  consoleMemoryGB,
+		NodeName:     cfg.NodeName,
+		AgentVersion: Version,
+		Version:      Version,
+		GPUModel:     cfg.GPUModel,
+		Platform:     runtime.GOOS + "/" + runtime.GOARCH,
+		CountryISO2:  cfg.CountryISO2,
+		Update: func(updateCtx context.Context, report func(console.UpdateStatus)) error {
+			return updateManager.RunLatest(updateCtx, func(status edgeupdate.Status) {
+				report(console.UpdateStatus{State: status.State, Version: status.Version, Error: status.Error})
+			})
+		},
+	}, store)
+	consoleServer, err := startConsole(ctx, cfg.ConsoleAddr, consoleHandler)
 	if err != nil {
 		log.Fatalf("console: %v", err)
 	}
@@ -174,13 +199,13 @@ func main() {
 		Workloads: cfg.Workloads,
 		Hardware: protocol.Hardware{
 			GPUModel:    cfg.GPUModel,
-			VRAMTotalGB: cfg.VRAMTotalGB,
+			VRAMTotalGB: consoleMemoryGB,
 			Platform:    runtime.GOOS + "/" + runtime.GOARCH,
 		},
 		Location: protocol.Location{CountryISO2: cfg.CountryISO2},
 	}
 
-	if err := runWithReconnect(ctx, cfg, id, meta, fwd, updateManager); err != nil && !errors.Is(err, context.Canceled) {
+	if err := runWithReconnect(ctx, cfg, id, meta, fwd, updateManager, consoleHandler); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("fatal: %v", err)
 	}
 	log.Print("shutting down cleanly")
@@ -230,20 +255,12 @@ func detectedNVIDIAMemoryGB() int {
 	return int((totalMiB + 1023) / 1024)
 }
 
-func startConsole(ctx context.Context, addr, ollamaURL, diffusersURL, ollamaStoragePath string, vramTotalGB int, store *console.Store, updateManager *edgeupdate.Manager) (*http.Server, error) {
+func startConsole(ctx context.Context, addr string, handler http.Handler) (*http.Server, error) {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	server := &http.Server{Handler: console.NewHandler(console.Config{
-		OllamaURL: ollamaURL, DiffusersURL: diffusersURL, StoragePath: ollamaStoragePath,
-		VRAMTotalGB: vramTotalGB, Version: Version,
-		Update: func(updateCtx context.Context, report func(console.UpdateStatus)) error {
-			return updateManager.RunLatest(updateCtx, func(status edgeupdate.Status) {
-				report(console.UpdateStatus{State: status.State, Version: status.Version, Error: status.Error})
-			})
-		},
-	}, store), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("local control room stopped: %v", err)
@@ -260,6 +277,67 @@ func shutdownConsole(server *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)
+}
+
+// remoteControlResponseBytes deliberately leaves headroom below the websocket
+// envelope limit. A control operation is management metadata, never a model
+// artifact or image; refusing oversized output prevents a gateway from using
+// an administrator link as a bulk exfiltration channel.
+const remoteControlResponseBytes = 768 << 10
+
+// remoteControlHandler executes only model-management Control Room endpoints
+// through the agent's existing outbound gateway session. The allowlist is
+// intentionally checked here as well as in the gateway: a compromised or old
+// gateway must not turn a dashboard administrator into arbitrary localhost
+// access on supplier hardware.
+func remoteControlHandler(handler http.Handler) client.ControlHandler {
+	return func(ctx context.Context, operation protocol.ControlRequestBody) (protocol.ChunkBody, *protocol.ErrorBody) {
+		if handler == nil || !isAllowedRemoteControl(operation.Method, operation.Path) {
+			return protocol.ChunkBody{}, &protocol.ErrorBody{Code: "control_forbidden", Message: "unsupported remote control operation"}
+		}
+		req, err := http.NewRequestWithContext(ctx, operation.Method, "http://edge-control"+operation.Path, bytes.NewReader(operation.Body))
+		if err != nil {
+			return protocol.ChunkBody{}, &protocol.ErrorBody{Code: "malformed_control_request", Message: "invalid control request"}
+		}
+		req.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		payload := recorder.Body.Bytes()
+		if len(payload) > remoteControlResponseBytes {
+			return protocol.ChunkBody{}, &protocol.ErrorBody{Code: "control_response_too_large", Message: "control response exceeds the safe limit"}
+		}
+		headers := map[string]string{}
+		if contentType := recorder.Header().Get("Content-Type"); contentType != "" {
+			headers["Content-Type"] = contentType
+		}
+		return protocol.ChunkBody{
+			StatusCode: recorder.Code,
+			Headers:    headers,
+			Bytes:      base64.StdEncoding.EncodeToString(payload),
+		}, nil
+	}
+}
+
+func isAllowedRemoteControl(method, rawPath string) bool {
+	parsed, err := url.ParseRequestURI(rawPath)
+	if err != nil || parsed.Path == "" || parsed.Host != "" {
+		return false
+	}
+	switch method {
+	case http.MethodGet:
+		switch parsed.Path {
+		case "/api/overview", "/api/models", "/api/models/capabilities", "/api/runtime", "/api/image-runtime", "/api/storage", "/api/storage/migrate", "/api/models/pull":
+			return true
+		}
+	case http.MethodPost:
+		switch parsed.Path {
+		case "/api/models/pull", "/api/models/benchmark", "/api/image-runtime/model", "/api/runtime/unload", "/api/runtime/unload-all", "/api/storage/pick", "/api/storage/plan", "/api/storage/migrate":
+			return true
+		}
+	case http.MethodDelete:
+		return parsed.Path == "/api/models" || parsed.Path == "/api/models/pull"
+	}
+	return false
 }
 
 // discoverOllamaModels reads the native Ollama tag list immediately before a
@@ -330,9 +408,11 @@ func runWithReconnect(
 	meta protocol.NodeMeta,
 	fwd *forward.Forwarder,
 	updateManager *edgeupdate.Manager,
+	controlHandler http.Handler,
 ) error {
 	registrationToken := cfg.RegistrationToken
 	backoff := time.Second
+	reconnectAttempt := 0
 
 	for {
 		if ctx.Err() != nil {
@@ -350,6 +430,7 @@ func runWithReconnect(
 		cli, err := client.New(client.Config{
 			GatewayURL:        cfg.GatewayURL,
 			OllamaURL:         cfg.OllamaURL,
+			VRAMTotalGB:       sessionMeta.Hardware.VRAMTotalGB,
 			NodeID:            cfg.NodeID,
 			RegistrationToken: registrationToken,
 			Identity:          id,
@@ -358,13 +439,16 @@ func runWithReconnect(
 			// abilities.
 			Meta: sessionMeta,
 			OnConnected: func() {
-				if err := updateManager.Promote(); err != nil {
-					log.Printf("warning: could not promote successful update: %v", err)
+				if updateManager != nil {
+					if err := updateManager.Promote(); err != nil {
+						log.Printf("warning: could not promote successful update: %v", err)
+					}
 				}
 				setConsoleGatewayState("online", "")
 				log.Printf("connected to gateway with %d models", len(sessionMeta.Models))
 			},
-			Handler: fwd.Handle,
+			Handler:        fwd.Handle,
+			ControlHandler: remoteControlHandler(controlHandler),
 			Log: func(level, message string) {
 				log.Printf("[%s] %s", level, message)
 			},
@@ -373,11 +457,6 @@ func runWithReconnect(
 				if store != nil {
 					store.Settle(console.Settlement{RequestID: receipt.RequestID, SellerAmountMicros: receipt.SellerAmountMicros, SettledAt: time.UnixMilli(receipt.SettledAtUnixMs).UTC()})
 				}
-			},
-			Update: func(updateCtx context.Context, report func(protocol.UpdateStatusBody)) error {
-				return updateManager.RunLatest(updateCtx, func(status edgeupdate.Status) {
-					report(protocol.UpdateStatusBody{State: status.State, Version: status.Version, Error: status.Error})
-				})
 			},
 		})
 		if err != nil {
@@ -439,8 +518,11 @@ func runWithReconnect(
 		// a refusing gateway.
 		if welcomed {
 			backoff = time.Second
+			reconnectAttempt = 0
 		}
 		log.Printf("session ended: %v (reconnecting in %s)", runErr, backoff)
+		reconnectAttempt++
+		scheduleConsoleGatewayReconnect(time.Now().UTC().Add(backoff), reconnectAttempt)
 
 		select {
 		case <-ctx.Done():

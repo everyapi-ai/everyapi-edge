@@ -38,6 +38,38 @@ func TestHandlerListsModelsWithoutLocalToken(t *testing.T) {
 	}
 }
 
+func TestHandlerReportsTheConfiguredNodeProfile(t *testing.T) {
+	h := NewHandler(Config{
+		OllamaURL:    "http://local-runtime:11434",
+		NodeName:     "studio-gpu",
+		AgentVersion: "v1.2.3",
+		GPUModel:     "RTX 4090",
+		Platform:     "linux/amd64",
+		CountryISO2:  "JP",
+		VRAMTotalGB:  24,
+	}, NewStore(16))
+
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/node", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("node profile status = %d, body=%s", response.Code, response.Body.String())
+	}
+	for _, want := range []string{`"name":"studio-gpu"`, `"agent_version":"v1.2.3"`, `"gpu_model":"RTX 4090"`, `"platform":"linux/amd64"`, `"country_iso2":"JP"`, `"vram_total_gb":24`} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("node profile missing %s: %s", want, response.Body.String())
+		}
+	}
+}
+
+func TestOverviewFallsBackToTheConfiguredAgentVersion(t *testing.T) {
+	h := NewHandler(Config{AgentVersion: "v1.2.3"}, NewStore(16))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"agent_version":"v1.2.3"`) {
+		t.Fatalf("overview version = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestHandlerRejectsRemovingModelLoadedInMemory(t *testing.T) {
 	localRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -214,6 +246,32 @@ func TestHandlerReportsDiffusersRuntimeReadiness(t *testing.T) {
 	}
 }
 
+func TestImageRuntimeAvailabilityDoesNotExposeItsImplementation(t *testing.T) {
+	h := NewHandler(Config{}, NewStore(16))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/image-runtime", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"error":"Image editing is unavailable on this node"`) || strings.Contains(strings.ToLower(response.Body.String()), "diffusers") {
+		t.Fatalf("image runtime availability = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestImageRuntimePreservesTheSafeGPUReadinessReason(t *testing.T) {
+	diffusers := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("unexpected image runtime path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"status":"unavailable","models":[],"error":"A CUDA-capable GPU is required for image editing."}`))
+	}))
+	defer diffusers.Close()
+
+	h := NewHandler(Config{DiffusersURL: diffusers.URL}, NewStore(16))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/image-runtime", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"error":"A CUDA-capable GPU is required for image editing."`) {
+		t.Fatalf("image runtime capability = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestHandlerSelectsTheActiveImageEditingModel(t *testing.T) {
 	diffusers := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/models/select" {
@@ -306,6 +364,134 @@ func TestHandlerUnloadsOllamaRuntimeModel(t *testing.T) {
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/runtime/unload", strings.NewReader(`{"model":"llama3.1:8b"}`)))
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("unload status = %d, body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandlerUnloadsAllRuntimeModels(t *testing.T) {
+	var unloaded []string
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			if r.Method != http.MethodGet {
+				t.Fatalf("runtime list method = %s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"models":[{"name":"llama3.1:8b"},{"name":"gemma3:27b"}]}`))
+		case "/api/generate":
+			if r.Method != http.MethodPost {
+				t.Fatalf("runtime unload method = %s", r.Method)
+			}
+			var body struct {
+				Model     string `json:"model"`
+				KeepAlive int    `json:"keep_alive"`
+				Stream    bool   `json:"stream"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.KeepAlive != 0 || body.Stream {
+				t.Fatalf("unload body = %+v", body)
+			}
+			unloaded = append(unloaded, body.Model)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected runtime request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ollama.Close()
+
+	h := NewHandler(Config{OllamaURL: ollama.URL}, NewStore(16))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("unload all status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if got, want := strings.Join(unloaded, ","), "llama3.1:8b,gemma3:27b"; got != want {
+		t.Fatalf("unloaded = %q, want %q", got, want)
+	}
+}
+
+func TestHandlerBenchmarksAnUnloadedModelAndReleasesIt(t *testing.T) {
+	localRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/generate":
+			var body struct {
+				Model     string `json:"model"`
+				Prompt    string `json:"prompt"`
+				Stream    bool   `json:"stream"`
+				KeepAlive *int   `json:"keep_alive"`
+				Options   struct {
+					NumPredict int `json:"num_predict"`
+				} `json:"options"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Model != "llama3.1:8b" || body.Prompt != "Reply with OK." || body.Stream || body.KeepAlive == nil || *body.KeepAlive != 0 || body.Options.NumPredict != 1 {
+				t.Fatalf("benchmark request = %+v", body)
+			}
+			_, _ = w.Write([]byte(`{"eval_count":4,"eval_duration":200000000,"total_duration":1200000000}`))
+		default:
+			t.Fatalf("unexpected runtime request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer localRuntime.Close()
+
+	h := NewHandler(Config{OllamaURL: localRuntime.URL}, NewStore(16))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/models/benchmark", strings.NewReader(`{"model":"llama3.1:8b"}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("benchmark status = %d, body=%s", response.Code, response.Body.String())
+	}
+	for _, want := range []string{`"model":"llama3.1:8b"`, `"eval_count":4`, `"tokens_per_second":20`} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("benchmark missing %s: %s", want, response.Body.String())
+		}
+	}
+}
+
+func TestHandlerRequiresExplicitReleaseBeforeBenchmarkingAResidentModel(t *testing.T) {
+	localRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[{"name":"llama3.1:8b"}]}`))
+		case "/api/generate":
+			t.Fatal("a resident model must not be released without explicit confirmation")
+		default:
+			t.Fatalf("unexpected runtime request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer localRuntime.Close()
+
+	h := NewHandler(Config{OllamaURL: localRuntime.URL}, NewStore(16))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/models/benchmark", strings.NewReader(`{"model":"llama3.1:8b"}`)))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "release the resident model") {
+		t.Fatalf("resident benchmark = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPlaygroundBlocksASecondModelThatExceedsTheLiveMemoryBudget(t *testing.T) {
+	localRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			_, _ = w.Write([]byte(`{"models":[{"name":"gemma3:27b","size_vram":5368709120}]}`))
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"llama3.1:8b","size":4294967296}]}`))
+		case "/v1/chat/completions":
+			_, _ = w.Write([]byte(`{"model":"llama3.1:8b","choices":[{"message":{"role":"assistant","content":"this must not run"}}]}`))
+		default:
+			t.Fatalf("unexpected runtime request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer localRuntime.Close()
+
+	h := NewHandler(Config{OllamaURL: localRuntime.URL, VRAMTotalGB: 8}, NewStore(16))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}`)))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "unload another model") {
+		t.Fatalf("memory admission = %d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -519,6 +705,16 @@ func TestHandlerReportsOllamaStorageLocationAndUsage(t *testing.T) {
 			t.Fatalf("storage response missing %s: %s", want, response.Body.String())
 		}
 	}
+	var status struct {
+		TotalBytes     int64 `json:"total_bytes"`
+		AvailableBytes int64 `json:"available_bytes"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.TotalBytes <= 0 || status.AvailableBytes <= 0 || status.TotalBytes < status.AvailableBytes {
+		t.Fatalf("storage capacity = %+v", status)
+	}
 }
 
 func TestHandlerPreflightsStorageMigrationTarget(t *testing.T) {
@@ -651,6 +847,68 @@ func TestHandlerCancelsQueuedModelDownload(t *testing.T) {
 	}
 }
 
+func TestPullProgressReportsARealTransferRateAndRemainingTime(t *testing.T) {
+	job := &pullJob{}
+	started := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	updatePullProgress(job, pullJob{Status: "downloading", Completed: 100 << 20, Total: 1000 << 20}, started)
+	updatePullProgress(job, pullJob{Status: "downloading", Completed: 300 << 20, Total: 1000 << 20}, started.Add(2*time.Second))
+
+	if job.RateBytesPerSecond != 100<<20 {
+		t.Fatalf("transfer rate = %v, want %d", job.RateBytesPerSecond, 100<<20)
+	}
+	if job.SecondsRemaining != 7 {
+		t.Fatalf("seconds remaining = %d, want 7", job.SecondsRemaining)
+	}
+}
+
+func TestHandlerStopsModelPullBeforeItExhaustsModelStorage(t *testing.T) {
+	pullStarted := make(chan struct{}, 1)
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/pull":
+			pullStarted <- struct{}{}
+			_, _ = w.Write([]byte(`{"status":"downloading","completed":0,"total":134217728}` + "\n"))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		default:
+			t.Fatalf("unexpected local runtime path %q", r.URL.Path)
+		}
+	}))
+	defer runtime.Close()
+
+	h := &handler{
+		cfg:              Config{OllamaURL: runtime.URL, StoragePath: t.TempDir()},
+		store:            NewStore(16),
+		httpClient:       runtime.Client(),
+		storageAvailable: func(string) (int64, error) { return 64 << 20, nil },
+	}
+	response := httptest.NewRecorder()
+	h.startPull(response, httptest.NewRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`)))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("pull start status = %d, body=%s", response.Code, response.Body.String())
+	}
+	select {
+	case <-pullStarted:
+	case <-time.After(time.Second):
+		t.Fatal("model pull did not start")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := h.pullSnapshot()
+		if snapshot.Latest != nil && snapshot.Latest.Done {
+			if !strings.Contains(snapshot.Latest.Error, "not enough free disk space") {
+				t.Fatalf("storage-full pull error = %q", snapshot.Latest.Error)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("storage-full pull did not finish")
+}
+
 func TestHandlerCancelsActiveModelDownload(t *testing.T) {
 	cancelled := make(chan struct{})
 	h := &handler{pull: &pullJob{Name: "qwen3:14b", Status: "downloading", cancel: func() { close(cancelled) }}}
@@ -679,6 +937,16 @@ func TestHandlerUsesNativeStoragePickerPath(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"path":"/Volumes/models/ollama"`) {
 		t.Fatalf("storage picker response = %s", response.Body.String())
+	}
+}
+
+func TestPickedStorageDirectoryTrimsPickerOutputAndRejectsCancellation(t *testing.T) {
+	path, err := pickedStorageDirectory([]byte("  /Volumes/models/everyapi\n"))
+	if err != nil || path != "/Volumes/models/everyapi" {
+		t.Fatalf("picked path = %q, err=%v", path, err)
+	}
+	if _, err := pickedStorageDirectory([]byte(" \n")); err == nil {
+		t.Fatal("empty picker output must be treated as a cancelled directory selection")
 	}
 }
 
@@ -750,6 +1018,19 @@ func TestStorePublishesGatewayConnectionState(t *testing.T) {
 	offline := store.Overview()
 	if offline.GatewayState != "offline" || offline.GatewayLastError != "gateway refused the session" {
 		t.Fatalf("offline gateway state = %+v", offline)
+	}
+
+	retryAt := time.Date(2026, time.August, 3, 10, 30, 0, 0, time.UTC)
+	store.ScheduleGatewayReconnect(retryAt, 2)
+	retrying := store.Overview()
+	if retrying.GatewayReconnectAttempt != 2 || !retrying.GatewayNextReconnectAt.Equal(retryAt) {
+		t.Fatalf("retry diagnostics = %+v", retrying)
+	}
+
+	store.SetGatewayState("online", "")
+	connectedAgain := store.Overview()
+	if connectedAgain.GatewayReconnectAttempt != 0 || !connectedAgain.GatewayNextReconnectAt.IsZero() {
+		t.Fatalf("online state retained retry diagnostics = %+v", connectedAgain)
 	}
 }
 

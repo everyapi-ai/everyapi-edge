@@ -42,9 +42,10 @@ const (
 	// FrameModelPull is agent → gateway, fire-and-forget: one per model the
 	// agent was asked to pull, reporting how that pull ended. Mirrors the
 	// gateway's backend/pkg/edge definition.
-	FrameModelPull    FrameType = "model_pull"
-	FrameUpdate       FrameType = "update"
-	FrameUpdateStatus FrameType = "update_status"
+	FrameModelPull      FrameType = "model_pull"
+	FrameUpdate         FrameType = "update"
+	FrameUpdateStatus   FrameType = "update_status"
+	FrameControlRequest FrameType = "control_request"
 )
 
 type Frame struct {
@@ -71,10 +72,11 @@ type WelcomeBody struct {
 }
 
 type HeartbeatBody struct {
-	NowUnixMs  int64   `json:"now_unix_ms"`
-	GPUUtilPct int     `json:"gpu_util_pct,omitempty"`
-	VRAMUsedGB float64 `json:"vram_used_gb,omitempty"`
-	ActiveReqs int     `json:"active_requests,omitempty"`
+	NowUnixMs   int64   `json:"now_unix_ms"`
+	GPUUtilPct  int     `json:"gpu_util_pct,omitempty"`
+	VRAMUsedGB  float64 `json:"vram_used_gb,omitempty"`
+	VRAMTotalGB int     `json:"vram_total_gb,omitempty"`
+	ActiveReqs  int     `json:"active_requests,omitempty"`
 }
 
 type RequestBody struct {
@@ -131,6 +133,14 @@ type UpdateStatusBody struct {
 	State   string `json:"state"`
 	Version string `json:"version,omitempty"`
 	Error   string `json:"error,omitempty"`
+}
+
+// ControlRequestBody mirrors backend/pkg/edge. It is reserved for the
+// gateway's administrator-only, allowlisted Control Room API operations.
+type ControlRequestBody struct {
+	Method string          `json:"method"`
+	Path   string          `json:"path"`
+	Body   json.RawMessage `json:"body,omitempty"`
 }
 
 type DisconnectBody struct {

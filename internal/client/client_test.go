@@ -83,6 +83,25 @@ func TestClientUsesConfiguredLogSink(t *testing.T) {
 	}
 }
 
+func TestHeartbeatTelemetryReportsResidentModelMemory(t *testing.T) {
+	runtimeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/ps" {
+			t.Fatalf("runtime path = %q, want /api/ps", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"models":[{"size_vram":2147483648},{"size_vram":1073741824}]}`)
+	}))
+	defer runtimeServer.Close()
+
+	c := &Client{cfg: Config{OllamaURL: runtimeServer.URL, VRAMTotalGB: 24, HTTPClient: runtimeServer.Client()}}
+	got := c.heartbeatTelemetry(context.Background())
+	if got.VRAMTotalGB != 24 {
+		t.Fatalf("VRAM total = %d, want 24", got.VRAMTotalGB)
+	}
+	if got.VRAMUsedGB != 3 {
+		t.Fatalf("VRAM used = %v, want 3", got.VRAMUsedGB)
+	}
+}
+
 func TestSettlementReceiptIsParsedAndMalformedInputIsDropped(t *testing.T) {
 	var receipts []protocol.SettlementBody
 	var warnings int

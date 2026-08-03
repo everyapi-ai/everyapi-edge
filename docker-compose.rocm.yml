@@ -69,4 +69,5 @@ services:
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
     ports:
-      - "127.0.0.1:8421:8421"
+      # Local-network management surface. Keep it on a trusted LAN only.
+      - "${EVERYAPI_CONSOLE_PORT:-8421}:8421"

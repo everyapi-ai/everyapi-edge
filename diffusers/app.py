@@ -21,6 +21,7 @@ app = FastAPI(title="EveryAPI Edge Diffusers Runtime")
 CONFIG_PATH = Path(os.getenv("EVERYAPI_DIFFUSERS_CONFIG_PATH", "/models/cache/everyapi-image-runtime.json"))
 STARTUP_MODEL = os.getenv("EVERYAPI_DIFFUSERS_MODEL", DEFAULT_MODEL)
 runtime_lock = Lock()
+GPU_REQUIRED_MESSAGE = "A CUDA-capable GPU is required for image editing."
 
 
 class ModelSelection(BaseModel):
@@ -31,13 +32,19 @@ def selected_model() -> str:
     return active_model(CONFIG_PATH, STARTUP_MODEL)
 
 
+def has_cuda() -> bool:
+    import torch
+
+    return torch.cuda.is_available()
+
+
 @lru_cache(maxsize=1)
 def pipeline(model_id: str):
     import torch
     from diffusers import QwenImageEditPlusPipeline
 
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for the configured Qwen image editing runtime")
+        raise RuntimeError(GPU_REQUIRED_MESSAGE)
     return QwenImageEditPlusPipeline.from_pretrained(
         model_id, torch_dtype=torch.bfloat16
     ).to("cuda")
@@ -45,6 +52,8 @@ def pipeline(model_id: str):
 
 @app.get("/health")
 def health():
+    if not has_cuda():
+        return {"status": "unavailable", "models": [], "error": GPU_REQUIRED_MESSAGE}
     return {"status": "ready", "models": [selected_model()]}
 
 

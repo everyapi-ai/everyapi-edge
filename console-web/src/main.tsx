@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   RouterProvider,
-  createHashHistory,
+  createBrowserHistory,
   createRouter,
   type AnyRoute,
 } from '@tanstack/react-router'
@@ -21,12 +21,10 @@ import { trafficRoute } from '@/routes/traffic'
 
 import './styles.css'
 
-// Hash history, not browser history: the Go handler serves the embedded document
-// from `/` via a catch-all mux pattern, so a real path like /models would work
-// on navigation but a manual reload would too — while a hash keeps the whole
-// route space off the server entirely. That leaves internal/console/server.go's
-// routing untouched: exactly one HTML route and the /api/ tree.
-const history = createHashHistory()
+// The Go handler's catch-all document route makes real paths safe to reload.
+// Browser history therefore keeps each local console page shareable and
+// bookmarkable, including LAN URLs such as http://edge-host:8421/models.
+const history = createBrowserHistory()
 
 const routeTree: AnyRoute = rootRoute.addChildren([
   overviewRoute,

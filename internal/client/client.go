@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -81,6 +82,10 @@ type Config struct {
 	// from its owner's declared target set, and the agent pulls them here.
 	// Empty disables auto-pull.
 	OllamaURL string
+	// VRAMTotalGB is the scheduler budget discovered at agent startup. It is
+	// sent with every heartbeat so the gateway can preserve a runtime safety
+	// reserve when it balances requests across nodes.
+	VRAMTotalGB int
 
 	Log func(level, message string)
 	// Settlement receives gateway-committed seller receipts. It must be
@@ -89,6 +94,9 @@ type Config struct {
 	// Update runs the fixed latest-stable updater. The gateway controls only
 	// when it runs; it cannot supply a version, URL, checksum, or command.
 	Update func(context.Context, func(protocol.UpdateStatusBody)) error
+	// ControlHandler executes administrator-only Control Room operations. It is
+	// optional so older agents reject remote management explicitly.
+	ControlHandler ControlHandler
 }
 
 // RequestHandler is what main.go installs to forward inbound
@@ -102,6 +110,10 @@ type Config struct {
 // abort its in-flight upstream call instead of leaking past the
 // connection it belongs to.
 type RequestHandler func(ctx context.Context, req protocol.RequestBody, send func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody)
+
+// ControlHandler returns one bounded API response for an allowlisted Control
+// Room operation. It is deliberately distinct from inference RequestHandler.
+type ControlHandler func(ctx context.Context, req protocol.ControlRequestBody) (protocol.ChunkBody, *protocol.ErrorBody)
 
 // defaultMaxConcurrentRequests bounds in-flight forwarded requests
 // when Config.MaxConcurrentRequests is unset. A single BYO-GPU node
@@ -445,7 +457,7 @@ func (c *Client) readerLoop(ctx context.Context) error {
 		case protocol.FrameHeartbeat:
 			// Liveness only — read deadline already reset above.
 			continue
-		case protocol.FrameRequest:
+		case protocol.FrameRequest, protocol.FrameControlRequest:
 			if err := c.dispatch(ctx, frame); err != nil {
 				if errors.Is(err, errReaderClosed) {
 					return nil
@@ -604,6 +616,10 @@ func (c *Client) dispatch(ctx context.Context, frame protocol.Frame) error {
 // installed Handler, emit Chunk frames as the handler streams, and
 // terminate with Done/Error.
 func (c *Client) handleRequest(ctx context.Context, frame protocol.Frame) {
+	if frame.Type == protocol.FrameControlRequest {
+		c.handleControl(ctx, frame)
+		return
+	}
 	if c.cfg.Handler == nil {
 		// No handler installed — emit an immediate Error so the
 		// gateway doesn't wait HeartbeatTimeout for a dead request.
@@ -628,6 +644,36 @@ func (c *Client) handleRequest(ctx context.Context, frame protocol.Frame) {
 		return
 	}
 	doneJSON, _ := json.Marshal(done)
+	_ = c.sendFrame(protocol.Frame{Type: protocol.FrameDone, ID: frame.ID, Body: doneJSON})
+}
+
+func (c *Client) handleControl(ctx context.Context, frame protocol.Frame) {
+	if c.cfg.ControlHandler == nil {
+		c.emitError(frame.ID, "control_unavailable", "this agent does not support remote control")
+		return
+	}
+	if frame.ID == "" {
+		return
+	}
+	var body protocol.ControlRequestBody
+	if err := json.Unmarshal(frame.Body, &body); err != nil {
+		c.emitError(frame.ID, "malformed_control_request", "invalid control request")
+		return
+	}
+	chunk, errBody := c.cfg.ControlHandler(ctx, body)
+	if errBody != nil {
+		c.emitError(frame.ID, errBody.Code, errBody.Message)
+		return
+	}
+	chunkJSON, err := json.Marshal(chunk)
+	if err != nil {
+		c.emitError(frame.ID, "control_response_failed", "could not encode control response")
+		return
+	}
+	if err := c.sendFrame(protocol.Frame{Type: protocol.FrameChunk, ID: frame.ID, Body: chunkJSON}); err != nil {
+		return
+	}
+	doneJSON, _ := json.Marshal(protocol.DoneBody{})
 	_ = c.sendFrame(protocol.Frame{Type: protocol.FrameDone, ID: frame.ID, Body: doneJSON})
 }
 
@@ -718,14 +764,15 @@ func (c *Client) writerLoop(ctx context.Context) error {
 				return err
 			}
 		case <-ticker.C:
-			// Carry the live in-flight count so the gateway has
-			// back-pressure visibility; body is best-effort, a marshal
-			// failure just sends a bare heartbeat (liveness still works).
+			// Carry live requests and resident model memory so the gateway
+			// can avoid piling work onto a node whose capacity is already
+			// mostly committed. Collection is bounded; liveness still wins
+			// when the local runtime is unavailable.
 			beat := protocol.Frame{Type: protocol.FrameHeartbeat}
-			if body, err := json.Marshal(protocol.HeartbeatBody{
-				NowUnixMs:  time.Now().UnixMilli(),
-				ActiveReqs: int(c.inflight.Load()),
-			}); err == nil {
+			telemetryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			telemetry := c.heartbeatTelemetry(telemetryCtx)
+			cancel()
+			if body, err := json.Marshal(telemetry); err == nil {
 				beat.Body = body
 			}
 			if err := c.writeFrame(beat); err != nil {
@@ -733,6 +780,50 @@ func (c *Client) writerLoop(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// heartbeatTelemetry takes a small, bounded snapshot of resident model
+// memory. The local runtime is the authority for this: OS-wide GPU memory can
+// include unrelated processes and would make the scheduler punish the node
+// for work it cannot manage. Failures intentionally report only the static
+// capacity and live request count; the gateway then falls back to GPU load.
+func (c *Client) heartbeatTelemetry(ctx context.Context) protocol.HeartbeatBody {
+	telemetry := protocol.HeartbeatBody{
+		NowUnixMs:   time.Now().UnixMilli(),
+		VRAMTotalGB: c.cfg.VRAMTotalGB,
+		ActiveReqs:  int(c.inflight.Load()),
+	}
+	if c.cfg.OllamaURL == "" || c.cfg.HTTPClient == nil {
+		return telemetry
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.OllamaURL, "/")+"/api/ps", nil)
+	if err != nil {
+		return telemetry
+	}
+	response, err := c.cfg.HTTPClient.Do(req)
+	if err != nil {
+		return telemetry
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return telemetry
+	}
+	var payload struct {
+		Models []struct {
+			SizeVRAM int64 `json:"size_vram"`
+		} `json:"models"`
+	}
+	if json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&payload) != nil {
+		return telemetry
+	}
+	var usedBytes int64
+	for _, model := range payload.Models {
+		if model.SizeVRAM > 0 && usedBytes <= math.MaxInt64-model.SizeVRAM {
+			usedBytes += model.SizeVRAM
+		}
+	}
+	telemetry.VRAMUsedGB = float64(usedBytes) / float64(1<<30)
+	return telemetry
 }
 
 func (c *Client) writeFrame(frame protocol.Frame) error {

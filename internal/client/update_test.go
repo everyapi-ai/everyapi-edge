@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
@@ -50,5 +51,27 @@ func TestHandleUpdateRejectsUnsupportedAction(t *testing.T) {
 	}
 	if called {
 		t.Fatal("unsupported update action reached updater")
+	}
+}
+
+func TestHandleControlReportsOneCorrelatedResponse(t *testing.T) {
+	c := &Client{
+		cfg: Config{ControlHandler: func(_ context.Context, req protocol.ControlRequestBody) (protocol.ChunkBody, *protocol.ErrorBody) {
+			if req.Method != "GET" || req.Path != "/api/models" {
+				t.Fatalf("unexpected request: %#v", req)
+			}
+			return protocol.ChunkBody{StatusCode: 200, Bytes: base64.StdEncoding.EncodeToString([]byte(`[{"name":"qwen3"}]`))}, nil
+		}},
+		sendQ: make(chan protocol.Frame, 2), done: make(chan struct{}),
+	}
+	body, _ := json.Marshal(protocol.ControlRequestBody{Method: "GET", Path: "/api/models"})
+	c.handleControl(context.Background(), protocol.Frame{Type: protocol.FrameControlRequest, ID: "control-1", Body: body})
+	chunk := <-c.sendQ
+	if chunk.Type != protocol.FrameChunk || chunk.ID != "control-1" {
+		t.Fatalf("chunk = %#v", chunk)
+	}
+	done := <-c.sendQ
+	if done.Type != protocol.FrameDone || done.ID != "control-1" {
+		t.Fatalf("done = %#v", done)
 	}
 }

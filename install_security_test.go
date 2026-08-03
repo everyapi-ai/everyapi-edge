@@ -165,6 +165,18 @@ func TestMacOSComposeDocumentsEveryAPIModelRoot(t *testing.T) {
 	}
 }
 
+func TestComposePublishesTheControlRoomToTheTrustedLAN(t *testing.T) {
+	for _, filename := range []string{"docker-compose.yml", "docker-compose.rocm.yml", "docker-compose.macos.yml"} {
+		contents, err := os.ReadFile(filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(contents), `"${EVERYAPI_CONSOLE_PORT:-8421}:8421"`) {
+			t.Errorf("%s must publish the local Control Room on the configured LAN port", filename)
+		}
+	}
+}
+
 func TestInstallerClearsConsumedTokenOnlyAfterGatewayConnection(t *testing.T) {
 	script, err := os.ReadFile("install.sh")
 	if err != nil {
