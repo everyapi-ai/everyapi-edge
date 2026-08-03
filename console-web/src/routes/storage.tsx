@@ -1,0 +1,174 @@
+import { useState, type FormEvent } from 'react'
+
+import { createRoute } from '@tanstack/react-router'
+import { useMutation } from '@tanstack/react-query'
+
+import { useModels, useStartStorageMigration, useStorage, useStorageMigration } from '@/api/queries'
+import { postJSONResponse } from '@/api/client'
+import { migrationPlanSchema, storagePickerSchema } from '@/api/schemas'
+import { Button, Input, PageHeader, Panel, QueryState } from '@/components/primitives'
+import { useTranslation } from '@/i18n/useTranslation'
+import { formatGigabytes } from '@/lib/format'
+
+import { rootRoute } from './root'
+
+const StoragePage = () => {
+  const { t } = useTranslation()
+  const storage = useStorage()
+  const models = useModels()
+  const migration = useStorageMigration()
+  const startMigration = useStartStorageMigration()
+  const [source, setSource] = useState('')
+  const [destination, setDestination] = useState('')
+  const plan = useMutation({
+    mutationFn: ({ source, destination }: { source: string; destination: string }) => postJSONResponse('/api/storage/plan', { source, destination }, migrationPlanSchema),
+  })
+  const picker = useMutation({
+    mutationFn: () => postJSONResponse('/api/storage/pick', {}, storagePickerSchema),
+  })
+
+  const prepare = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (destination.trim()) plan.mutate({ source: source.trim(), destination: destination.trim() })
+  }
+
+  const copyModels = () => {
+    if (!destination.trim()) return
+    startMigration.mutate({ source: source.trim(), destination: destination.trim() })
+  }
+
+  const chooseFolder = (field: 'source' | 'destination') => {
+    picker.mutate(undefined, {
+      onSuccess: ({ path }) => {
+        if (field === 'source') {
+          setSource(path)
+          setDestination((current) => current || storage.data?.path || '')
+        } else setDestination(path)
+        plan.reset()
+      },
+    })
+  }
+
+  const job = migration.data
+  const copyPercent = job?.total ? Math.min(100, Math.round((job.completed / job.total) * 100)) : job?.done ? 100 : 0
+  const modelsOutsideEdgeStorage = Boolean(storage.data?.accessible && storage.data.used_bytes === 0 && models.data?.length)
+
+  return (
+    <div className='flex flex-col gap-5'>
+      <PageHeader title={t('storage.title')} description={t('storage.description')} />
+      <QueryState isPending={storage.isPending} isError={storage.isError} onRetry={() => void storage.refetch()}>
+        <div className='grid gap-4 lg:grid-cols-2'>
+          <Panel title={t('storage.location')}>
+            <p className='break-all rounded-md border border-line bg-surface-1 px-3 py-2 font-mono text-sm text-ink'>{storage.data?.path || t('common.unknown')}</p>
+            <dl className='mt-4 grid grid-cols-[auto_1fr] gap-x-5 gap-y-3 text-sm'>
+              <dt className='text-muted'>{t('storage.used')}</dt>
+              <dd className='text-ink'>{storage.data?.accessible ? formatGigabytes(storage.data.used_bytes) : t('common.unknown')}</dd>
+            </dl>
+            {!storage.data?.accessible ? <p className='mt-3 text-sm text-warn'>{storage.data?.error || t('storage.unavailable')}</p> : null}
+            {modelsOutsideEdgeStorage ? (
+              <div data-external-models className='mt-4 rounded-md border border-warn/30 bg-warn/8 p-3'>
+                <p className='text-sm font-medium text-warn'>{t('storage.externalModels')}</p>
+                <p className='mt-1 text-xs leading-5 text-muted'>{t('storage.externalModelsHint', { path: storage.data?.path ?? '' })}</p>
+                <Button
+                  type='button'
+                  variant='ghost'
+                  data-import-existing-models
+                  disabled={picker.isPending}
+                  onClick={() => chooseFolder('source')}
+                  className='mt-3'
+                >
+                  {t('storage.importExisting')}
+                </Button>
+              </div>
+            ) : null}
+          </Panel>
+          <Panel title={t('storage.migration')}>
+            <form onSubmit={prepare}>
+              <label htmlFor='storage-source' className='mb-2 block text-sm font-medium text-ink-2'>{t('storage.source')}</label>
+              <Button
+                type='button'
+                variant='ghost'
+                data-native-storage-picker='source'
+                disabled={picker.isPending}
+                onClick={() => chooseFolder('source')}
+              >
+                {picker.isPending ? t('storage.choosingFolder') : t('storage.chooseSourceFolder')}
+              </Button>
+              <Input
+                id='storage-source'
+                value={source}
+                onChange={(event) => setSource(event.target.value)}
+                placeholder={storage.data?.path || '/Volumes/legacy-models'}
+                className='mt-2'
+              />
+              <p className='mt-2 text-xs leading-5 text-muted'>{t('storage.sourceHint')}</p>
+              <label htmlFor='storage-destination' className='mb-2 block text-sm font-medium text-ink-2'>{t('storage.destination')}</label>
+              <Button
+                type='button'
+                variant='ghost'
+                data-native-storage-picker='destination'
+                disabled={picker.isPending}
+                onClick={() => chooseFolder('destination')}
+              >
+                {picker.isPending ? t('storage.choosingFolder') : t('storage.chooseDestinationFolder')}
+              </Button>
+              <Input
+                id='storage-destination'
+                value={destination}
+                onChange={(event) => setDestination(event.target.value)}
+                placeholder='/Volumes/models/everyapi'
+                className='mt-2'
+              />
+              <p className='mt-2 text-xs leading-5 text-muted'>{t('storage.destinationHint')}</p>
+              <Button type='submit' disabled={!destination.trim() || plan.isPending} className='mt-4'>{t('storage.prepare')}</Button>
+            </form>
+            {picker.isError ? <p role='alert' className='mt-3 text-sm text-danger'>{picker.error.message}</p> : null}
+            {plan.data ? (
+              plan.data.ready ? (
+                <div className='mt-3 rounded-md border border-good/25 bg-good/8 p-3'>
+                  <p role='status' className='text-sm text-good'>{t('storage.ready')}</p>
+                  <p className='mt-1 text-xs leading-5 text-muted'>{t('storage.copyNotice')}</p>
+                  <Button
+                    type='button'
+                    data-start-storage-migration
+                    disabled={startMigration.isPending || (job?.status === 'copying' && !job.done)}
+                    onClick={copyModels}
+                    className='mt-3'
+                  >
+                    {startMigration.isPending ? t('storage.copying') : t('storage.copy')}
+                  </Button>
+                </div>
+              ) : (
+                <div role='alert' className='mt-3 text-sm text-danger'>
+                  <p>{t('storage.blocked')}</p>
+                  <ul className='mt-1 list-disc pl-5'>{plan.data.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>
+                </div>
+              )
+            ) : null}
+            {plan.isError ? <p role='alert' className='mt-3 text-sm text-danger'>{plan.error.message}</p> : null}
+            {startMigration.isError ? <p role='alert' className='mt-3 text-sm text-danger'>{startMigration.error.message}</p> : null}
+            {job && job.status !== 'idle' ? (
+              <div className='mt-4 border-t border-line pt-4'>
+                <div className='flex items-center justify-between gap-3 text-xs text-muted'>
+                  <span>{job.done ? (job.error ? t('storage.copyFailed') : t('storage.copyComplete')) : t('storage.copying')}</span>
+                  <span>{formatGigabytes(job.completed)} / {formatGigabytes(job.total)}</span>
+                </div>
+                <div role='progressbar' aria-label={t('storage.copying')} aria-valuenow={copyPercent} aria-valuemin={0} aria-valuemax={100} className='mt-2 h-1.5 overflow-hidden rounded-full bg-surface-2'>
+                  <span className={`block h-full rounded-full transition-[width] duration-300 ${job.error ? 'bg-danger' : 'bg-accent'}`} style={{ width: `${copyPercent}%` }} />
+                </div>
+                {job.error ? <p role='alert' className='mt-2 text-sm text-danger'>{job.error}</p> : null}
+                {job.done && !job.error ? <p className='mt-2 text-xs leading-5 text-muted'>{t('storage.copyNext', { path: job.destination })}</p> : null}
+              </div>
+            ) : null}
+          </Panel>
+        </div>
+      </QueryState>
+    </div>
+  )
+}
+
+export const storageRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/storage',
+  component: StoragePage,
+})

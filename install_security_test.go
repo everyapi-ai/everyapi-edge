@@ -96,6 +96,75 @@ func TestInstallerPreparesAndVerifiesAutoSelectedModel(t *testing.T) {
 	}
 }
 
+func TestGPUComposeLimitsOllamaToOneResidentModel(t *testing.T) {
+	for _, filename := range []string{"docker-compose.yml", "docker-compose.rocm.yml"} {
+		contents, err := os.ReadFile(filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(contents), "OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}") {
+			t.Errorf("%s must limit Ollama to one resident model", filename)
+		}
+	}
+}
+
+func TestMacOSOllamaStarterUsesTheSameResidentModelLimit(t *testing.T) {
+	contents, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "OLLAMA_MAX_LOADED_MODELS=\"${OLLAMA_MAX_LOADED_MODELS:-1}\"") {
+		t.Fatal("native Ollama starter must limit resident models")
+	}
+}
+
+func TestMacOSHomebrewStarterAppliesResidentModelLimit(t *testing.T) {
+	contents, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`launchctl setenv OLLAMA_MAX_LOADED_MODELS`,
+		`launchctl setenv OLLAMA_KEEP_ALIVE`,
+		`brew services restart ollama`,
+	} {
+		if !strings.Contains(string(contents), required) {
+			t.Errorf("Homebrew Ollama starter is missing %q", required)
+		}
+	}
+}
+
+func TestMacOSInstallerKeepsModelsInEveryAPIHome(t *testing.T) {
+	contents, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	for _, required := range []string{
+		`local model_root="$HOME/.everyapi/edge"`,
+		`launchctl setenv OLLAMA_MODELS "$model_root"`,
+		`storage_path="$HOME/.everyapi/edge"`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("macOS installer is missing %q", required)
+		}
+	}
+	if strings.Index(script, `launchctl setenv OLLAMA_MODELS "$model_root"`) > strings.Index(script, `if ! ollama_api_ready; then`) {
+		t.Fatal("macOS installer must configure the model directory before reusing an existing local service")
+	}
+}
+
+func TestMacOSComposeDocumentsEveryAPIModelRoot(t *testing.T) {
+	contents, err := os.ReadFile("docker-compose.macos.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(contents)
+	if strings.Contains(compose, "~/.ollama") || !strings.Contains(compose, "${HOME}/.everyapi/edge") {
+		t.Fatalf("macOS Compose documents the wrong model root: %s", compose)
+	}
+}
+
 func TestInstallerClearsConsumedTokenOnlyAfterGatewayConnection(t *testing.T) {
 	script, err := os.ReadFile("install.sh")
 	if err != nil {

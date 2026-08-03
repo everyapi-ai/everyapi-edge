@@ -1,7 +1,7 @@
 import { createRoute } from '@tanstack/react-router'
 
 import { useRequests } from '@/api/queries'
-import { Panel, QueryState } from '@/components/primitives'
+import { PageHeader, Panel, QueryState } from '@/components/primitives'
 import { useTranslation } from '@/i18n/useTranslation'
 import { formatCount, formatTime } from '@/lib/format'
 
@@ -22,7 +22,9 @@ const TrafficPage = () => {
   ]
 
   return (
-    <Panel title={t('traffic.title')}>
+    <div className='flex flex-col gap-5'>
+      <PageHeader title={t('traffic.title')} description={t('traffic.description')} />
+      <Panel title={t('traffic.title')}>
       <QueryState
         isPending={requests.isPending}
         isError={requests.isError}
@@ -31,14 +33,14 @@ const TrafficPage = () => {
         onRetry={() => void requests.refetch()}
       >
         <div className='overflow-x-auto'>
-          <table className='w-full border-collapse text-xs'>
+          <table className='w-full min-w-[860px] border-collapse text-sm'>
             <thead>
               <tr>
                 {columns.map((heading) => (
                   <th
                     key={heading}
                     scope='col'
-                    className='border-b border-panel-edge px-1.5 py-2.5 text-left text-[10px] font-normal tracking-[0.12em] text-muted uppercase'
+                    className='border-b border-line px-3 py-2.5 text-left text-xs font-medium text-faint'
                   >
                     {heading}
                   </th>
@@ -48,30 +50,30 @@ const TrafficPage = () => {
             <tbody>
               {(requests.data ?? []).map((request) => (
                 <tr key={request.id}>
-                  <td className='border-b border-panel-edge px-1.5 py-2.5 whitespace-nowrap'>
+                  <td className='border-b border-line px-3 py-3 whitespace-nowrap text-ink-2'>
                     {formatTime(request.completed_at, locale)}
                   </td>
-                  <td className='max-w-[210px] truncate border-b border-panel-edge px-1.5 py-2.5'>
+                  <td className='max-w-[210px] truncate border-b border-line px-3 py-3 font-medium text-ink'>
                     {request.consumer}
                   </td>
-                  <td className='max-w-[210px] truncate border-b border-panel-edge px-1.5 py-2.5'>
+                  <td className='max-w-[210px] truncate border-b border-line px-3 py-3 text-ink-2'>
                     {request.model}
                   </td>
-                  <td className='max-w-[210px] truncate border-b border-panel-edge px-1.5 py-2.5 text-muted'>
+                  <td className='max-w-[210px] truncate border-b border-line px-3 py-3 font-mono text-xs text-muted'>
                     {request.path}
                   </td>
-                  <td className='border-b border-panel-edge px-1.5 py-2.5 whitespace-nowrap'>
+                  <td className='border-b border-line px-3 py-3 whitespace-nowrap text-ink-2'>
                     {formatCount(request.prompt_tokens, locale)} +{' '}
                     {formatCount(request.completion_tokens, locale)}
                   </td>
-                  <td className='border-b border-panel-edge px-1.5 py-2.5 whitespace-nowrap'>
+                  <td className='border-b border-line px-3 py-3 whitespace-nowrap text-ink-2'>
                     {formatCount(request.duration_ms, locale)}ms
                   </td>
-                  <td className='max-w-[210px] truncate border-b border-panel-edge px-1.5 py-2.5'>
+                  <td className='max-w-[210px] truncate border-b border-line px-3 py-3'>
                     {request.error ? (
                       <span className='text-danger'>{request.error}</span>
                     ) : (
-                      <span className='text-lime'>{t('traffic.ok')}</span>
+                      <span className='font-medium text-good'>{t('traffic.ok')}</span>
                     )}
                   </td>
                 </tr>
@@ -80,7 +82,8 @@ const TrafficPage = () => {
           </table>
         </div>
       </QueryState>
-    </Panel>
+      </Panel>
+    </div>
   )
 }
 

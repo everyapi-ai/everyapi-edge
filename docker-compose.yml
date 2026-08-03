@@ -21,10 +21,34 @@
 # use the Ed25519 identity at ./data/identity.json.
 
 services:
+  diffusers:
+    build: ./diffusers
+    container_name: everyapi-edge-diffusers
+    restart: unless-stopped
+    environment:
+      EVERYAPI_DIFFUSERS_MODEL: ${EVERYAPI_DIFFUSERS_MODEL:-Qwen/Qwen-Image-Edit-2511}
+      HF_TOKEN: ${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ${EVERYAPI_IMAGE_MODEL_PATH:-${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}/images}:/models/cache
+
   ollama:
     image: ollama/ollama:latest
     container_name: everyapi-edge-ollama
     restart: unless-stopped
+    environment:
+      # Do not let independent buyer requests make several large models
+      # resident at once. The dashboard's live budget covers headroom; this
+      # is the runtime backstop between refreshes.
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+      OLLAMA_MODELS: /models
     # GPU passthrough. Required for any meaningful inference work;
     # the agent will technically still run without it but will be
     # serving from CPU and that's not what this bundle is for.
@@ -36,7 +60,7 @@ services:
               count: all
               capabilities: [gpu]
     volumes:
-      - ./data/ollama:/root/.ollama
+      - ${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}:/models
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -55,6 +79,8 @@ services:
       EVERYAPI_NODE_ID: ${EVERYAPI_NODE_ID:?node id required}
       EVERYAPI_REGISTRATION_TOKEN: ${EVERYAPI_REGISTRATION_TOKEN:-}
       OLLAMA_URL: http://ollama:11434
+      EVERYAPI_OLLAMA_STORAGE_PATH: /models
+      EVERYAPI_DIFFUSERS_URL: http://diffusers:8188
       EVERYAPI_IDENTITY_PATH: /var/lib/everyapi-edge/identity.json
       EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}
       EVERYAPI_GPU_MODEL: ${EVERYAPI_GPU_MODEL:-}
@@ -62,10 +88,6 @@ services:
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
       EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
       EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
-      # Empty is allowed for existing manual bundles: the agent persists a
-      # fresh 0600 token beside identity.json on first start. The installer
-      # always supplies a generated value in .env.
-      EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:-}
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
     ports:

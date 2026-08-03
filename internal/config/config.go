@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,9 @@ import (
 
 // Config is what main.go assembles before constructing the client.
 type Config struct {
+	// LocalPreview runs the local control room without registering or
+	// reconnecting to a gateway. It exists for LAN UI evaluation only.
+	LocalPreview bool
 	// GatewayURL — base URL of the EveryAPI gateway. Required.
 	GatewayURL string
 	// NodeID — the EdgeNode primary key the seller created via the
@@ -32,6 +36,10 @@ type Config struct {
 	IdentityPath string
 	// OllamaURL — where to forward inbound buyer requests.
 	OllamaURL string
+	// DiffusersURL is an optional local image-generation/editing runtime.
+	// It is intentionally separate from Ollama because diffusion pipelines use
+	// a different model format and API surface.
+	DiffusersURL string
 	// NodeName / Hardware / Location — supplier-declared metadata
 	// reported on every connect. Picked up from env so the
 	// docker-compose .env is the single config seam.
@@ -48,10 +56,9 @@ type Config struct {
 	// A direct binary defaults to loopback; Compose deliberately overrides it to
 	// 0.0.0.0 inside the container while publishing the port only on host loopback.
 	ConsoleAddr string
-	// ConsoleToken authorizes model-management and telemetry API calls. The
-	// installer creates it automatically; main persists a secure fallback for
-	// existing manual installations.
-	ConsoleToken string
+	// OllamaStoragePath is the model root visible to the agent process. It is
+	// used by the local console for storage inspection and migration planning.
+	OllamaStoragePath string
 }
 
 // Validate returns the first config defect, or nil if the agent
@@ -59,11 +66,13 @@ type Config struct {
 // (keypair generation, network dials) so misconfiguration fails
 // in <100ms.
 func (c Config) Validate() error {
-	if strings.TrimSpace(c.GatewayURL) == "" {
-		return errors.New("EVERYAPI_GATEWAY is required (e.g. https://api.everyapi.ai)")
-	}
-	if c.NodeID <= 0 {
-		return errors.New("EVERYAPI_NODE_ID is required and must be a positive integer")
+	if !c.LocalPreview {
+		if strings.TrimSpace(c.GatewayURL) == "" {
+			return errors.New("EVERYAPI_GATEWAY is required (e.g. https://api.everyapi.ai)")
+		}
+		if c.NodeID <= 0 {
+			return errors.New("EVERYAPI_NODE_ID is required and must be a positive integer")
+		}
 	}
 	if strings.TrimSpace(c.OllamaURL) == "" {
 		return errors.New("OLLAMA_URL is required (e.g. http://ollama:11434)")
@@ -73,9 +82,6 @@ func (c Config) Validate() error {
 	}
 	if _, _, err := net.SplitHostPort(c.ConsoleAddr); err != nil {
 		return fmt.Errorf("EVERYAPI_CONSOLE_ADDR must be host:port: %w", err)
-	}
-	if c.ConsoleToken != "" && len(c.ConsoleToken) < 32 {
-		return errors.New("EVERYAPI_CONSOLE_TOKEN must be at least 32 characters")
 	}
 	if c.VRAMTotalGB < 0 {
 		return errors.New("EVERYAPI_VRAM_GB must not be negative")
@@ -102,19 +108,40 @@ func knownWorkload(w string) bool {
 // stay zero-valued; required-field defects surface from Validate().
 func FromEnv() Config {
 	return Config{
+		LocalPreview:      parseBool(os.Getenv("EVERYAPI_LOCAL_PREVIEW")),
 		GatewayURL:        os.Getenv("EVERYAPI_GATEWAY"),
 		NodeID:            parseInt64(os.Getenv("EVERYAPI_NODE_ID")),
 		RegistrationToken: strings.TrimSpace(os.Getenv("EVERYAPI_REGISTRATION_TOKEN")),
 		IdentityPath:      defaultStr(os.Getenv("EVERYAPI_IDENTITY_PATH"), "/var/lib/everyapi-edge/identity.json"),
 		OllamaURL:         defaultStr(os.Getenv("OLLAMA_URL"), "http://ollama:11434"),
+		DiffusersURL:      strings.TrimSpace(os.Getenv("EVERYAPI_DIFFUSERS_URL")),
 		NodeName:          os.Getenv("EVERYAPI_NODE_NAME"),
 		GPUModel:          os.Getenv("EVERYAPI_GPU_MODEL"),
 		VRAMTotalGB:       int(parseInt64(os.Getenv("EVERYAPI_VRAM_GB"))),
 		CountryISO2:       strings.ToUpper(os.Getenv("EVERYAPI_COUNTRY")),
 		Workloads:         parseWorkloads(os.Getenv("EVERYAPI_WORKLOADS")),
 		ConsoleAddr:       defaultStr(os.Getenv("EVERYAPI_CONSOLE_ADDR"), "127.0.0.1:8421"),
-		ConsoleToken:      strings.TrimSpace(os.Getenv("EVERYAPI_CONSOLE_TOKEN")),
+		OllamaStoragePath: defaultOllamaStoragePath(),
 	}
+}
+
+func parseBool(raw string) bool {
+	value, err := strconv.ParseBool(strings.TrimSpace(raw))
+	return err == nil && value
+}
+
+func defaultOllamaStoragePath() string {
+	if configured := strings.TrimSpace(os.Getenv("EVERYAPI_OLLAMA_STORAGE_PATH")); configured != "" {
+		return configured
+	}
+	if configured := strings.TrimSpace(os.Getenv("OLLAMA_MODELS")); configured != "" {
+		return configured
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".everyapi", "edge")
 }
 
 // parseWorkloads splits the comma-separated declaration, trimming
@@ -161,7 +188,7 @@ func (c Config) String() string {
 		hadToken = "yes (length=" + strconv.Itoa(len(c.RegistrationToken)) + ")"
 	}
 	return fmt.Sprintf(
-		"Config{Gateway=%s NodeID=%d Ollama=%s Identity=%s ConsoleAddr=%s ConsoleToken=%t NodeName=%q Country=%s RegistrationToken=%s}",
-		c.GatewayURL, c.NodeID, c.OllamaURL, c.IdentityPath, c.ConsoleAddr, c.ConsoleToken != "", c.NodeName, c.CountryISO2, hadToken,
+		"Config{LocalPreview=%t Gateway=%s NodeID=%d Ollama=%s OllamaStorage=%s Identity=%s ConsoleAddr=%s NodeName=%q Country=%s RegistrationToken=%s}",
+		c.LocalPreview, c.GatewayURL, c.NodeID, c.OllamaURL, c.OllamaStoragePath, c.IdentityPath, c.ConsoleAddr, c.NodeName, c.CountryISO2, hadToken,
 	)
 }

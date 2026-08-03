@@ -2,20 +2,30 @@ import { useEffect, useRef } from 'react'
 
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 
-import { del, getJSON, postJSON } from './client'
+import { del, getJSON, postJSON, postJSONResponse } from './client'
 import {
   logListSchema,
+  modelCapabilitiesSchema,
   modelListSchema,
+  imageRuntimeSchema,
   overviewSchema,
-  pullJobResponseSchema,
+  pullQueueSchema,
   requestListSchema,
+  runtimeSchema,
   settlementListSchema,
+  storageSchema,
+  storageMigrationSchema,
   type EdgeRequest,
   type LogEntry,
   type Model,
+  type ModelCapabilities,
+  type ImageRuntime,
   type Overview,
-  type PullJob,
+  type PullQueue,
+  type Runtime,
   type Settlement,
+  type Storage,
+  type StorageMigration,
 } from './schemas'
 
 // The agent holds this data in memory and it changes on every relayed request,
@@ -30,10 +40,15 @@ const IDLE_REFETCH_MS = 15_000
 export const queryKeys = {
   overview: ['overview'] as const,
   models: ['models'] as const,
+  modelCapabilities: (name: string) => ['models', 'capabilities', name] as const,
   requests: ['requests'] as const,
   logs: ['logs'] as const,
   settlements: ['settlements'] as const,
   pull: ['models', 'pull'] as const,
+  runtime: ['runtime'] as const,
+  imageRuntime: ['image-runtime'] as const,
+  storage: ['storage'] as const,
+  storageMigration: ['storage', 'migration'] as const,
 }
 
 export const useOverview = (): UseQueryResult<Overview> =>
@@ -49,6 +64,65 @@ export const useModels = (): UseQueryResult<Model[]> =>
     queryFn: async () => (await getJSON('/api/models', modelListSchema)).models,
     refetchInterval: IDLE_REFETCH_MS,
   })
+
+export const useModelCapabilities = (name: string): UseQueryResult<ModelCapabilities> =>
+  useQuery({
+    queryKey: queryKeys.modelCapabilities(name),
+    queryFn: () => getJSON(`/api/models/capabilities?name=${encodeURIComponent(name)}`, modelCapabilitiesSchema),
+    enabled: Boolean(name),
+    staleTime: 60_000,
+  })
+
+export const useRuntime = (): UseQueryResult<Runtime> =>
+  useQuery({
+    queryKey: queryKeys.runtime,
+    queryFn: () => getJSON('/api/runtime', runtimeSchema),
+    refetchInterval: LIVE_REFETCH_MS,
+  })
+
+export const useImageRuntime = (): UseQueryResult<ImageRuntime> =>
+  useQuery({
+    queryKey: queryKeys.imageRuntime,
+    queryFn: () => getJSON('/api/image-runtime', imageRuntimeSchema),
+    refetchInterval: LIVE_REFETCH_MS,
+  })
+
+export const useSetImageRuntimeModel = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (model: string) => postJSONResponse('/api/image-runtime/model', { model }, imageRuntimeSchema),
+    onSuccess: (runtime) => {
+      queryClient.setQueryData(queryKeys.imageRuntime, runtime)
+    },
+  })
+}
+
+export const useStorage = (): UseQueryResult<Storage> =>
+  useQuery({
+    queryKey: queryKeys.storage,
+    queryFn: () => getJSON('/api/storage', storageSchema),
+    refetchInterval: IDLE_REFETCH_MS,
+  })
+
+export const useStorageMigration = (): UseQueryResult<StorageMigration> =>
+  useQuery({
+    queryKey: queryKeys.storageMigration,
+    queryFn: () => getJSON('/api/storage/migrate', storageMigrationSchema),
+    refetchInterval: (query) => {
+      const job = query.state.data
+      return job && job.status !== 'idle' && !job.done ? PULL_REFETCH_MS : false
+    },
+  })
+
+export const useStartStorageMigration = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ source, destination }: { source: string; destination: string }) => postJSONResponse('/api/storage/migrate', { source, destination }, storageMigrationSchema),
+    onSuccess: (job) => {
+      queryClient.setQueryData(queryKeys.storageMigration, job)
+    },
+  })
+}
 
 export const useRequests = (): UseQueryResult<EdgeRequest[]> =>
   useQuery({
@@ -71,14 +145,13 @@ export const useSettlements = (): UseQueryResult<Settlement[]> =>
     refetchInterval: LIVE_REFETCH_MS,
   })
 
-export const usePullJob = (): UseQueryResult<PullJob | null> =>
+export const usePullQueue = (): UseQueryResult<PullQueue> =>
   useQuery({
     queryKey: queryKeys.pull,
-    queryFn: () => getJSON('/api/models/pull', pullJobResponseSchema),
-    // Poll fast while a download is running, then back off. A finished job
-    // stays readable so the supplier can see how the last pull ended.
+    queryFn: () => getJSON('/api/models/pull', pullQueueSchema),
+    // Poll fast while active work or queued downloads remain, then back off.
     refetchInterval: (query) =>
-      query.state.data && !query.state.data.done ? PULL_REFETCH_MS : IDLE_REFETCH_MS,
+      query.state.data?.active || query.state.data?.queued.length ? PULL_REFETCH_MS : IDLE_REFETCH_MS,
   })
 
 export const useStartPull = () => {
@@ -91,22 +164,45 @@ export const useStartPull = () => {
   })
 }
 
+export const useCancelPull = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (name: string) => del(`/api/models/pull?name=${encodeURIComponent(name)}`),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.pull })
+    },
+  })
+}
+
 export const useDeleteModel = () => {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (name: string) => del(`/api/models?name=${encodeURIComponent(name)}`),
+    mutationFn: (name: string) => del(`/api/models?name=${encodeURIComponent(name)}&confirm_unloaded=true`),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.models })
     },
   })
 }
 
+export const useUnloadRuntimeModel = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (model: string) => postJSON('/api/runtime/unload', { model }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.runtime }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.overview }),
+      ])
+    },
+  })
+}
+
 /** A finished download changes what the library holds. Refreshing on that edge
  *  keeps the list poll slow instead of hammering /api/tags every second. */
-export const useRefreshModelsOnPullCompletion = (job: PullJob | null | undefined) => {
+export const useRefreshModelsOnPullCompletion = (queue: PullQueue | undefined) => {
   const queryClient = useQueryClient()
-  const done = job?.done ?? false
-  const name = job?.name ?? ''
+  const done = queue?.latest?.done ?? false
+  const name = queue?.latest?.name ?? ''
   const previous = useRef<string | null>(null)
   useEffect(() => {
     const marker = done ? name : null

@@ -11,8 +11,6 @@ package main
 import (
 	"bytes"
 	"context"
-	cryptorand "crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,10 +21,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,6 +78,12 @@ func (t *logTee) Write(p []byte) (int, error) {
 	return t.underlying.Write(p)
 }
 
+func setConsoleGatewayState(state, reason string) {
+	if store := currentConsoleStore.Load(); store != nil {
+		store.SetGatewayState(state, reason)
+	}
+}
+
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmicroseconds)
 	log.SetPrefix("[edge-agent] ")
@@ -90,6 +96,13 @@ func main() {
 	cfg := config.FromEnv()
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	// The installer records discrete GPU VRAM in EVERYAPI_VRAM_GB. For a
+	// hand-started agent (and Apple Silicon's unified memory), keep the local
+	// model catalog useful by discovering a conservative host-memory budget.
+	consoleMemoryGB := cfg.VRAMTotalGB
+	if consoleMemoryGB == 0 {
+		consoleMemoryGB = detectedMemoryGB()
 	}
 	log.Printf("starting %s — %s", Version, cfg.String())
 
@@ -115,19 +128,22 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	consoleToken, err := loadOrGenerateConsoleToken(cfg.IdentityPath, cfg.ConsoleToken)
-	if err != nil {
-		log.Fatalf("console token: %v", err)
-	}
 	store := console.NewStore(200)
 	currentConsoleStore.Store(store)
 	defer currentConsoleStore.Store(nil)
-	consoleServer, err := startConsole(ctx, cfg.ConsoleAddr, cfg.OllamaURL, cfg.VRAMTotalGB, consoleToken, store)
+	consoleServer, err := startConsole(ctx, cfg.ConsoleAddr, cfg.OllamaURL, cfg.DiffusersURL, cfg.OllamaStoragePath, consoleMemoryGB, store)
 	if err != nil {
 		log.Fatalf("console: %v", err)
 	}
 	defer shutdownConsole(consoleServer)
-	log.Printf("local control room: http://%s (token: %s)", cfg.ConsoleAddr, consoleTokenPath(cfg.IdentityPath))
+	log.Printf("local control room: http://%s", cfg.ConsoleAddr)
+	if cfg.LocalPreview {
+		store.SetGatewayState("preview", "")
+		log.Print("local preview enabled; upstream gateway connection is disabled")
+		<-ctx.Done()
+		log.Print("shutting down cleanly")
+		return
+	}
 
 	fwd := forward.New(cfg.OllamaURL)
 	var requests sync.Map
@@ -159,51 +175,56 @@ func main() {
 	log.Print("shutting down cleanly")
 }
 
-func consoleTokenPath(identityPath string) string {
-	return filepath.Join(filepath.Dir(identityPath), "console.token")
+func detectedMemoryGB() int {
+	const gib = int64(1024 * 1024 * 1024)
+	var totalBytes int64
+	if runtime.GOOS == "darwin" {
+		// Apple Silicon exposes GPU memory as part of unified system memory.
+		if output, err := exec.Command("sysctl", "-n", "hw.memsize").Output(); err == nil {
+			totalBytes, _ = strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
+		}
+	} else if gpuGB := detectedNVIDIAMemoryGB(); gpuGB > 0 {
+		return gpuGB
+	} else if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+		// CPU-only Ollama is supported too. The system-memory fallback prevents
+		// offering a model that cannot be resident at all; the individual model
+		// requirements still leave headroom for runtime and context.
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[0] == "MemTotal:" {
+				if kib, parseErr := strconv.ParseInt(fields[1], 10, 64); parseErr == nil {
+					totalBytes = kib * 1024
+				}
+				break
+			}
+		}
+	}
+	if totalBytes <= 0 {
+		return 0
+	}
+	return int((totalBytes + gib - 1) / gib)
 }
 
-// loadOrGenerateConsoleToken keeps the management secret alongside the agent
-// identity (both are 0600). Installers normally set it in .env; generating a
-// persistent fallback keeps upgrades safe without asking an existing supplier
-// to learn a new configuration knob.
-func loadOrGenerateConsoleToken(identityPath, configured string) (string, error) {
-	path := consoleTokenPath(identityPath)
-	if configured != "" {
-		return configured, persistConsoleToken(path, configured)
+func detectedNVIDIAMemoryGB() int {
+	output, err := exec.Command("nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return 0
 	}
-	if b, err := os.ReadFile(path); err == nil && len(bytes.TrimSpace(b)) >= 32 {
-		return string(bytes.TrimSpace(b)), nil
-	} else if err != nil && !os.IsNotExist(err) {
-		return "", err
+	var totalMiB int64
+	for _, line := range strings.Split(string(output), "\n") {
+		if mib, parseErr := strconv.ParseInt(strings.TrimSpace(line), 10, 64); parseErr == nil && mib > 0 {
+			totalMiB += mib
+		}
 	}
-	secret := make([]byte, 32)
-	if _, err := cryptorand.Read(secret); err != nil {
-		return "", err
-	}
-	token := base64.RawURLEncoding.EncodeToString(secret)
-	if err := persistConsoleToken(path, token); err != nil {
-		return "", err
-	}
-	return token, nil
+	return int((totalMiB + 1023) / 1024)
 }
 
-func persistConsoleToken(path, token string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o600)
-}
-
-func startConsole(ctx context.Context, addr, ollamaURL string, vramTotalGB int, token string, store *console.Store) (*http.Server, error) {
+func startConsole(ctx context.Context, addr, ollamaURL, diffusersURL, ollamaStoragePath string, vramTotalGB int, store *console.Store) (*http.Server, error) {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	server := &http.Server{Handler: console.NewHandler(console.Config{OllamaURL: ollamaURL, Token: token, VRAMTotalGB: vramTotalGB}, store), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Handler: console.NewHandler(console.Config{OllamaURL: ollamaURL, DiffusersURL: diffusersURL, StoragePath: ollamaStoragePath, VRAMTotalGB: vramTotalGB}, store), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("local control room stopped: %v", err)
@@ -297,6 +318,7 @@ func runWithReconnect(
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		setConsoleGatewayState("connecting", "")
 		sessionMeta := meta
 		models, modelErr := discoverOllamaModels(ctx, cfg.OllamaURL)
 		if modelErr != nil {
@@ -316,6 +338,7 @@ func runWithReconnect(
 			// abilities.
 			Meta: sessionMeta,
 			OnConnected: func() {
+				setConsoleGatewayState("online", "")
 				log.Printf("connected to gateway with %d models", len(sessionMeta.Models))
 			},
 			Handler: fwd.Handle,
@@ -340,6 +363,9 @@ func runWithReconnect(
 		currentClient.Store(cli)
 		runErr := cli.Run(ctx)
 		currentClient.Store(nil)
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			setConsoleGatewayState("offline", runErr.Error())
+		}
 		// Burn the registration token ONLY if the gateway accepted
 		// the Auth frame and we got a Welcome back. Without this
 		// gate, an Auth rejection (token already consumed by an

@@ -1,42 +1,57 @@
 @import 'tailwindcss';
 
-/* Design tokens for the control room. The console is dark-only by design — it
-   runs on a supplier's machine next to a terminal, and a theme switcher would
-   add state for a surface nobody keeps open all day. Colours live here, not in
-   component class strings, so a palette change is one edit. */
+/* Edge is a compact local surface, but it must still feel like EveryAPI. These
+   are the dashboard's dark-theme values, kept local so the mirrored Edge bundle
+   remains self-contained. */
 @theme {
-  --color-paper: #101512;
-  --color-panel: #171d19;
-  --color-panel-edge: #2b3730;
-  --color-ink: #edf0ea;
-  --color-muted: #939b91;
-  --color-lime: #b8f255;
-  --color-amber: #ffb35c;
-  --color-danger: #ff7770;
+  --color-canvas: #08080b;
+  --color-surface-0: #101015;
+  --color-surface-1: #16161c;
+  --color-surface-2: #1e1e25;
+  --color-surface-3: #232329;
+  --color-line: rgba(255, 255, 255, 0.11);
+  --color-line-2: rgba(255, 255, 255, 0.17);
+  --color-ink: #e8eaed;
+  --color-ink-2: #b3b9c2;
+  --color-muted: #969cab;
+  --color-faint: #8b92a1;
+  --color-accent: #7c5cff;
+  --color-accent-ink: #ffffff;
+  --color-good: #46e08a;
+  --color-warn: #ecc94b;
+  --color-danger: #ff6b6b;
 
-  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
-  --font-display: 'Avenir Next Condensed', 'DIN Condensed', 'Arial Narrow', sans-serif;
+  --font-sans: 'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 @layer base {
   html {
     color-scheme: dark;
+    background: var(--color-canvas);
   }
 
   body {
+    min-width: 320px;
     margin: 0;
     background:
-      radial-gradient(circle at 86% -10%, #2d4228 0, transparent 32rem), var(--color-paper);
+      radial-gradient(ellipse 58rem 32rem at 92% -12%, color-mix(in oklab, var(--color-accent) 18%, transparent), transparent 70%),
+      radial-gradient(ellipse 42rem 24rem at -8% 100%, rgba(255, 122, 92, 0.06), transparent 70%),
+      var(--color-canvas);
     color: var(--color-ink);
-    font-family: var(--font-mono);
-    font-size: 15px;
-    line-height: 1.45;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
   }
 
-  /* Keyboard focus must stay visible on the dark panels; the browser default
-     ring washes out against #171d19. */
+  button,
+  input,
+  select {
+    font: inherit;
+  }
+
   :focus-visible {
-    outline: 2px solid var(--color-lime);
+    outline: 2px solid var(--color-accent);
     outline-offset: 2px;
   }
 }

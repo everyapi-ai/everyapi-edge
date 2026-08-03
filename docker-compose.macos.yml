@@ -15,9 +15,9 @@
 #   4. Verify: curl http://localhost:11434/api/tags
 #   5. docker compose -f docker-compose.macos.yml up -d
 #
-# Only the agent runs in docker; the ollama service is the native
-# brew-installed one and persists models in ~/.ollama (NOT in the
-# bundle's ./data/ollama directory).
+# Only the agent runs in docker; the native service persists models in
+# ~/.everyapi/edge. The installer sets that path before starting or
+# restarting the local service, so the host and agent share one model library.
 
 services:
   agent:
@@ -32,6 +32,7 @@ services:
       EVERYAPI_NODE_ID: ${EVERYAPI_NODE_ID:?node id required}
       EVERYAPI_REGISTRATION_TOKEN: ${EVERYAPI_REGISTRATION_TOKEN:-}
       OLLAMA_URL: http://host.docker.internal:11434
+      EVERYAPI_OLLAMA_STORAGE_PATH: /models
       EVERYAPI_IDENTITY_PATH: /var/lib/everyapi-edge/identity.json
       EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}
       EVERYAPI_GPU_MODEL: ${EVERYAPI_GPU_MODEL:-Apple Silicon}
@@ -39,9 +40,9 @@ services:
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
       EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
       EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
-      EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:-}
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
+      - ${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}:/models
     ports:
       - "127.0.0.1:8421:8421"
     extra_hosts:

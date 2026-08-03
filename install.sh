@@ -199,6 +199,8 @@ wait_for_macos_ollama() {
 }
 
 ensure_macos_ollama() {
+  local model_root="$HOME/.everyapi/edge"
+  mkdir -p "$model_root"
   if ! command -v ollama >/dev/null 2>&1; then
     if ! command -v brew >/dev/null 2>&1; then
       err "Ollama is required on macOS and Homebrew is not installed"
@@ -209,13 +211,22 @@ ensure_macos_ollama() {
     brew install ollama
   fi
 
-  if ! ollama_api_ready; then
-    info "starting Ollama…"
-    if command -v brew >/dev/null 2>&1 && brew list --formula ollama >/dev/null 2>&1; then
-      brew services start ollama >/dev/null 2>&1 || true
-    else
-      nohup ollama serve >"${TMPDIR:-/tmp}/everyapi-ollama.log" 2>&1 &
-    fi
+  if command -v brew >/dev/null 2>&1 && brew list --formula ollama >/dev/null 2>&1; then
+    # Do this before checking readiness. Otherwise an existing service keeps
+    # its old storage root and the bundle silently splits the model library.
+    launchctl setenv OLLAMA_MODELS "$model_root" || true
+    launchctl setenv OLLAMA_MAX_LOADED_MODELS "${OLLAMA_MAX_LOADED_MODELS:-1}" || true
+    launchctl setenv OLLAMA_KEEP_ALIVE "${OLLAMA_KEEP_ALIVE:-5m}" || true
+    info "starting local inference…"
+    # A running Homebrew service does not inherit launchctl variables until
+    # it is restarted. The one-model cap is the hard safety backstop for
+    # independently arriving marketplace requests.
+    brew services restart ollama >/dev/null 2>&1 || true
+  elif ! ollama_api_ready; then
+    info "starting local inference…"
+      OLLAMA_MODELS="$model_root" OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-1}" \
+        OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-5m}" \
+        nohup ollama serve >"${TMPDIR:-/tmp}/everyapi-ollama.log" 2>&1 &
   fi
 
   if ! wait_for_macos_ollama; then
@@ -295,7 +306,7 @@ has_model_disk_space() {
     return 0
   fi
   if [ "$GPU" = "macos" ]; then
-    storage_path="${OLLAMA_MODELS:-$HOME/.ollama}"
+    storage_path="$HOME/.everyapi/edge"
   else
     storage_path="./data/ollama"
     mkdir -p "$storage_path"
@@ -544,11 +555,7 @@ fi
 # or fails to start (no half-populated .env that leaves the agent
 # unable to auth but containers nonetheless up and looping).
 info "writing .env"
-CONSOLE_TOKEN="$(od -An -N 32 -tx1 /dev/urandom | tr -d ' \n')"
-if [ "${#CONSOLE_TOKEN}" -ne 64 ]; then
-  err "failed to generate local console token"
-  exit 1
-fi
+mkdir -p "$HOME/.everyapi/edge"
 TMP_ENV="$(mktemp .env.XXXXXX)"
 cat > "$TMP_ENV" <<EOF
 EVERYAPI_GATEWAY=$GATEWAY
@@ -557,7 +564,7 @@ EVERYAPI_REGISTRATION_TOKEN=$TOKEN
 EVERYAPI_NODE_NAME=$NODE_NAME
 EVERYAPI_GPU_MODEL=$GPU_MODEL
 EVERYAPI_VRAM_GB=$VRAM_GB
-EVERYAPI_CONSOLE_TOKEN=$CONSOLE_TOKEN
+EVERYAPI_MODEL_PATH=$HOME/.everyapi/edge
 EOF
 chmod 600 "$TMP_ENV"
 mv "$TMP_ENV" .env
@@ -614,7 +621,6 @@ echo "  • To choose a different model on a later install, add:"
 echo "      --model qwen2.5:7b"
 echo "  • Open your local Edge Control Room (models, load, requests and logs):"
 echo "      http://127.0.0.1:8421"
-echo "    Local console token: $CONSOLE_TOKEN"
 echo "  • Logs:"
 echo "      docker compose -f $COMPOSE_FILE logs -f agent"
 

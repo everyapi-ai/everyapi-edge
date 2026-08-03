@@ -26,8 +26,13 @@ export const overviewSchema = z.object({
   completion_tokens: z.number(),
   loaded_vram_bytes: z.number(),
   vram_total_gb: z.number(),
+  reserved_vram_bytes: z.number(),
+  available_vram_bytes: z.number(),
   settled_earnings_micros: z.number(),
   settled_earnings_available: z.boolean(),
+  gateway_state: z.enum(['connecting', 'online', 'offline', 'preview']).default('connecting'),
+  gateway_last_connected_at: timestamp,
+  gateway_last_error: z.string().optional().default(''),
 })
 
 export const modelSchema = z.object({
@@ -45,6 +50,79 @@ export const modelSchema = z.object({
 // `models` is a Go slice, so an empty library marshals as JSON null, not [].
 export const modelListSchema = z.object({
   models: z.array(modelSchema).nullish().transform((models) => models ?? []),
+})
+
+export const modelCapabilitiesSchema = z.object({
+  model: z.string(),
+  capabilities: z.array(z.string()).nullish().transform((capabilities) => capabilities ?? []),
+})
+
+export const runtimeModelSchema = z.object({
+  name: z.string(),
+  size_vram: z.number(),
+  context_length: z.number().optional().default(0),
+  expires_at: timestamp,
+})
+
+export const runtimeSchema = z.object({
+  version: z.string(),
+  models: z.array(runtimeModelSchema).nullish().transform((models) => models ?? []),
+})
+
+export const imageRuntimeSchema = z.object({
+  status: z.string(),
+  models: z.array(z.string()).nullish().transform((models) => models ?? []),
+  error: z.string().optional().default(''),
+})
+
+export const storageSchema = z.object({
+  path: z.string(),
+  accessible: z.boolean(),
+  used_bytes: z.number(),
+  error: z.string().optional().default(''),
+})
+
+export const migrationPlanSchema = z.object({
+  source: storageSchema,
+  destination: storageSchema,
+  ready: z.boolean(),
+  blockers: z.array(z.string()),
+})
+
+export const storageMigrationSchema = z.object({
+  source: z.string().default(''),
+  destination: z.string().default(''),
+  status: z.string(),
+  completed: z.number().default(0),
+  total: z.number().default(0),
+  error: z.string().optional().default(''),
+  done: z.boolean(),
+})
+
+export const storagePickerSchema = z.object({
+  path: z.string(),
+})
+
+export const playgroundResponseSchema = z.object({
+  model: z.string(),
+  content: z.string(),
+  usage: z.object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number(),
+    total_tokens: z.number(),
+  }),
+})
+
+export const playgroundStreamEventSchema = z.object({
+  type: z.enum(['delta', 'done', 'error']),
+  content: z.string().optional().default(''),
+  model: z.string().optional().default(''),
+  usage: z.object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number(),
+    total_tokens: z.number(),
+  }).optional(),
+  error: z.string().optional().default(''),
 })
 
 export const requestSchema = z.object({
@@ -81,9 +159,11 @@ export const pullJobSchema = z.object({
   done: z.boolean(),
 })
 
-// GET /api/models/pull returns JSON null when no download has ever run in this
-// process; the handler serialises a nil *pullJob rather than 404ing.
-export const pullJobResponseSchema = pullJobSchema.nullable()
+export const pullQueueSchema = z.object({
+  active: pullJobSchema.nullable(),
+  queued: z.array(pullJobSchema).nullish().transform((jobs) => jobs ?? []),
+  latest: pullJobSchema.nullable(),
+})
 
 const nullableList = <T extends z.ZodTypeAny>(item: T) =>
   z
@@ -99,8 +179,18 @@ export const settlementListSchema = nullableList(settlementSchema)
 export const errorEnvelopeSchema = z.object({ error: z.string() })
 
 export type Overview = z.infer<typeof overviewSchema>
+export type ImageRuntime = z.infer<typeof imageRuntimeSchema>
 export type Model = z.infer<typeof modelSchema>
+export type ModelCapabilities = z.infer<typeof modelCapabilitiesSchema>
+export type Runtime = z.infer<typeof runtimeSchema>
+export type RuntimeModel = z.infer<typeof runtimeModelSchema>
+export type Storage = z.infer<typeof storageSchema>
+export type MigrationPlan = z.infer<typeof migrationPlanSchema>
+export type StorageMigration = z.infer<typeof storageMigrationSchema>
+export type PlaygroundResponse = z.infer<typeof playgroundResponseSchema>
+export type PlaygroundStreamEvent = z.infer<typeof playgroundStreamEventSchema>
 export type EdgeRequest = z.infer<typeof requestSchema>
 export type LogEntry = z.infer<typeof logEntrySchema>
 export type Settlement = z.infer<typeof settlementSchema>
 export type PullJob = z.infer<typeof pullJobSchema>
+export type PullQueue = z.infer<typeof pullQueueSchema>

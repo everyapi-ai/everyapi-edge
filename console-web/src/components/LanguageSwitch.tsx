@@ -21,7 +21,7 @@ export const LanguageSwitch = () => {
           const next = event.target.value
           if (isSupportedLocale(next)) setLocale(next)
         }}
-        className='cursor-pointer rounded-[2px] border border-panel-edge bg-[#0d120e] px-2 py-1 text-xs text-ink'
+        className='cursor-pointer rounded-md border border-line-2 bg-surface-1 px-2 py-1.5 text-xs text-ink outline-none transition-colors hover:border-accent/55 focus:border-accent'
       >
         {LOCALES.map((value) => (
           <option key={value} value={value}>

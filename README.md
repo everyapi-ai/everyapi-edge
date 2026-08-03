@@ -41,14 +41,11 @@ needed — your machine just needs outbound HTTPS to api.everyapi.ai.
    model list automatically. Do not restart it merely to publish a
    model: the installer already handles the authenticated reconnect.
 
-6. **Open Edge Control Room.** Visit http://127.0.0.1:8421 and
-   enter `EVERYAPI_CONSOLE_TOKEN` from `.env`. If you left it blank,
-   the agent creates a persistent token at
-   `./data/agent/console.token` on first start. From there you can
-   download and remove further models, watch active load, inspect recent
-   redacted traffic, and read the local agent log — no container
-   commands required. It reuses the same memory budget the installer
-   probed, so its one-click model choices fit the machine.
+6. **Open Edge Control Room.** Visit http://127.0.0.1:8421. From
+   there you can download and remove further models, watch active load,
+   inspect recent redacted traffic, and read the local agent log — no
+   container commands required. It reuses the same memory budget the
+   installer probed, so its one-click model choices fit the machine.
 
    The income card is deliberately receipt-based: it shows only earnings the
    gateway has already settled for this node (the latest 200 receipts are
@@ -102,9 +99,8 @@ useful for chat workloads, but embeddings can work.
   identity from step 1.
 
 - Inference traffic is an outbound WebSocket to api.everyapi.ai.
-  The Control Room is published only as `127.0.0.1:8421` and also
-  requires a 32+ character local console token. Do not change the
-  Compose port binding to a public interface.
+  The Control Room is published only as `127.0.0.1:8421`. Do not
+  change the Compose port binding to a public interface.
 
 - Traffic history keeps only model, endpoint, timing, token counts,
   and a node-scoped opaque customer label. Prompts, responses, API

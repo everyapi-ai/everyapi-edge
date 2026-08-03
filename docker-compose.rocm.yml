@@ -17,6 +17,11 @@ services:
     image: ollama/ollama:rocm
     container_name: everyapi-edge-ollama
     restart: unless-stopped
+    environment:
+      # Backstop the live capacity guard: one model may remain resident.
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+      OLLAMA_MODELS: /models
     # ROCm passthrough — exposes the AMD GPU devices to the
     # container. Requires the host to have ROCm 5.7+ + rocm-dkms
     # installed; verify with `rocminfo` on the host before
@@ -34,7 +39,7 @@ services:
     security_opt:
       - seccomp=unconfined
     volumes:
-      - ./data/ollama:/root/.ollama
+      - ${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}:/models
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -53,6 +58,7 @@ services:
       EVERYAPI_NODE_ID: ${EVERYAPI_NODE_ID:?node id required}
       EVERYAPI_REGISTRATION_TOKEN: ${EVERYAPI_REGISTRATION_TOKEN:-}
       OLLAMA_URL: http://ollama:11434
+      EVERYAPI_OLLAMA_STORAGE_PATH: /models
       EVERYAPI_IDENTITY_PATH: /var/lib/everyapi-edge/identity.json
       EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}
       EVERYAPI_GPU_MODEL: ${EVERYAPI_GPU_MODEL:-}
@@ -60,7 +66,6 @@ services:
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
       EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
       EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
-      EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:-}
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
     ports:

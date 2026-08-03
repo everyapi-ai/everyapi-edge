@@ -1,16 +1,5 @@
 import type * as z from 'zod'
 
-import { useSessionStore } from '@/stores/session'
-
-/** Raised when the agent rejects the console token, so callers can send the
- *  supplier back to the unlock screen instead of showing a generic toast. */
-export class UnauthorizedError extends Error {
-  constructor() {
-    super('unauthorized')
-    this.name = 'UnauthorizedError'
-  }
-}
-
 const readErrorMessage = async (response: Response): Promise<string> => {
   const body = await response.text()
   try {
@@ -19,26 +8,18 @@ const readErrorMessage = async (response: Response): Promise<string> => {
       const message = (parsed as { error: unknown }).error
       if (typeof message === 'string' && message) return message
     }
-  } catch {
-    // http.Error writes text/plain (the token middleware does), so fall through
-    // to the raw body.
-  }
+  } catch {}
   return body.trim() || response.statusText
 }
 
 const request = async (path: string, init: RequestInit = {}): Promise<Response> => {
-  const token = useSessionStore.getState().token
   const response = await fetch(path, {
     ...init,
     headers: {
       ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' }),
       ...init.headers,
-      Authorization: `Bearer ${token}`,
     },
   })
-  if (response.status === 401 || response.status === 503) {
-    throw new UnauthorizedError()
-  }
   if (!response.ok) {
     throw new Error(await readErrorMessage(response))
   }
@@ -57,6 +38,57 @@ export const getJSON = async <T extends z.ZodTypeAny>(
 
 export const postJSON = async (path: string, body: unknown): Promise<void> => {
   await request(path, { method: 'POST', body: JSON.stringify(body) })
+}
+
+export const postJSONResponse = async <T extends z.ZodTypeAny>(
+  path: string,
+  body: unknown,
+  schema: T
+): Promise<z.infer<T>> => {
+  const response = await request(path, { method: 'POST', body: JSON.stringify(body) })
+  return schema.parse(await response.json()) as z.infer<T>
+}
+
+/** Consume the local agent's small SSE envelope. It intentionally keeps the
+ * parser here rather than introducing a streaming dependency into the one-file
+ * control room bundle. */
+export const postJSONStream = async <T extends z.ZodTypeAny>(
+  path: string,
+  body: unknown,
+  schema: T,
+  onEvent: (event: z.infer<T>) => void,
+  signal?: AbortSignal,
+): Promise<void> => {
+  const response = await request(path, { method: 'POST', body: JSON.stringify(body), signal })
+  if (!response.body) throw new Error('the agent returned an empty chat stream')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const consume = (frame: string) => {
+    const data = frame
+      .split('\n')
+      .find((line) => line.startsWith('data:'))
+      ?.slice('data:'.length)
+      .trim()
+    if (data) onEvent(schema.parse(JSON.parse(data)) as z.infer<T>)
+  }
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      buffer += decoder.decode(value, { stream: !done })
+      let boundary = buffer.indexOf('\n\n')
+      while (boundary >= 0) {
+        consume(buffer.slice(0, boundary))
+        buffer = buffer.slice(boundary + 2)
+        boundary = buffer.indexOf('\n\n')
+      }
+      if (done) break
+    }
+    if (buffer.trim()) consume(buffer)
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 export const del = async (path: string): Promise<void> => {

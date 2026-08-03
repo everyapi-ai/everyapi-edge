@@ -5,6 +5,7 @@
 package console
 
 import (
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -13,6 +14,12 @@ import (
 // maxLogMessageBytes prevents a failing dependency or an untrusted peer from
 // turning the bounded log entry count into unbounded process memory use.
 const maxLogMessageBytes = 4 * 1024
+
+var runtimeBrand = regexp.MustCompile(`(?i)\bollama\b`)
+
+func sanitizeRuntimeBrand(message string) string {
+	return runtimeBrand.ReplaceAllString(message, "local runtime")
+}
 
 // RequestStart contains the only request metadata the local UI is allowed to
 // retain. In particular, it deliberately has no request body or headers.
@@ -57,15 +64,20 @@ type LogEntry struct {
 
 // Overview is the live operational rollup exposed by /api/overview.
 type Overview struct {
-	ActiveRequests           int   `json:"active_requests"`
-	CompletedRequests        int64 `json:"completed_requests"`
-	FailedRequests           int64 `json:"failed_requests"`
-	PromptTokens             int64 `json:"prompt_tokens"`
-	CompletionTokens         int64 `json:"completion_tokens"`
-	LoadedVRAMBytes          int64 `json:"loaded_vram_bytes"`
-	VRAMTotalGB              int   `json:"vram_total_gb"`
-	SettledEarningsMicros    int64 `json:"settled_earnings_micros"`
-	SettledEarningsAvailable bool  `json:"settled_earnings_available"`
+	ActiveRequests           int       `json:"active_requests"`
+	CompletedRequests        int64     `json:"completed_requests"`
+	FailedRequests           int64     `json:"failed_requests"`
+	PromptTokens             int64     `json:"prompt_tokens"`
+	CompletionTokens         int64     `json:"completion_tokens"`
+	LoadedVRAMBytes          int64     `json:"loaded_vram_bytes"`
+	VRAMTotalGB              int       `json:"vram_total_gb"`
+	ReservedVRAMBytes        int64     `json:"reserved_vram_bytes"`
+	AvailableVRAMBytes       int64     `json:"available_vram_bytes"`
+	SettledEarningsMicros    int64     `json:"settled_earnings_micros"`
+	SettledEarningsAvailable bool      `json:"settled_earnings_available"`
+	GatewayState             string    `json:"gateway_state"`
+	GatewayLastConnectedAt   time.Time `json:"gateway_last_connected_at,omitempty"`
+	GatewayLastError         string    `json:"gateway_last_error,omitempty"`
 }
 
 // Settlement is a gateway-committed, node-specific seller receipt. Amount is
@@ -99,6 +111,7 @@ func (s *Store) Log(level, message string) {
 	if message == "" {
 		return
 	}
+	message = sanitizeRuntimeBrand(message)
 	if len(message) > maxLogMessageBytes {
 		const truncation = "…(truncated)"
 		message = message[:maxLogMessageBytes-len(truncation)] + truncation
@@ -125,7 +138,28 @@ func NewStore(capacity int) *Store {
 	if capacity <= 0 {
 		capacity = 200
 	}
-	return &Store{capacity: capacity, active: make(map[string]*Request), settlements: make(map[string]Settlement)}
+	return &Store{capacity: capacity, active: make(map[string]*Request), settlements: make(map[string]Settlement), overview: Overview{GatewayState: "connecting"}}
+}
+
+// SetGatewayState records the real upstream session state separately from the
+// local control room HTTP listener. A reachable local page must not imply that
+// the node is currently able to receive gateway work.
+func (s *Store) SetGatewayState(state, reason string) {
+	if state != "connecting" && state != "online" && state != "offline" && state != "preview" {
+		state = "offline"
+	}
+	reason = sanitizeRuntimeBrand(reason)
+	if len(reason) > maxLogMessageBytes {
+		reason = reason[:maxLogMessageBytes]
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.overview.GatewayState = state
+	s.overview.GatewayLastError = reason
+	if state == "online" {
+		s.overview.GatewayLastConnectedAt = time.Now().UTC()
+		s.overview.GatewayLastError = ""
+	}
 }
 
 // Settle stores one final receipt. It is deliberately idempotent because the
@@ -190,7 +224,7 @@ func (s *Store) Finish(handle RequestHandle, finish RequestFinish) {
 	r.DurationMs = finish.Duration.Milliseconds()
 	r.PromptTokens = finish.PromptTokens
 	r.CompletionTokens = finish.CompletionTokens
-	r.Error = finish.Error
+	r.Error = sanitizeRuntimeBrand(finish.Error)
 	s.overview.CompletedRequests++
 	if finish.Error != "" {
 		s.overview.FailedRequests++

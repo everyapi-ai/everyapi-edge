@@ -9,14 +9,15 @@ import {
   type AnyRoute,
 } from '@tanstack/react-router'
 
-import { UnauthorizedError } from '@/api/client'
-import { UnlockScreen } from '@/components/UnlockScreen'
 import { logsRoute } from '@/routes/logs'
 import { modelsRoute } from '@/routes/models'
 import { overviewRoute } from '@/routes/overview'
+import { playgroundRoute } from '@/routes/playground'
+import { imageEditRoute } from '@/routes/image-edit'
+import { runtimeRoute } from '@/routes/runtime'
+import { storageRoute } from '@/routes/storage'
 import { rootRoute } from '@/routes/root'
 import { trafficRoute } from '@/routes/traffic'
-import { useSessionStore } from '@/stores/session'
 
 import './styles.css'
 
@@ -29,7 +30,11 @@ const history = createHashHistory()
 
 const routeTree: AnyRoute = rootRoute.addChildren([
   overviewRoute,
+  runtimeRoute,
+  storageRoute,
   modelsRoute,
+  playgroundRoute,
+  imageEditRoute,
   trafficRoute,
   logsRoute,
 ])
@@ -46,7 +51,7 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       // The agent is on loopback, so a failed request means it is genuinely
-      // down or the token was rejected — retrying hides that behind a delay.
+      // down — retrying hides that behind a delay.
       retry: false,
       refetchOnWindowFocus: false,
       staleTime: 2_000,
@@ -55,20 +60,7 @@ const queryClient = new QueryClient({
   },
 })
 
-// A rejected token must return the supplier to the unlock screen. Clearing it
-// here rather than in each caller keeps every query and mutation covered.
-queryClient.getQueryCache().config.onError = (error) => {
-  if (error instanceof UnauthorizedError) useSessionStore.getState().lock()
-}
-queryClient.getMutationCache().config.onError = (error) => {
-  if (error instanceof UnauthorizedError) useSessionStore.getState().lock()
-}
-
-const App = () => {
-  const token = useSessionStore((state) => state.token)
-  if (!token) return <UnlockScreen />
-  return <RouterProvider router={router} />
-}
+const App = () => <RouterProvider router={router} />
 
 const container = document.getElementById('root')
 if (!container) throw new Error('missing #root container')
