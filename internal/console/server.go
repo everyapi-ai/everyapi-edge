@@ -28,6 +28,14 @@ type Config struct {
 	DiffusersURL string
 	StoragePath  string
 	VRAMTotalGB  int
+	Version      string
+	Update       func(context.Context, func(UpdateStatus)) error
+}
+
+type UpdateStatus struct {
+	State   string `json:"state"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 type Model struct {
@@ -165,6 +173,7 @@ type handler struct {
 	storage     Storage
 	storageAt   time.Time
 	pickStorage func() (string, error)
+	update      UpdateStatus
 }
 
 var validModelName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$`)
@@ -210,6 +219,8 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/overview":
 		h.overview(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/update":
+		h.startUpdate(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/requests":
 		writeJSON(w, http.StatusOK, h.store.Requests())
 	case r.Method == http.MethodGet && r.URL.Path == "/api/logs":
@@ -1074,6 +1085,12 @@ func (h *handler) runtime(w http.ResponseWriter, r *http.Request) {
 func (h *handler) overview(w http.ResponseWriter, r *http.Request) {
 	overview := h.store.Overview()
 	overview.VRAMTotalGB = h.cfg.VRAMTotalGB
+	overview.AgentVersion = h.cfg.Version
+	h.mu.RLock()
+	overview.UpdateState = h.update.State
+	overview.UpdateVersion = h.update.Version
+	overview.UpdateError = h.update.Error
+	h.mu.RUnlock()
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, h.cfg.OllamaURL+"/api/ps", nil)
 	if err == nil {
 		response, doErr := h.httpClient.Do(request)
@@ -1096,6 +1113,34 @@ func (h *handler) overview(w http.ResponseWriter, r *http.Request) {
 	overview.ReservedVRAMBytes = memoryReserveBytes(overview.VRAMTotalGB)
 	overview.AvailableVRAMBytes = availableMemoryBytes(overview.VRAMTotalGB, overview.LoadedVRAMBytes, overview.ReservedVRAMBytes)
 	writeJSON(w, http.StatusOK, overview)
+}
+
+func (h *handler) startUpdate(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.Update == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this agent does not support updates"))
+		return
+	}
+	h.mu.Lock()
+	if h.update.State == "checking" || h.update.State == "downloading" || h.update.State == "restarting" {
+		h.mu.Unlock()
+		writeError(w, http.StatusConflict, errors.New("update already in progress"))
+		return
+	}
+	h.update = UpdateStatus{State: "checking"}
+	h.mu.Unlock()
+	go func() {
+		err := h.cfg.Update(context.Background(), func(status UpdateStatus) {
+			h.mu.Lock()
+			h.update = status
+			h.mu.Unlock()
+		})
+		if err != nil {
+			h.mu.Lock()
+			h.update = UpdateStatus{State: "failed", Error: err.Error()}
+			h.mu.Unlock()
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
 }
 
 const gibibyte = int64(1024 * 1024 * 1024)

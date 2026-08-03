@@ -40,6 +40,7 @@ import (
 	"github.com/everyapi-ai/everyapi-edge/internal/forward"
 	"github.com/everyapi-ai/everyapi-edge/internal/identity"
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
+	edgeupdate "github.com/everyapi-ai/everyapi-edge/internal/update"
 )
 
 // Version is patched at build time via -ldflags "-X main.Version=...".
@@ -97,6 +98,16 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	updateManager := edgeupdate.New(edgeupdate.Config{
+		CurrentVersion: Version,
+		StateDir:       filepath.Join(filepath.Dir(cfg.IdentityPath), "updates"),
+		Exec: func(path string) error {
+			return syscall.Exec(path, append([]string{path}, os.Args[1:]...), os.Environ())
+		},
+	})
+	if err := updateManager.Bootstrap(); err != nil {
+		log.Fatalf("update bootstrap: %v", err)
+	}
 	// The installer records discrete GPU VRAM in EVERYAPI_VRAM_GB. For a
 	// hand-started agent (and Apple Silicon's unified memory), keep the local
 	// model catalog useful by discovering a conservative host-memory budget.
@@ -131,7 +142,7 @@ func main() {
 	store := console.NewStore(200)
 	currentConsoleStore.Store(store)
 	defer currentConsoleStore.Store(nil)
-	consoleServer, err := startConsole(ctx, cfg.ConsoleAddr, cfg.OllamaURL, cfg.DiffusersURL, cfg.OllamaStoragePath, consoleMemoryGB, store)
+	consoleServer, err := startConsole(ctx, cfg.ConsoleAddr, cfg.OllamaURL, cfg.DiffusersURL, cfg.OllamaStoragePath, consoleMemoryGB, store, updateManager)
 	if err != nil {
 		log.Fatalf("console: %v", err)
 	}
@@ -169,7 +180,7 @@ func main() {
 		Location: protocol.Location{CountryISO2: cfg.CountryISO2},
 	}
 
-	if err := runWithReconnect(ctx, cfg, id, meta, fwd); err != nil && !errors.Is(err, context.Canceled) {
+	if err := runWithReconnect(ctx, cfg, id, meta, fwd, updateManager); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("fatal: %v", err)
 	}
 	log.Print("shutting down cleanly")
@@ -219,12 +230,20 @@ func detectedNVIDIAMemoryGB() int {
 	return int((totalMiB + 1023) / 1024)
 }
 
-func startConsole(ctx context.Context, addr, ollamaURL, diffusersURL, ollamaStoragePath string, vramTotalGB int, store *console.Store) (*http.Server, error) {
+func startConsole(ctx context.Context, addr, ollamaURL, diffusersURL, ollamaStoragePath string, vramTotalGB int, store *console.Store, updateManager *edgeupdate.Manager) (*http.Server, error) {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	server := &http.Server{Handler: console.NewHandler(console.Config{OllamaURL: ollamaURL, DiffusersURL: diffusersURL, StoragePath: ollamaStoragePath, VRAMTotalGB: vramTotalGB}, store), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Handler: console.NewHandler(console.Config{
+		OllamaURL: ollamaURL, DiffusersURL: diffusersURL, StoragePath: ollamaStoragePath,
+		VRAMTotalGB: vramTotalGB, Version: Version,
+		Update: func(updateCtx context.Context, report func(console.UpdateStatus)) error {
+			return updateManager.RunLatest(updateCtx, func(status edgeupdate.Status) {
+				report(console.UpdateStatus{State: status.State, Version: status.Version, Error: status.Error})
+			})
+		},
+	}, store), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("local control room stopped: %v", err)
@@ -310,6 +329,7 @@ func runWithReconnect(
 	id identity.Decoded,
 	meta protocol.NodeMeta,
 	fwd *forward.Forwarder,
+	updateManager *edgeupdate.Manager,
 ) error {
 	registrationToken := cfg.RegistrationToken
 	backoff := time.Second
@@ -338,6 +358,9 @@ func runWithReconnect(
 			// abilities.
 			Meta: sessionMeta,
 			OnConnected: func() {
+				if err := updateManager.Promote(); err != nil {
+					log.Printf("warning: could not promote successful update: %v", err)
+				}
 				setConsoleGatewayState("online", "")
 				log.Printf("connected to gateway with %d models", len(sessionMeta.Models))
 			},
@@ -350,6 +373,11 @@ func runWithReconnect(
 				if store != nil {
 					store.Settle(console.Settlement{RequestID: receipt.RequestID, SellerAmountMicros: receipt.SellerAmountMicros, SettledAt: time.UnixMilli(receipt.SettledAtUnixMs).UTC()})
 				}
+			},
+			Update: func(updateCtx context.Context, report func(protocol.UpdateStatusBody)) error {
+				return updateManager.RunLatest(updateCtx, func(status edgeupdate.Status) {
+					report(protocol.UpdateStatusBody{State: status.State, Version: status.Version, Error: status.Error})
+				})
 			},
 		})
 		if err != nil {

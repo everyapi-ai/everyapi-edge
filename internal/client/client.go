@@ -86,6 +86,9 @@ type Config struct {
 	// Settlement receives gateway-committed seller receipts. It must be
 	// idempotent because reconnect replay can deliver a receipt twice.
 	Settlement func(protocol.SettlementBody)
+	// Update runs the fixed latest-stable updater. The gateway controls only
+	// when it runs; it cannot supply a version, URL, checksum, or command.
+	Update func(context.Context, func(protocol.UpdateStatusBody)) error
 }
 
 // RequestHandler is what main.go installs to forward inbound
@@ -480,10 +483,38 @@ func (c *Client) readerLoop(ctx context.Context) error {
 			return errors.New("gateway disconnect")
 		case protocol.FrameSettlement:
 			c.handleSettlement(frame.Body)
+		case protocol.FrameUpdate:
+			c.handleUpdate(ctx, frame)
 		default:
 			c.log("warn", "unexpected gateway frame type")
 		}
 	}
+}
+
+func (c *Client) handleUpdate(ctx context.Context, frame protocol.Frame) {
+	emit := func(status protocol.UpdateStatusBody) {
+		body, err := json.Marshal(status)
+		if err != nil {
+			return
+		}
+		if err := c.sendFrame(protocol.Frame{Type: protocol.FrameUpdateStatus, ID: frame.ID, Body: body}); err != nil {
+			c.log("warn", "could not report update status")
+		}
+	}
+	var body protocol.UpdateBody
+	if err := json.Unmarshal(frame.Body, &body); err != nil || body.Action != protocol.UpdateActionLatest || frame.ID == "" {
+		emit(protocol.UpdateStatusBody{State: protocol.UpdateStateFailed, Error: "unsupported update command"})
+		return
+	}
+	if c.cfg.Update == nil {
+		emit(protocol.UpdateStatusBody{State: protocol.UpdateStateFailed, Error: "this agent does not support remote updates"})
+		return
+	}
+	go func() {
+		if err := c.cfg.Update(ctx, emit); err != nil {
+			emit(protocol.UpdateStatusBody{State: protocol.UpdateStateFailed, Error: err.Error()})
+		}
+	}()
 }
 
 func (c *Client) handleSettlement(body json.RawMessage) {

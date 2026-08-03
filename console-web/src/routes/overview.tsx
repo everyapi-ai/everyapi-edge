@@ -1,7 +1,7 @@
 import { createRoute, useNavigate } from '@tanstack/react-router'
-import { Boxes, HardDrive, MessageSquareText, ShieldCheck } from 'lucide-react'
+import { Boxes, HardDrive, MessageSquareText, RefreshCw, ShieldCheck } from 'lucide-react'
 
-import { useModels, useOverview, useRuntime, useSettlements, useStorage } from '@/api/queries'
+import { useModels, useOverview, useRuntime, useSettlements, useStorage, useUpdateAgent } from '@/api/queries'
 import { Button, PageHeader, Panel, QueryState, StatCard } from '@/components/primitives'
 import { useTranslation } from '@/i18n/useTranslation'
 import { formatCount, formatGigabytes, formatTime, formatUSDMicros } from '@/lib/format'
@@ -15,6 +15,7 @@ const OverviewPage = () => {
   const models = useModels()
   const runtime = useRuntime()
   const storage = useStorage()
+  const update = useUpdateAgent()
   const navigate = useNavigate()
 
   const stats = overview.data
@@ -28,6 +29,15 @@ const OverviewPage = () => {
       : t('gateway.connecting')
   const runtimeCount = runtime.data?.models.length
   const modelCount = models.data?.length
+  const updateStateLabel = stats?.update_state
+    ? ({
+        checking: t('update.state.checking'),
+        downloading: t('update.state.downloading'),
+        restarting: t('update.state.restarting'),
+        current: t('update.state.current'),
+        failed: t('update.state.failed'),
+      } as Record<string, string>)[stats.update_state] ?? stats.update_state
+    : ''
   const modelDirectoryMismatch = Boolean(storage.data?.accessible && storage.data.used_bytes === 0 && modelCount)
   const readiness = [
     { label: t('overview.readinessGateway'), value: gatewayStatus, tone: stats?.gateway_state === 'online' ? 'text-good' : stats?.gateway_state === 'offline' ? 'text-danger' : stats?.gateway_state === 'preview' ? 'text-accent' : 'text-warn' },
@@ -95,6 +105,18 @@ const OverviewPage = () => {
               </div>
             ))}
           </dl>
+        </Panel>
+        <Panel title={t('update.title')}>
+          <dl className='grid grid-cols-[auto_1fr] gap-x-5 gap-y-3 text-sm'>
+            <dt className='text-muted'>{t('update.currentVersion')}</dt>
+            <dd className='text-right font-mono text-ink'>v{stats?.agent_version || t('common.unknown')}</dd>
+            {stats?.update_state ? <><dt className='text-muted'>{t('update.status')}</dt><dd className='text-right text-ink'>{updateStateLabel}</dd></> : null}
+          </dl>
+          {stats?.update_error || update.error ? <p role='alert' className='mt-3 text-sm text-danger'>{stats?.update_error || update.error?.message}</p> : null}
+          <Button type='button' onClick={() => update.mutate()} disabled={update.isPending || ['checking', 'downloading', 'restarting'].includes(stats?.update_state ?? '')} className='mt-4 inline-flex items-center gap-2'>
+            <RefreshCw className='size-3.5' aria-hidden='true' />
+            {t('update.action')}
+          </Button>
         </Panel>
         <Panel title={t('settlement.title')}>
           <p className='rounded-lg border border-warn/22 bg-warn/10 p-3 text-sm leading-5 text-ink-2'>

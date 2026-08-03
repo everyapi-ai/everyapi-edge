@@ -841,6 +841,39 @@ func TestHandlerStartsModelPullAndExposesProgress(t *testing.T) {
 	}
 }
 
+func TestHandlerExposesVersionAndStartsLatestUpdate(t *testing.T) {
+	started := make(chan struct{}, 1)
+	h := NewHandler(Config{
+		Version: "1.2.3",
+		Update: func(_ context.Context, report func(UpdateStatus)) error {
+			report(UpdateStatus{State: "downloading", Version: "1.2.4"})
+			started <- struct{}{}
+			return nil
+		},
+	}, NewStore(16))
+
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/update", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("update did not start")
+	}
+
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	var overview Overview
+	if err := json.NewDecoder(response.Body).Decode(&overview); err != nil {
+		t.Fatal(err)
+	}
+	if overview.AgentVersion != "1.2.3" || overview.UpdateState != "downloading" || overview.UpdateVersion != "1.2.4" {
+		t.Fatalf("overview = %#v", overview)
+	}
+}
+
 func TestHandlerRejectsPullForAnInstalledModel(t *testing.T) {
 	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

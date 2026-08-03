@@ -19,6 +19,10 @@ const timestamp = z
   })
 
 export const overviewSchema = z.object({
+  agent_version: z.string(),
+  update_state: z.string().optional().default(''),
+  update_version: z.string().optional().default(''),
+  update_error: z.string().optional().default(''),
   active_requests: z.number(),
   completed_requests: z.number(),
   failed_requests: z.number(),

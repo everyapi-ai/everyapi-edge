@@ -58,6 +58,16 @@ export const useOverview = (): UseQueryResult<Overview> =>
     refetchInterval: LIVE_REFETCH_MS,
   })
 
+export const useUpdateAgent = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => postJSON('/api/update', {}),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.overview })
+    },
+  })
+}
+
 export const useModels = (): UseQueryResult<Model[]> =>
   useQuery({
     queryKey: queryKeys.models,

@@ -42,7 +42,9 @@ const (
 	// FrameModelPull is agent → gateway, fire-and-forget: one per model the
 	// agent was asked to pull, reporting how that pull ended. Mirrors the
 	// gateway's backend/pkg/edge definition.
-	FrameModelPull FrameType = "model_pull"
+	FrameModelPull    FrameType = "model_pull"
+	FrameUpdate       FrameType = "update"
+	FrameUpdateStatus FrameType = "update_status"
 )
 
 type Frame struct {
@@ -108,6 +110,27 @@ type SettlementBody struct {
 type ErrorBody struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+const UpdateActionLatest = "latest"
+
+type UpdateBody struct {
+	Action string `json:"action"`
+}
+
+const (
+	UpdateStateChecking    = "checking"
+	UpdateStateDownloading = "downloading"
+	UpdateStateStaged      = "staged"
+	UpdateStateRestarting  = "restarting"
+	UpdateStateCurrent     = "current"
+	UpdateStateFailed      = "failed"
+)
+
+type UpdateStatusBody struct {
+	State   string `json:"state"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 type DisconnectBody struct {

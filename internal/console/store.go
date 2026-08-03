@@ -64,6 +64,10 @@ type LogEntry struct {
 
 // Overview is the live operational rollup exposed by /api/overview.
 type Overview struct {
+	AgentVersion             string    `json:"agent_version"`
+	UpdateState              string    `json:"update_state,omitempty"`
+	UpdateVersion            string    `json:"update_version,omitempty"`
+	UpdateError              string    `json:"update_error,omitempty"`
 	ActiveRequests           int       `json:"active_requests"`
 	CompletedRequests        int64     `json:"completed_requests"`
 	FailedRequests           int64     `json:"failed_requests"`

@@ -141,8 +141,19 @@ identity loss as equivalent to "machine was compromised.")
   beyond what's in `.env` (gateway URL, node id, supplier-declared
   metadata) plus liveness heartbeats with GPU utilisation.
 
-- It does not auto-update. We don't push image updates without
-  your explicit `docker compose pull && docker compose up -d`.
+- It does not update silently. A seller or authorized platform operator must
+  explicitly choose **Update** in the Edge Control Room or App Dashboard.
+  The agent then resolves only the official latest stable `edge-v*` release,
+  selects the fixed asset for its OS/architecture, verifies it against the
+  release's SHA-256 checksum file, and restarts itself. The gateway cannot send
+  an arbitrary URL, version, shell command, or downgrade request.
+
+  Existing installations need one final manual
+  `docker compose pull && docker compose up -d` to gain remote-update support.
+  After that, the verified binary is stored beside the persistent agent
+  identity, so it survives container restarts. A candidate is promoted only
+  after it reconnects to the gateway; if it exits before that first successful
+  connection, the image's bundled agent rolls it back on the next restart.
 
 - It does not run arbitrary code. The path whitelist above is
   enforced inside the agent binary, not inside ollama.
