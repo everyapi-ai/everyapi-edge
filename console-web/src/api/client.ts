@@ -1,16 +1,6 @@
 import type * as z from 'zod'
 
-const readErrorMessage = async (response: Response): Promise<string> => {
-  const body = await response.text()
-  try {
-    const parsed: unknown = JSON.parse(body)
-    if (parsed && typeof parsed === 'object' && 'error' in parsed) {
-      const message = (parsed as { error: unknown }).error
-      if (typeof message === 'string' && message) return message
-    }
-  } catch {}
-  return body.trim() || response.statusText
-}
+import { parseErrorResponse } from './errors'
 
 const request = async (path: string, init: RequestInit = {}): Promise<Response> => {
   const response = await fetch(path, {
@@ -21,7 +11,7 @@ const request = async (path: string, init: RequestInit = {}): Promise<Response> 
     },
   })
   if (!response.ok) {
-    throw new Error(await readErrorMessage(response))
+    throw await parseErrorResponse(response)
   }
   return response
 }
@@ -30,7 +20,7 @@ const request = async (path: string, init: RequestInit = {}): Promise<Response> 
  *  than a half-rendered panel. */
 export const getJSON = async <T extends z.ZodTypeAny>(
   path: string,
-  schema: T
+  schema: T,
 ): Promise<z.infer<T>> => {
   const response = await request(path)
   return schema.parse(await response.json()) as z.infer<T>
@@ -43,7 +33,7 @@ export const postJSON = async (path: string, body: unknown): Promise<void> => {
 export const postJSONResponse = async <T extends z.ZodTypeAny>(
   path: string,
   body: unknown,
-  schema: T
+  schema: T,
 ): Promise<z.infer<T>> => {
   const response = await request(path, { method: 'POST', body: JSON.stringify(body) })
   return schema.parse(await response.json()) as z.infer<T>

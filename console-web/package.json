@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vp dev",
     "build": "vp build",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsgo --noEmit",
+    "test": "vp test",
+    "lint": "vp lint",
+    "format:check": "oxfmt --check ."
   },
   "dependencies": {
     "@tanstack/react-query": "^5.95.2",
@@ -23,10 +26,11 @@
     "@types/node": "^26.1.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@typescript/native-preview": "7.0.0-dev.20260516.1",
+    "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "@vitejs/plugin-react": "^6.0.2",
     "tailwindcss": "^4.3.0",
     "vite": "^8.0.0",
-    "vite-plus": "^0.1.24"
+    "vite-plus": "0.2.7",
+    "vitest": "4.1.10"
   }
 }

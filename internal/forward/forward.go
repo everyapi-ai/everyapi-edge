@@ -25,14 +25,13 @@ import (
 	"time"
 
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
+	edgeruntime "github.com/everyapi-ai/everyapi-edge/internal/runtime"
 )
 
 // Forwarder is what main.go constructs and hands to the WS client
 // as the RequestHandler.
 type Forwarder struct {
-	OllamaURL    string       // e.g. http://ollama:11434
-	DiffusersURL string       // e.g. http://diffusers:8188
-	HTTPClient   *http.Client // defaulted in New() if nil
+	runtimes *edgeruntime.Router
 	// Observer receives redacted request lifecycle events for the local Edge
 	// console. It never receives request bodies or headers.
 	Observer Observer
@@ -103,14 +102,11 @@ const (
 
 // New constructs a Forwarder with defaults filled in.
 func New(ollamaURL, diffusersURL string) *Forwarder {
+	httpClient := &http.Client{
+		// No client-level timeout — Handle owns the streaming deadline.
+	}
 	return &Forwarder{
-		OllamaURL:    strings.TrimRight(ollamaURL, "/"),
-		DiffusersURL: strings.TrimRight(diffusersURL, "/"),
-		HTTPClient:   &http.Client{
-			// No client-level timeout — we use a per-request context
-			// timeout in Handle so streaming long completions
-			// doesn't trip an idle-conn watchdog.
-		},
+		runtimes:   edgeruntime.NewRouter(ollamaURL, diffusersURL, httpClient),
 		ChunkBytes: DefaultChunkBytes,
 	}
 }
@@ -121,36 +117,27 @@ func New(ollamaURL, diffusersURL string) *Forwarder {
 // but defense in depth: validating here means a future relay-side
 // regression or malicious gateway can't trick the agent into
 // hitting /api/admin/exec or similar invented routes.
-var ollamaPaths = map[string]bool{
-	"/v1/chat/completions": true,
-	"/v1/completions":      true,
-	"/v1/embeddings":       true,
-	"/v1/models":           true,
-}
-
-var diffusersPaths = map[string]bool{
-	"/v1/images/generations": true,
-	"/v1/images/edits":       true,
-}
-
 // Handle is the protocol.RequestHandler signature the WS client
 // expects. Builds the outbound HTTP request, streams the response
 // in ChunkBytes-sized batches, and returns Done with the token
 // counts parsed off Ollama's final SSE event (when streaming) or
 // JSON body (when not).
 func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send func(protocol.ChunkBody) error) (done protocol.DoneBody, fault *protocol.ErrorBody) {
-	upstreamURL, allowed := f.upstreamURL(req.Path)
-	if !allowed {
+	target, err := f.runtimes.Resolve(req.Path)
+	if errors.Is(err, edgeruntime.ErrPathNotAllowed) {
 		return protocol.DoneBody{}, &protocol.ErrorBody{
 			Code:    "path_not_allowed",
 			Message: fmt.Sprintf("agent refuses to forward %q (whitelist enforced)", req.Path),
 		}
 	}
-	if upstreamURL == "" {
+	if errors.Is(err, edgeruntime.ErrRuntimeUnavailable) {
 		return protocol.DoneBody{}, &protocol.ErrorBody{
 			Code:    "runtime_unavailable",
 			Message: "the local image runtime is not configured",
 		}
+	}
+	if err != nil {
+		return protocol.DoneBody{}, &protocol.ErrorBody{Code: "runtime_unavailable", Message: err.Error()}
 	}
 	if req.Method == "" {
 		req.Method = http.MethodPost
@@ -176,22 +163,22 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
-	url := upstreamURL + req.Path
-	hReq, err := http.NewRequestWithContext(ctx, req.Method, url, bytes.NewReader(req.Body))
-	if err != nil {
-		return protocol.DoneBody{}, &protocol.ErrorBody{Code: "request_build_failed", Message: err.Error()}
-	}
+	headers := make(http.Header, len(req.Headers)+1)
 	for k, v := range req.Headers {
-		hReq.Header.Set(k, v)
+		headers.Set(k, v)
 	}
 	// Default Content-Type if the gateway didn't forward one.
-	if hReq.Header.Get("Content-Type") == "" {
-		hReq.Header.Set("Content-Type", "application/json")
+	if headers.Get("Content-Type") == "" {
+		headers.Set("Content-Type", "application/json")
 	}
 
 	started := time.Now()
-	resp, err := f.HTTPClient.Do(hReq)
+	resp, err := target.Do(ctx, req.Method, req.Path, headers, bytes.NewReader(req.Body))
 	if err != nil {
+		var requestError *edgeruntime.RequestError
+		if errors.As(err, &requestError) && requestError.Op == "build" {
+			return protocol.DoneBody{}, &protocol.ErrorBody{Code: "request_build_failed", Message: err.Error()}
+		}
 		return protocol.DoneBody{}, &protocol.ErrorBody{Code: "upstream_unreachable", Message: err.Error()}
 	}
 	defer resp.Body.Close()
@@ -253,16 +240,6 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	usage.PromptTokens, usage.CompletionTokens = tee.Tokens()
 	usage.DurationMs = time.Since(started).Milliseconds()
 	return usage, nil
-}
-
-func (f *Forwarder) upstreamURL(path string) (string, bool) {
-	if ollamaPaths[path] {
-		return f.OllamaURL, true
-	}
-	if diffusersPaths[path] {
-		return f.DiffusersURL, true
-	}
-	return "", false
 }
 
 // requestModel extracts only the public model selector. A malformed body is

@@ -65,3 +65,17 @@ func TestEdgeReleaseBuildsWindowsAgentBinary(t *testing.T) {
 		t.Fatal("Edge release does not build a windows/amd64 agent")
 	}
 }
+
+func TestEdgeReleaseSmokeBuildsDiffusersImages(t *testing.T) {
+	workflow := readPackagingFile(t, "../../.github/workflows/edge-release.yml")
+	for _, required := range []string{
+		"Smoke build CUDA Diffusers runtime",
+		"file: clients/edge/diffusers/Dockerfile",
+		"Smoke build ROCm Diffusers runtime",
+		"file: clients/edge/diffusers/Dockerfile.rocm",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("Edge release is missing %q", required)
+		}
+	}
+}

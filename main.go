@@ -12,7 +12,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,36 +41,30 @@ import (
 	"github.com/everyapi-ai/everyapi-edge/internal/forward"
 	"github.com/everyapi-ai/everyapi-edge/internal/identity"
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
+	edgeruntime "github.com/everyapi-ai/everyapi-edge/internal/runtime"
 	edgeupdate "github.com/everyapi-ai/everyapi-edge/internal/update"
 )
 
 // Version is patched at build time via -ldflags "-X main.Version=...".
 var Version = "dev"
 
-const maxOllamaTagsResponseBytes int64 = 1 << 20
-const maxDiffusersHealthResponseBytes int64 = 1 << 20
-
-// currentClient holds the WS client active inside the reconnect loop.
-// The log-tee writer reads it on every Write and forwards the line to
-// the gateway as a FrameLog. atomic.Pointer keeps the swap lock-free
-// — log.Printf is called from many goroutines, the reconnect loop
-// swaps from one — so there's no mutex contention.
-var currentClient atomic.Pointer[client.Client]
-var currentConsoleStore atomic.Pointer[console.Store]
-
 // logTee writes to the underlying writer (stderr) AND, when a WS
 // client is live, fires a FrameLog through it. The send is async +
 // drops on full queue so the standard log package's mutex is held
 // only for the duration of the underlying stderr write — a stalled
 // gateway link doesn't back up local logging.
-type logTee struct{ underlying io.Writer }
+type logTee struct {
+	underlying io.Writer
+	client     atomic.Pointer[client.Client]
+	store      atomic.Pointer[console.Store]
+}
 
 func (t *logTee) Write(p []byte) (int, error) {
 	msg := string(bytes.TrimRight(p, "\n"))
-	if store := currentConsoleStore.Load(); store != nil && msg != "" {
+	if store := t.store.Load(); store != nil && msg != "" {
 		store.Log("info", msg)
 	}
-	if cli := currentClient.Load(); cli != nil {
+	if cli := t.client.Load(); cli != nil {
 		// Strip the trailing newline the log package adds — the
 		// dashboard renders one line per LogBody and would
 		// otherwise show double-spaced lines.
@@ -82,18 +75,6 @@ func (t *logTee) Write(p []byte) (int, error) {
 	return t.underlying.Write(p)
 }
 
-func setConsoleGatewayState(state, reason string) {
-	if store := currentConsoleStore.Load(); store != nil {
-		store.SetGatewayState(state, reason)
-	}
-}
-
-func scheduleConsoleGatewayReconnect(next time.Time, attempt int) {
-	if store := currentConsoleStore.Load(); store != nil {
-		store.ScheduleGatewayReconnect(next, attempt)
-	}
-}
-
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmicroseconds)
 	log.SetPrefix("[edge-agent] ")
@@ -101,7 +82,8 @@ func main() {
 	// can stream agent logs without the supplier exposing docker
 	// logs. The underlying writer stays stderr so `docker compose
 	// logs agent` still works on the supplier's machine.
-	log.SetOutput(&logTee{underlying: os.Stderr})
+	logSink := &logTee{underlying: os.Stderr}
+	log.SetOutput(logSink)
 
 	cfg := config.FromEnv()
 	if err := cfg.Validate(); err != nil {
@@ -147,9 +129,9 @@ func main() {
 	defer cancel()
 
 	store := console.NewStore(200)
-	currentConsoleStore.Store(store)
-	defer currentConsoleStore.Store(nil)
-	consoleHandler := console.NewHandler(console.Config{
+	logSink.store.Store(store)
+	defer logSink.store.Store(nil)
+	consoleHandlers := console.NewHandlers(console.Config{
 		OllamaURL:    cfg.OllamaURL,
 		DiffusersURL: cfg.DiffusersURL,
 		StoragePath:  cfg.OllamaStoragePath,
@@ -166,7 +148,7 @@ func main() {
 			})
 		},
 	}, store)
-	consoleServer, err := startConsole(ctx, cfg.ConsoleAddr, consoleHandler)
+	consoleServer, err := startConsole(ctx, cfg.ConsoleAddr, consoleHandlers.Browser)
 	if err != nil {
 		log.Fatalf("console: %v", err)
 	}
@@ -204,7 +186,7 @@ func main() {
 		Location: protocol.Location{CountryISO2: cfg.CountryISO2},
 	}
 
-	if err := runWithReconnect(ctx, cfg, id, meta, fwd, updateManager, consoleHandler); err != nil && !errors.Is(err, context.Canceled) {
+	if err := runWithReconnect(ctx, cfg, id, meta, fwd, updateManager, consoleHandlers.Control, store, logSink); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("fatal: %v", err)
 	}
 	log.Print("shutting down cleanly")
@@ -369,86 +351,20 @@ func isAllowedRemoteControl(method, rawPath string) bool {
 // abilities, so reporting a static or stale list would make an online node
 // appear healthy while accepting no buyer traffic.
 func discoverOllamaModels(ctx context.Context, ollamaURL string) ([]string, error) {
-	endpoint, err := url.Parse(ollamaURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse Ollama URL: %w", err)
-	}
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/api/tags"
-	endpoint.RawQuery = ""
-	endpoint.Fragment = ""
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("build Ollama tag request: %w", err)
-	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request Ollama tags: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Ollama tags returned %s", resp.Status)
-	}
-
-	var payload struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxOllamaTagsResponseBytes)).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode Ollama tags: %w", err)
-	}
-	models := make([]string, 0, len(payload.Models))
-	seen := make(map[string]struct{}, len(payload.Models))
-	for _, model := range payload.Models {
-		name := strings.TrimSpace(model.Name)
-		if name == "" {
-			continue
-		}
-		if _, exists := seen[name]; exists {
-			continue
-		}
-		seen[name] = struct{}{}
-		models = append(models, name)
-	}
-	sort.Strings(models)
-	return models, nil
+	client := &http.Client{Timeout: 10 * time.Second}
+	return edgeruntime.NewTextClient(ollamaURL, client).Models(ctx)
 }
 
 func discoverDiffusersModels(ctx context.Context, diffusersURL string) ([]string, error) {
-	endpoint, err := url.Parse(diffusersURL)
+	client := &http.Client{Timeout: 10 * time.Second}
+	health, err := edgeruntime.NewImageClient(diffusersURL, client).Health(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("parse Diffusers URL: %w", err)
+		return nil, err
 	}
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/health"
-	endpoint.RawQuery = ""
-	endpoint.Fragment = ""
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("build Diffusers health request: %w", err)
+	if health.Status != edgeruntime.StatusReady {
+		return nil, fmt.Errorf("local image runtime is %s: %s", health.Status, health.Error)
 	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request Diffusers health: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Diffusers health returned %s", resp.Status)
-	}
-
-	var payload struct {
-		Status string   `json:"status"`
-		Models []string `json:"models"`
-		Error  string   `json:"error"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxDiffusersHealthResponseBytes)).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode Diffusers health: %w", err)
-	}
-	if payload.Status != "ready" {
-		return nil, fmt.Errorf("Diffusers runtime is %s: %s", payload.Status, payload.Error)
-	}
-	return mergeModels(payload.Models), nil
+	return health.Models, nil
 }
 
 func mergeModels(groups ...[]string) []string {
@@ -487,137 +403,10 @@ func runWithReconnect(
 	fwd *forward.Forwarder,
 	updateManager *edgeupdate.Manager,
 	controlHandler http.Handler,
+	store *console.Store,
+	logSink *logTee,
 ) error {
-	registrationToken := cfg.RegistrationToken
-	backoff := time.Second
-	reconnectAttempt := 0
-
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		setConsoleGatewayState("connecting", "")
-		sessionMeta := meta
-		models, modelErr := discoverOllamaModels(ctx, cfg.OllamaURL)
-		if modelErr != nil {
-			log.Printf("warning: could not discover Ollama models: %v", modelErr)
-		} else {
-			sessionMeta.Models = mergeModels(sessionMeta.Models, models)
-			log.Printf("discovered %d Ollama models", len(models))
-		}
-		if cfg.DiffusersURL != "" {
-			imageModels, imageModelErr := discoverDiffusersModels(ctx, cfg.DiffusersURL)
-			if imageModelErr != nil {
-				log.Printf("warning: could not discover Diffusers models: %v", imageModelErr)
-			} else {
-				sessionMeta.Models = mergeModels(sessionMeta.Models, imageModels)
-				log.Printf("discovered %d Diffusers models", len(imageModels))
-			}
-		}
-		cli, err := client.New(client.Config{
-			GatewayURL:        cfg.GatewayURL,
-			OllamaURL:         cfg.OllamaURL,
-			VRAMTotalGB:       sessionMeta.Hardware.VRAMTotalGB,
-			NodeID:            cfg.NodeID,
-			RegistrationToken: registrationToken,
-			Identity:          id,
-			// sessionMeta, not meta: it carries the models discovered from
-			// Ollama just above, which the gateway turns into routable
-			// abilities.
-			Meta: sessionMeta,
-			OnConnected: func() {
-				if updateManager != nil {
-					if err := updateManager.Promote(); err != nil {
-						log.Printf("warning: could not promote successful update: %v", err)
-					}
-				}
-				setConsoleGatewayState("online", "")
-				log.Printf("connected to gateway with %d models", len(sessionMeta.Models))
-			},
-			Handler:        fwd.Handle,
-			ControlHandler: remoteControlHandler(controlHandler),
-			Log: func(level, message string) {
-				log.Printf("[%s] %s", level, message)
-			},
-			Settlement: func(receipt protocol.SettlementBody) {
-				store := currentConsoleStore.Load()
-				if store != nil {
-					store.Settle(console.Settlement{RequestID: receipt.RequestID, SellerAmountMicros: receipt.SellerAmountMicros, SettledAt: time.UnixMilli(receipt.SettledAtUnixMs).UTC()})
-				}
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("client.New: %w", err)
-		}
-		log.Print("connecting")
-		// Publish the active client so the log tee can forward
-		// lines through it. Cleared after Run returns so a
-		// between-reconnects log line writes only to stderr and
-		// not to a stale send queue.
-		currentClient.Store(cli)
-		runErr := cli.Run(ctx)
-		currentClient.Store(nil)
-		if runErr != nil && !errors.Is(runErr, context.Canceled) {
-			setConsoleGatewayState("offline", runErr.Error())
-		}
-		// Burn the registration token ONLY if the gateway accepted
-		// the Auth frame and we got a Welcome back. Without this
-		// gate, an Auth rejection (token already consumed by an
-		// earlier run, wrong node id, signature path with no stored
-		// pubkey) would zero the in-process token in this outer
-		// loop, and the next reconnect would dial with an empty
-		// token AND no Ed25519 pubkey on file server-side — an
-		// unrecoverable state that requires manual operator
-		// intervention.
-		welcomed := cli.WelcomeReceived()
-		if welcomed {
-			registrationToken = ""
-		}
-
-		if runErr == nil || errors.Is(runErr, context.Canceled) {
-			return runErr
-		}
-
-		// Terminal codes (currently only node_revoked) write a
-		// sentinel next to the identity file and exit clean. The
-		// docker compose restart policy will respawn the container,
-		// but the next boot reads the sentinel and exits immediately
-		// — so the seller sees one clear "node revoked" line in
-		// docker logs instead of a forever-backoff loop. Must run
-		// BEFORE the backoff-reset block below since we return.
-		var terminal *client.TerminalDisconnectError
-		if errors.As(runErr, &terminal) {
-			log.Printf("terminal disconnect from gateway: %s (%s) — agent will not retry", terminal.Code, terminal.Reason)
-			if writeErr := writeRevokedSentinel(cfg.IdentityPath, terminal.Reason); writeErr != nil {
-				log.Printf("warning: failed to persist revoked sentinel: %v", writeErr)
-			}
-			return nil
-		}
-
-		// Reset the backoff after a stable session so the next
-		// disconnect retries fast. Without this the agent
-		// accumulates exponential delay across the lifetime of the
-		// process — a fleet that hit a transient gateway outage
-		// would reconnect slowly even after stability returns.
-		// "Stable" = the gateway accepted Auth and sent Welcome;
-		// failures before Welcome (bad token, signature mismatch,
-		// dial refused) keep the backoff growing so we don't hammer
-		// a refusing gateway.
-		if welcomed {
-			backoff = time.Second
-			reconnectAttempt = 0
-		}
-		log.Printf("session ended: %v (reconnecting in %s)", runErr, backoff)
-		reconnectAttempt++
-		scheduleConsoleGatewayReconnect(time.Now().UTC().Add(backoff), reconnectAttempt)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-		backoff = nextBackoff(backoff)
-	}
+	return runGatewayLifecycle(ctx, cfg, id, meta, fwd, updateManager, controlHandler, store, logSink)
 }
 
 // revokedSentinelPath sits next to the identity file so it shares

@@ -26,6 +26,6 @@ export const useSessionStore = create<SessionState>()(
       name: 'everyapi-edge-console',
       storage: createJSONStorage(() => sessionStorage),
       version: 1,
-    }
-  )
+    },
+  ),
 )

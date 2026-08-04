@@ -64,7 +64,7 @@ const inlineEverythingIntoHTML: PluginOption = {
       }
 
       this.error(
-        `edge-console:single-file cannot inline ${fileName}; keep the console free of external assets`
+        `edge-console:single-file cannot inline ${fileName}; keep the console free of external assets`,
       )
       return
     }
@@ -75,6 +75,9 @@ const inlineEverythingIntoHTML: PluginOption = {
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), inlineEverythingIntoHTML],
+  test: {
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+  },
   resolve: {
     alias: { '@': path.resolve(import.meta.dirname, 'src') },
   },

@@ -46,6 +46,13 @@ class ImageRuntimeAPITests(unittest.TestCase):
             app.generation_ready = previous_ready
             app.generation_error = previous_error
 
+    def test_runtime_uses_lifespan_instead_of_deprecated_event_registry(self):
+        self.assertEqual(app.app.router.on_startup, [])
+        with patch("app.preload_generation_model") as preload:
+            with TestClient(app.app):
+                pass
+        preload.assert_called_once_with()
+
     @patch("app.select_device", return_value=Device(name="mps", backend="mps"))
     @patch.dict(os.environ, {"EVERYAPI_VRAM_GB": "48"})
     @patch("app.generation_ready", True)

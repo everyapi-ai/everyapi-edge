@@ -38,6 +38,67 @@ func TestHandlerListsModelsWithoutLocalToken(t *testing.T) {
 	}
 }
 
+func newRuntimeControlHandlers(t *testing.T) Handlers {
+	t.Helper()
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/ps" {
+			t.Fatalf("unexpected local runtime request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"models":[]}`)
+	}))
+	t.Cleanup(runtime.Close)
+	return NewHandlers(Config{OllamaURL: runtime.URL}, NewStore(16))
+}
+
+func TestBrowserHandlerRejectsCrossSiteMutation(t *testing.T) {
+	handlers := newRuntimeControlHandlers(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil)
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+	response := httptest.NewRecorder()
+
+	handlers.Browser.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-site mutation status = %d, want %d; body=%s", response.Code, http.StatusForbidden, response.Body.String())
+	}
+}
+
+func TestBrowserHandlerRejectsMutationWithoutOriginEvidence(t *testing.T) {
+	handlers := newRuntimeControlHandlers(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil)
+	response := httptest.NewRecorder()
+
+	handlers.Browser.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("metadata-free browser mutation status = %d, want %d; body=%s", response.Code, http.StatusForbidden, response.Body.String())
+	}
+}
+
+func TestBrowserHandlerAllowsSameOriginMutation(t *testing.T) {
+	handlers := newRuntimeControlHandlers(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil)
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	response := httptest.NewRecorder()
+
+	handlers.Browser.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("same-origin mutation status = %d, want %d; body=%s", response.Code, http.StatusNoContent, response.Body.String())
+	}
+}
+
+func TestControlHandlerDoesNotRequireBrowserFetchMetadata(t *testing.T) {
+	handlers := newRuntimeControlHandlers(t)
+	response := httptest.NewRecorder()
+
+	handlers.Control.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil))
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("internal control status = %d, want %d; body=%s", response.Code, http.StatusNoContent, response.Body.String())
+	}
+}
+
 func TestHandlerReportsTheConfiguredNodeProfile(t *testing.T) {
 	h := NewHandler(Config{
 		OllamaURL:    "http://local-runtime:11434",
@@ -83,7 +144,7 @@ func TestHandlerRejectsRemovingModelLoadedInMemory(t *testing.T) {
 	}))
 	defer localRuntime.Close()
 
-	h := NewHandler(Config{OllamaURL: localRuntime.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: localRuntime.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/models?name=llama3.1%3A8b", nil))
 
@@ -105,7 +166,7 @@ func TestHandlerRequiresConfirmedRemovalAfterRuntimeRefresh(t *testing.T) {
 	}))
 	defer localRuntime.Close()
 
-	h := NewHandler(Config{OllamaURL: localRuntime.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: localRuntime.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/models?name=llama3.1%3A8b", nil))
 
@@ -290,7 +351,7 @@ func TestHandlerSelectsTheActiveImageEditingModel(t *testing.T) {
 	}))
 	defer diffusers.Close()
 
-	h := NewHandler(Config{OllamaURL: "http://ollama:11434", DiffusersURL: diffusers.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", DiffusersURL: diffusers.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/image-runtime/model", strings.NewReader(`{"model":"Qwen/Qwen-Image-Edit-2509"}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `Qwen/Qwen-Image-Edit-2509`) {
@@ -329,7 +390,7 @@ func TestHandlerProxiesImageEditsToDiffusers(t *testing.T) {
 	part, _ := writer.CreateFormFile("image", "source.png")
 	_, _ = part.Write([]byte("image-bytes"))
 	_ = writer.Close()
-	h := NewHandler(Config{OllamaURL: "http://ollama:11434", DiffusersURL: diffusers.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", DiffusersURL: diffusers.URL}, NewStore(16)).Control
 	request := httptest.NewRequest(http.MethodPost, "/api/image/edit", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	response := httptest.NewRecorder()
@@ -359,7 +420,7 @@ func TestHandlerUnloadsOllamaRuntimeModel(t *testing.T) {
 	}))
 	defer ollama.Close()
 
-	h := NewHandler(Config{OllamaURL: ollama.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/runtime/unload", strings.NewReader(`{"model":"llama3.1:8b"}`)))
 	if response.Code != http.StatusNoContent {
@@ -399,7 +460,7 @@ func TestHandlerUnloadsAllRuntimeModels(t *testing.T) {
 	}))
 	defer ollama.Close()
 
-	h := NewHandler(Config{OllamaURL: ollama.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil))
 	if response.Code != http.StatusNoContent {
@@ -438,7 +499,7 @@ func TestHandlerBenchmarksAnUnloadedModelAndReleasesIt(t *testing.T) {
 	}))
 	defer localRuntime.Close()
 
-	h := NewHandler(Config{OllamaURL: localRuntime.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: localRuntime.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/models/benchmark", strings.NewReader(`{"model":"llama3.1:8b"}`)))
 	if response.Code != http.StatusOK {
@@ -464,7 +525,7 @@ func TestHandlerRequiresExplicitReleaseBeforeBenchmarkingAResidentModel(t *testi
 	}))
 	defer localRuntime.Close()
 
-	h := NewHandler(Config{OllamaURL: localRuntime.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: localRuntime.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/models/benchmark", strings.NewReader(`{"model":"llama3.1:8b"}`)))
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "release the resident model") {
@@ -487,7 +548,7 @@ func TestPlaygroundBlocksASecondModelThatExceedsTheLiveMemoryBudget(t *testing.T
 	}))
 	defer localRuntime.Close()
 
-	h := NewHandler(Config{OllamaURL: localRuntime.URL, VRAMTotalGB: 8}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: localRuntime.URL, VRAMTotalGB: 8}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}`)))
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "unload another model") {
@@ -519,7 +580,7 @@ func TestHandlerRunsLocalPlaygroundChat(t *testing.T) {
 	defer ollama.Close()
 
 	store := NewStore(16)
-	h := NewHandler(Config{OllamaURL: ollama.URL}, store)
+	h := NewHandlers(Config{OllamaURL: ollama.URL}, store).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}`)))
 	if response.Code != http.StatusOK {
@@ -548,7 +609,7 @@ func TestHandlerDoesNotExposeRuntimeBrandInPlaygroundErrors(t *testing.T) {
 	}))
 	defer runtime.Close()
 
-	h := NewHandler(Config{OllamaURL: runtime.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: runtime.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}`)))
 	if response.Code != http.StatusBadGateway || strings.Contains(strings.ToLower(response.Body.String()), "ollama") || !strings.Contains(response.Body.String(), "local runtime") {
@@ -588,7 +649,7 @@ func TestHandlerRunsImagePlaygroundChatAgainstTheLocalRuntime(t *testing.T) {
 	defer ollama.Close()
 
 	store := NewStore(16)
-	h := NewHandler(Config{OllamaURL: ollama.URL}, store)
+	h := NewHandlers(Config{OllamaURL: ollama.URL}, store).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"qwen3-vl:8b","stream":false,"messages":[{"role":"user","content":"What is in this image?","images":["aW1hZ2U="]}]}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"content":"A cat."`) || !strings.Contains(response.Body.String(), `"prompt_tokens":3`) {
@@ -608,7 +669,7 @@ func TestHandlerRejectsImagePlaygroundChatForTextOnlyModel(t *testing.T) {
 	}))
 	defer ollama.Close()
 
-	h := NewHandler(Config{OllamaURL: ollama.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"What is in this image?","images":["aW1hZ2U="]}]}`)))
 	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "does not support images") {
@@ -633,7 +694,7 @@ func TestHandlerStreamsImagePlaygroundChat(t *testing.T) {
 	}))
 	defer ollama.Close()
 
-	h := NewHandler(Config{OllamaURL: ollama.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"qwen3-vl:8b","stream":true,"messages":[{"role":"user","content":"Describe it","images":["aW1hZ2U="]}]}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Type"), "text/event-stream") {
@@ -672,7 +733,7 @@ func TestHandlerStreamsLocalPlaygroundChat(t *testing.T) {
 	}))
 	defer ollama.Close()
 
-	h := NewHandler(Config{OllamaURL: ollama.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","system":"Be concise","temperature":0.4,"stream":true,"messages":[{"role":"user","content":"Hello"}]}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Type"), "text/event-stream") {
@@ -722,7 +783,7 @@ func TestHandlerPreflightsStorageMigrationTarget(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(source, "model"), []byte("model"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := NewHandler(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"destination":"`+target+`"}`)))
 	if response.Code != http.StatusOK {
@@ -741,7 +802,7 @@ func TestHandlerPreflightsAnExplicitStorageMigrationSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(Config{OllamaURL: "http://ollama:11434", StoragePath: filepath.Join(t.TempDir(), "empty-default")}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: filepath.Join(t.TempDir(), "empty-default")}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	body := `{"source":"` + source + `","destination":"` + target + `"}`
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(body)))
@@ -762,7 +823,7 @@ func TestHandlerRejectsStorageMigrationDestinationInsideSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"destination":"`+destination+`"}`)))
 	if response.Code != http.StatusOK {
@@ -782,7 +843,7 @@ func TestHandlerCopiesModelsToPreparedMigrationTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Control
 	start := httptest.NewRecorder()
 	h.ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/api/storage/migrate", strings.NewReader(`{"destination":"`+target+`"}`)))
 	if start.Code != http.StatusAccepted {
@@ -1107,7 +1168,7 @@ func TestHandlerStartsModelPullAndExposesProgress(t *testing.T) {
 	}))
 	defer ollama.Close()
 
-	h := NewHandler(Config{OllamaURL: ollama.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	req := httptest.NewRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`))
 	req.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -1165,14 +1226,14 @@ func TestHandlerModelPullRequiresTerminalSuccess(t *testing.T) {
 
 func TestHandlerExposesVersionAndStartsLatestUpdate(t *testing.T) {
 	started := make(chan struct{}, 1)
-	h := NewHandler(Config{
+	h := NewHandlers(Config{
 		Version: "1.2.3",
 		Update: func(_ context.Context, report func(UpdateStatus)) error {
 			report(UpdateStatus{State: "downloading", Version: "1.2.4"})
 			started <- struct{}{}
 			return nil
 		},
-	}, NewStore(16))
+	}, NewStore(16)).Control
 
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/update", nil))
@@ -1209,7 +1270,7 @@ func TestHandlerRejectsPullForAnInstalledModel(t *testing.T) {
 	}))
 	defer ollama.Close()
 
-	h := NewHandler(Config{OllamaURL: ollama.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`)))
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "already installed") {
@@ -1239,7 +1300,7 @@ func TestHandlerQueuesModelPullsInsteadOfRejectingTheSecondRequest(t *testing.T)
 	}))
 	defer ollama.Close()
 
-	h := NewHandler(Config{OllamaURL: ollama.URL}, NewStore(16))
+	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	post := func(name string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"`+name+`"}`))
 		req.Header.Set("Content-Type", "application/json")

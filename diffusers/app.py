@@ -9,6 +9,7 @@ import base64
 import io
 import os
 import time
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
@@ -27,7 +28,18 @@ from model_config import (
 )
 from runtime import DeviceUnavailableError, select_device
 
-app = FastAPI(title="EveryAPI Edge Diffusers Runtime")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    preload_generation_model()
+    try:
+        yield
+    finally:
+        generation_pipeline.cache_clear()
+        edit_pipeline.cache_clear()
+
+
+app = FastAPI(title="EveryAPI Edge Diffusers Runtime", lifespan=lifespan)
 CONFIG_PATH = Path(os.getenv("EVERYAPI_DIFFUSERS_CONFIG_PATH", "/models/cache/everyapi-image-runtime.json"))
 STARTUP_MODEL = os.getenv("EVERYAPI_DIFFUSERS_MODEL", DEFAULT_MODEL)
 runtime_lock = Lock()
@@ -109,11 +121,6 @@ def preload_generation_model():
         return
     generation_ready = True
     generation_error = ""
-
-
-@app.on_event("startup")
-def startup_preload():
-    preload_generation_model()
 
 
 def _png_base64(image: Image.Image) -> str:

@@ -89,7 +89,8 @@ export const useModels = (): UseQueryResult<Model[]> =>
 export const useModelCapabilities = (name: string): UseQueryResult<ModelCapabilities> =>
   useQuery({
     queryKey: queryKeys.modelCapabilities(name),
-    queryFn: () => getJSON(`/api/models/capabilities?name=${encodeURIComponent(name)}`, modelCapabilitiesSchema),
+    queryFn: () =>
+      getJSON(`/api/models/capabilities?name=${encodeURIComponent(name)}`, modelCapabilitiesSchema),
     enabled: Boolean(name),
     staleTime: 60_000,
   })
@@ -111,7 +112,8 @@ export const useImageRuntime = (): UseQueryResult<ImageRuntime> =>
 export const useSetImageRuntimeModel = () => {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (model: string) => postJSONResponse('/api/image-runtime/model', { model }, imageRuntimeSchema),
+    mutationFn: (model: string) =>
+      postJSONResponse('/api/image-runtime/model', { model }, imageRuntimeSchema),
     onSuccess: (runtime) => {
       queryClient.setQueryData(queryKeys.imageRuntime, runtime)
     },
@@ -138,7 +140,8 @@ export const useStorageMigration = (): UseQueryResult<StorageMigration> =>
 export const useStartStorageMigration = () => {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ source, destination }: { source: string; destination: string }) => postJSONResponse('/api/storage/migrate', { source, destination }, storageMigrationSchema),
+    mutationFn: ({ source, destination }: { source: string; destination: string }) =>
+      postJSONResponse('/api/storage/migrate', { source, destination }, storageMigrationSchema),
     onSuccess: (job) => {
       queryClient.setQueryData(queryKeys.storageMigration, job)
     },
@@ -172,7 +175,9 @@ export const usePullQueue = (): UseQueryResult<PullQueue> =>
     queryFn: () => getJSON('/api/models/pull', pullQueueSchema),
     // Poll fast while active work or queued downloads remain, then back off.
     refetchInterval: (query) =>
-      query.state.data?.active || query.state.data?.queued.length ? PULL_REFETCH_MS : IDLE_REFETCH_MS,
+      query.state.data?.active || query.state.data?.queued.length
+        ? PULL_REFETCH_MS
+        : IDLE_REFETCH_MS,
   })
 
 export const useStartPull = () => {
@@ -198,7 +203,8 @@ export const useCancelPull = () => {
 export const useDeleteModel = () => {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (name: string) => del(`/api/models?name=${encodeURIComponent(name)}&confirm_unloaded=true`),
+    mutationFn: (name: string) =>
+      del(`/api/models?name=${encodeURIComponent(name)}&confirm_unloaded=true`),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.models })
     },
@@ -209,7 +215,11 @@ export const useBenchmarkModel = () => {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: ({ model, releaseLoaded }: { model: string; releaseLoaded: boolean }) =>
-      postJSONResponse('/api/models/benchmark', { model, release_loaded: releaseLoaded }, modelBenchmarkSchema),
+      postJSONResponse(
+        '/api/models/benchmark',
+        { model, release_loaded: releaseLoaded },
+        modelBenchmarkSchema,
+      ),
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.runtime }),

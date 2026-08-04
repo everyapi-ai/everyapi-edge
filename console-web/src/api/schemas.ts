@@ -64,12 +64,18 @@ export const modelSchema = z.object({
 
 // `models` is a Go slice, so an empty library marshals as JSON null, not [].
 export const modelListSchema = z.object({
-  models: z.array(modelSchema).nullish().transform((models) => models ?? []),
+  models: z
+    .array(modelSchema)
+    .nullish()
+    .transform((models) => models ?? []),
 })
 
 export const modelCapabilitiesSchema = z.object({
   model: z.string(),
-  capabilities: z.array(z.string()).nullish().transform((capabilities) => capabilities ?? []),
+  capabilities: z
+    .array(z.string())
+    .nullish()
+    .transform((capabilities) => capabilities ?? []),
 })
 
 export const modelBenchmarkSchema = z.object({
@@ -89,12 +95,18 @@ export const runtimeModelSchema = z.object({
 
 export const runtimeSchema = z.object({
   version: z.string(),
-  models: z.array(runtimeModelSchema).nullish().transform((models) => models ?? []),
+  models: z
+    .array(runtimeModelSchema)
+    .nullish()
+    .transform((models) => models ?? []),
 })
 
 export const imageRuntimeSchema = z.object({
   status: z.string(),
-  models: z.array(z.string()).nullish().transform((models) => models ?? []),
+  models: z
+    .array(z.string())
+    .nullish()
+    .transform((models) => models ?? []),
   error: z.string().optional().default(''),
 })
 
@@ -142,11 +154,13 @@ export const playgroundStreamEventSchema = z.object({
   type: z.enum(['delta', 'done', 'error']),
   content: z.string().optional().default(''),
   model: z.string().optional().default(''),
-  usage: z.object({
-    prompt_tokens: z.number(),
-    completion_tokens: z.number(),
-    total_tokens: z.number(),
-  }).optional(),
+  usage: z
+    .object({
+      prompt_tokens: z.number(),
+      completion_tokens: z.number(),
+      total_tokens: z.number(),
+    })
+    .optional(),
   error: z.string().optional().default(''),
 })
 
@@ -188,7 +202,10 @@ export const pullJobSchema = z.object({
 
 export const pullQueueSchema = z.object({
   active: pullJobSchema.nullable(),
-  queued: z.array(pullJobSchema).nullish().transform((jobs) => jobs ?? []),
+  queued: z
+    .array(pullJobSchema)
+    .nullish()
+    .transform((jobs) => jobs ?? []),
   latest: pullJobSchema.nullable(),
 })
 
@@ -202,8 +219,16 @@ export const requestListSchema = nullableList(requestSchema)
 export const logListSchema = nullableList(logEntrySchema)
 export const settlementListSchema = nullableList(settlementSchema)
 
-// The handler's error envelope: writeError marshals {"error": "..."}.
-export const errorEnvelopeSchema = z.object({ error: z.string() })
+export const errorEnvelopeSchema = z.object({
+  error: z.union([
+    z.string(),
+    z.object({
+      code: z.string(),
+      message: z.string(),
+      retryable: z.boolean(),
+    }),
+  ]),
+})
 
 export type Overview = z.infer<typeof overviewSchema>
 export type NodeProfile = z.infer<typeof nodeProfileSchema>

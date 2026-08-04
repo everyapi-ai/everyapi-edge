@@ -17,10 +17,10 @@ export const useTranslation = (): { t: Translate; locale: Locale } => {
       const template = MESSAGES[locale]?.[key] ?? MESSAGES[DEFAULT_LOCALE][key]
       if (!values) return template
       return template.replace(/\{(\w+)\}/g, (match, name: string) =>
-        name in values ? String(values[name]) : match
+        name in values ? String(values[name]) : match,
       )
     },
-    [locale]
+    [locale],
   )
   return { t, locale }
 }

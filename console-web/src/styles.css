@@ -1,27 +1,30 @@
 @import 'tailwindcss';
 
-/* Edge is a compact local surface, but it must still feel like EveryAPI. These
-   are the dashboard's dark-theme values, kept local so the mirrored Edge bundle
-   remains self-contained. */
+/* A local control room should read like an instrument, not a marketing site. */
 @theme {
-  --color-canvas: #08080b;
-  --color-surface-0: #101015;
-  --color-surface-1: #16161c;
-  --color-surface-2: #1e1e25;
-  --color-surface-3: #232329;
+  --color-canvas: #0b0c0a;
+  --color-surface-0: #11120f;
+  --color-surface-1: #161713;
+  --color-surface-2: #1c1d19;
+  --color-surface-3: #24251f;
   --color-line: rgba(255, 255, 255, 0.11);
   --color-line-2: rgba(255, 255, 255, 0.17);
-  --color-ink: #e8eaed;
-  --color-ink-2: #b3b9c2;
-  --color-muted: #969cab;
-  --color-faint: #8b92a1;
-  --color-accent: #7c5cff;
-  --color-accent-ink: #ffffff;
-  --color-good: #46e08a;
-  --color-warn: #ecc94b;
-  --color-danger: #ff6b6b;
+  --color-ink: #efefe8;
+  --color-ink-2: #c0c1b7;
+  --color-ink-dim: #96988d;
+  --color-ink-faint: #74776d;
+  --color-muted: #96988d;
+  --color-faint: #74776d;
+  --color-accent: #ff6b2c;
+  --color-accent-ink: #160b05;
+  --color-good: #71d99a;
+  --color-warn: #e6bc5c;
+  --color-danger: #ff776d;
 
-  --font-sans: 'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-sans:
+    'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei UI',
+    'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-display: 'Arial Narrow', 'Roboto Condensed', Inter, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -35,9 +38,15 @@
     min-width: 320px;
     margin: 0;
     background:
-      radial-gradient(ellipse 58rem 32rem at 92% -12%, color-mix(in oklab, var(--color-accent) 18%, transparent), transparent 70%),
-      radial-gradient(ellipse 42rem 24rem at -8% 100%, rgba(255, 122, 92, 0.06), transparent 70%),
+      linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+      radial-gradient(ellipse 48rem 26rem at 92% -10%, rgba(255, 107, 44, 0.08), transparent 72%),
       var(--color-canvas);
+    background-size:
+      32px 32px,
+      32px 32px,
+      auto,
+      auto;
     color: var(--color-ink);
     font-family: var(--font-sans);
     font-size: 14px;

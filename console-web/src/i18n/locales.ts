@@ -24,6 +24,9 @@ const en = {
   'nav.storage': 'Storage',
   'nav.traffic': 'Traffic',
   'nav.logs': 'Logs',
+  'nav.groupOperate': 'Operate',
+  'nav.groupMaintain': 'Maintain',
+  'nav.groupObserve': 'Observe',
   'nav.language': 'Language',
   'nav.open': 'Open navigation',
   'nav.close': 'Close navigation',
@@ -52,7 +55,8 @@ const en = {
   'stat.earningsHint': 'Latest 200 gateway receipts',
   'stat.earningsPending': 'Awaiting sync',
 
-  'overview.description': 'Monitor local capacity, completed work, and settled earnings for this Edge node.',
+  'overview.description':
+    'Monitor local capacity, completed work, and settled earnings for this Edge node.',
   'overview.readiness': 'Node readiness',
   'overview.readinessGateway': 'Gateway',
   'overview.readinessRuntime': 'Local runtime',
@@ -64,10 +68,17 @@ const en = {
   'overview.storageExternal': 'Installed models are outside this Edge directory',
   'overview.unavailable': 'Unavailable',
   'overview.actions': 'Next actions',
-  'overview.actionsHint': 'Manage the local model library, test a model, or move storage without leaving this node.',
+  'overview.actionsHint':
+    'Manage the local model library, test a model, or move storage without leaving this node.',
   'overview.openModels': 'Open model library',
   'overview.openPlayground': 'Open playground',
   'overview.openStorage': 'Manage storage',
+
+  'capacity.kicker': 'Accelerator telemetry',
+  'capacity.title': 'Memory capacity',
+  'capacity.loaded': 'Loaded',
+  'capacity.reserved': 'Reserved',
+  'capacity.total': 'Physical',
 
   'nodeProfile.title': 'Node profile',
   'nodeProfile.name': 'Node name',
@@ -80,7 +91,8 @@ const en = {
   'update.currentVersion': 'Current version',
   'update.status': 'Update status',
   'update.action': 'Check for updates',
-  'update.confirm': 'Check for and install the latest agent version? This node will restart when the update is ready.',
+  'update.confirm':
+    'Check for and install the latest agent version? This node will restart when the update is ready.',
   'update.state.checking': 'Checking for updates',
   'update.state.downloading': 'Downloading update',
   'update.state.restarting': 'Restarting agent',
@@ -110,46 +122,57 @@ const en = {
   'runtime.unload': 'Unload',
   'runtime.unloadConfirm': 'Unload {model} from memory? Active work may be interrupted.',
   'runtime.unloadAll': 'Unload all models',
-  'runtime.unloadAllConfirm': 'Unload all {count} models from memory? Active work may be interrupted.',
+  'runtime.unloadAllConfirm':
+    'Unload all {count} models from memory? Active work may be interrupted.',
   'runtime.memoryBudget': 'GPU memory budget',
   'runtime.memoryTotal': 'Total',
   'runtime.memoryUsed': 'In use',
   'runtime.memoryReserved': 'Reserved',
   'runtime.memoryAvailable': 'Available',
-  'runtime.memoryHint': 'Purple is resident model memory; yellow is reserved for the system and context cache.',
+  'runtime.memoryHint':
+    'Purple is resident model memory; yellow is reserved for the system and context cache.',
 
   'storage.title': 'Storage & migration',
-  'storage.description': 'Inspect the local model directory, then copy it safely to a new location.',
+  'storage.description':
+    'Inspect the local model directory, then copy it safely to a new location.',
   'storage.location': 'Current model directory',
   'storage.used': 'Model data on disk',
   'storage.capacity': 'Disk capacity',
   'storage.total': 'Total disk',
   'storage.available': 'Available on disk',
-  'storage.capacityHint': 'This is free space on the filesystem backing the model directory, including space used by other local files.',
+  'storage.capacityHint':
+    'This is free space on the filesystem backing the model directory, including space used by other local files.',
   'storage.unavailable': 'The agent cannot read this directory yet.',
   'storage.externalModels': 'Installed models are outside this Edge directory.',
-  'storage.externalModelsHint': 'Choose the existing model directory to safely copy it into {path}.',
+  'storage.externalModelsHint':
+    'Choose the existing model directory to safely copy it into {path}.',
   'storage.importExisting': 'Import existing library',
   'storage.migration': 'Move models',
   'storage.source': 'Existing model directory',
   'storage.chooseSourceFolder': 'Choose existing directory',
-  'storage.sourceHint': 'The current Edge directory is used by default. Choose an existing model library only when you want to import it; the Edge directory becomes the destination automatically.',
+  'storage.sourceHint':
+    'The current Edge directory is used by default. Choose an existing model library only when you want to import it; the Edge directory becomes the destination automatically.',
   'storage.destination': 'New model directory',
   'storage.chooseDestinationFolder': 'Choose destination folder',
   'storage.choosingFolder': 'Opening folder picker…',
-  'storage.destinationHint': 'Choose an empty folder. The Edge Agent checks both locations before copying model files.',
+  'storage.destinationHint':
+    'Choose an empty folder. The Edge Agent checks both locations before copying model files.',
   'storage.prepare': 'Prepare migration',
-  'storage.ready': 'The destination is ready. The current library stays untouched until you copy the models.',
+  'storage.ready':
+    'The destination is ready. The current library stays untouched until you copy the models.',
   'storage.blocked': 'Migration cannot start yet:',
   'storage.copy': 'Copy models safely',
   'storage.copying': 'Copying model files…',
-  'storage.copyNotice': 'This creates a verified second copy; it never deletes the current model files.',
+  'storage.copyNotice':
+    'This creates a verified second copy; it never deletes the current model files.',
   'storage.copyComplete': 'Model copy complete',
   'storage.copyFailed': 'Model copy failed',
-  'storage.copyNext': 'Point the local runtime at {path}, restart it, then verify the model library before deleting the original files.',
+  'storage.copyNext':
+    'Point the local runtime at {path}, restart it, then verify the model library before deleting the original files.',
 
   'playground.title': 'Local playground',
-  'playground.description': 'Talk to an installed local model directly from this machine. Requests stay local and are not sent through EveryAPI.',
+  'playground.description':
+    'Talk to an installed local model directly from this machine. Requests stay local and are not sent through EveryAPI.',
   'playground.model': 'Model',
   'playground.noModels': 'Install a model in Model library before starting a chat.',
   'playground.empty': 'Start a local conversation',
@@ -204,7 +227,8 @@ const en = {
   'models.noVram':
     'No usable VRAM detected. Set EVERYAPI_VRAM_GB in the installer configuration before choosing a model.',
   'models.recommendations': 'About {vram} GB available for models. Conservative picks:',
-  'models.memoryBudget': '{total} GB total · {loaded} GB loaded · {reserved} GB reserved · {available} GB available',
+  'models.memoryBudget':
+    '{total} GB total · {loaded} GB loaded · {reserved} GB reserved · {available} GB available',
   'models.download': 'Download {name}',
   'models.nameLabel': 'Model name',
   'models.namePlaceholder': 'for example qwen3:8b',
@@ -223,7 +247,8 @@ const en = {
   'models.queued': 'Queued: {models}',
   'models.cancelDownload': 'Cancel {name}',
   'models.downloadRemaining': '{time} left',
-  'models.catalogHint': 'Models above this machine\'s capacity stay visible but are disabled. The local runtime confirms availability before downloading.',
+  'models.catalogHint':
+    "Models above this machine's capacity stay visible but are disabled. The local runtime confirms availability before downloading.",
   'models.requiresMemory': 'requires ≥ {memory} GB',
   'models.insufficientMemory': 'needs {memory} GB more memory',
   'models.pull': 'Download model',
@@ -252,13 +277,15 @@ const en = {
   'models.unloadBeforeRemove': 'Unload this model from memory before removing it.',
   'models.benchmark': 'Run quick benchmark',
   'models.benchmarkBusy': 'Wait for active local requests to finish before benchmarking.',
-  'models.benchmarkReleaseConfirm': 'Run a quick benchmark for {name}? It will release this resident model from memory when finished.',
+  'models.benchmarkReleaseConfirm':
+    'Run a quick benchmark for {name}? It will release this resident model from memory when finished.',
   'models.benchmarkTitle': 'Quick benchmark',
   'models.benchmarkRate': 'Generation speed',
   'models.benchmarkRateUnit': 'tokens/s',
   'models.benchmarkTokens': 'Generated tokens',
   'models.benchmarkDuration': 'Total time',
-  'models.benchmarkHint': 'Measures one local generation and releases the benchmark model from memory when it finishes.',
+  'models.benchmarkHint':
+    'Measures one local generation and releases the benchmark model from memory when it finishes.',
   'models.inspectCapabilities': 'Inspect capabilities',
   'models.capabilitiesTitle': 'Model capabilities',
   'models.capabilitiesLoading': 'Reading model capabilities…',
@@ -290,7 +317,8 @@ const en = {
   'traffic.columnDuration': 'Duration',
   'traffic.columnResult': 'Result',
   'traffic.ok': 'OK',
-  'traffic.description': 'Review recent requests handled by this node without exposing prompts or responses.',
+  'traffic.description':
+    'Review recent requests handled by this node without exposing prompts or responses.',
   'traffic.filterModel': 'Traffic model',
   'traffic.filterResult': 'Traffic result',
   'traffic.allModels': 'All models',
@@ -329,6 +357,9 @@ const zh: Record<MessageKey, string> = {
   'nav.storage': '存储迁移',
   'nav.traffic': '请求流量',
   'nav.logs': '运行日志',
+  'nav.groupOperate': '运行',
+  'nav.groupMaintain': '维护',
+  'nav.groupObserve': '观测',
   'nav.language': '语言',
   'nav.open': '打开导航',
   'nav.close': '关闭导航',
@@ -373,6 +404,12 @@ const zh: Record<MessageKey, string> = {
   'overview.openModels': '管理模型库',
   'overview.openPlayground': '打开本地对话',
   'overview.openStorage': '管理模型存储',
+
+  'capacity.kicker': '加速器遥测',
+  'capacity.title': '显存容量',
+  'capacity.loaded': '已加载',
+  'capacity.reserved': '已预留',
+  'capacity.total': '物理容量',
 
   'nodeProfile.title': '节点档案',
   'nodeProfile.name': '节点名称',
@@ -438,7 +475,8 @@ const zh: Record<MessageKey, string> = {
   'storage.migration': '迁移模型',
   'storage.source': '已有模型目录',
   'storage.chooseSourceFolder': '选择已有目录',
-  'storage.sourceHint': '默认从当前 Edge 目录复制；如需导入已有模型库，请选择其所在目录。选择后会自动填入当前 Edge 目录作为目标。',
+  'storage.sourceHint':
+    '默认从当前 Edge 目录复制；如需导入已有模型库，请选择其所在目录。选择后会自动填入当前 Edge 目录作为目标。',
   'storage.destination': '新模型目录',
   'storage.chooseDestinationFolder': '选择目标目录',
   'storage.choosingFolder': '正在打开目录选择器…',
@@ -454,7 +492,8 @@ const zh: Record<MessageKey, string> = {
   'storage.copyNext': '请将本地运行时的模型目录改为 {path}，重启后确认模型库，再删除原始文件。',
 
   'playground.title': '本地对话',
-  'playground.description': '直接在此机器上与已安装的本地模型对话。请求只留在本机，不经过 EveryAPI。',
+  'playground.description':
+    '直接在此机器上与已安装的本地模型对话。请求只留在本机，不经过 EveryAPI。',
   'playground.model': '模型',
   'playground.noModels': '请先在模型库安装模型，再开始对话。',
   'playground.empty': '开始一段本地对话',
@@ -508,7 +547,8 @@ const zh: Record<MessageKey, string> = {
   'models.recommendationsLoading': '正在按机器显存选择建议…',
   'models.noVram': '未检测到可用显存。请先在安装配置中设置 EVERYAPI_VRAM_GB，再选择模型。',
   'models.recommendations': '检测到约 {vram} GB 可供模型使用。保守建议：',
-  'models.memoryBudget': '总计 {total} GB · 已加载 {loaded} GB · 预留 {reserved} GB · 可用 {available} GB',
+  'models.memoryBudget':
+    '总计 {total} GB · 已加载 {loaded} GB · 预留 {reserved} GB · 可用 {available} GB',
   'models.download': '下载 {name}',
   'models.nameLabel': '模型名称',
   'models.namePlaceholder': '例如 qwen3:8b',
@@ -527,7 +567,8 @@ const zh: Record<MessageKey, string> = {
   'models.queued': '等待下载：{models}',
   'models.cancelDownload': '取消 {name}',
   'models.downloadRemaining': '剩余 {time}',
-  'models.catalogHint': '超过本机能力的模型会保留在目录中，但无法选择；下载前由本地运行时确认可用性。',
+  'models.catalogHint':
+    '超过本机能力的模型会保留在目录中，但无法选择；下载前由本地运行时确认可用性。',
   'models.requiresMemory': '至少需要 {memory} GB',
   'models.insufficientMemory': '还差 {memory} GB 内存',
   'models.pull': '下载模型',
@@ -556,7 +597,8 @@ const zh: Record<MessageKey, string> = {
   'models.unloadBeforeRemove': '请先从内存卸载模型，再移除。',
   'models.benchmark': '快速测速',
   'models.benchmarkBusy': '请等待当前本地请求完成后再测速。',
-  'models.benchmarkReleaseConfirm': '要为 {name} 进行快速测速吗？测速完成后会将这个已驻留模型从内存卸载。',
+  'models.benchmarkReleaseConfirm':
+    '要为 {name} 进行快速测速吗？测速完成后会将这个已驻留模型从内存卸载。',
   'models.benchmarkTitle': '测速结果',
   'models.benchmarkRate': '生成速度',
   'models.benchmarkRateUnit': 'tokens/秒',

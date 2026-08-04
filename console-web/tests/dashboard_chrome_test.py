@@ -19,7 +19,7 @@ def test_console_opens_directly_with_dashboard_chrome() -> None:
 
         browser.close()
 
-    assert body_background == "rgb(8, 8, 11)"
+    assert body_background == "rgb(11, 12, 10)"
     assert heading_transform == "none"
     assert token_field_count == 0
 
@@ -63,6 +63,80 @@ def test_console_uses_compact_dashboard_navigation() -> None:
     assert has_sidebar == 1
     assert heading_count == 1
     assert manage_nodes_count == 0
+
+
+def test_console_groups_navigation_by_operator_intent() -> None:
+    """The rail mirrors an operator's workflow instead of presenting one flat menu."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 960})
+        page.goto(base, wait_until="networkidle")
+        navigation = page.locator("aside nav")
+        groups = navigation.locator("[data-navigation-group]")
+        labels = groups.locator("[data-navigation-group-label]").all_inner_texts()
+        group_count = groups.count()
+        browser.close()
+
+    assert group_count == 3
+    assert labels == ["OPERATE", "MAINTAIN", "OBSERVE"]
+
+
+def test_command_center_looks_and_behaves_like_a_system_instrument() -> None:
+    """The first screen leads with readiness and capacity, not equal-weight SaaS cards."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
+    overview = json.dumps({
+        "active_requests": 2,
+        "completed_requests": 1842,
+        "failed_requests": 7,
+        "prompt_tokens": 927114,
+        "completion_tokens": 384221,
+        "loaded_vram_bytes": 9 * 1024 ** 3,
+        "vram_total_gb": 24,
+        "reserved_vram_bytes": 4 * 1024 ** 3,
+        "available_vram_bytes": 11 * 1024 ** 3,
+        "settled_earnings_micros": 42870000,
+        "settled_earnings_available": True,
+        "gateway_state": "online",
+    })
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 960})
+        page.route("**/api/overview", lambda route: route.fulfill(status=200, content_type="application/json", body=overview))
+        page.goto(base, wait_until="networkidle")
+        status_rail = page.locator("[data-system-status-rail]")
+        capacity = page.locator("[data-capacity-rail]")
+        command_center = page.locator("[data-command-center]")
+        accent = page.locator("html").evaluate("node => getComputedStyle(node).getPropertyValue('--color-accent').trim()")
+        status_rail_count = status_rail.count()
+        capacity_count = capacity.count()
+        capacity_text = capacity.inner_text() if capacity_count else ""
+        command_center_count = command_center.count()
+        browser.close()
+
+    assert status_rail_count == 1
+    assert capacity_count == 1
+    assert "9.0 GB" in capacity_text
+    assert "24 GB" in capacity_text
+    assert command_center_count == 1
+    assert accent == "#ff6b2c"
+
+
+def test_mobile_console_keeps_live_node_status_in_view() -> None:
+    """A phone operator sees gateway and capacity state without opening navigation."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.goto(base, wait_until="networkidle")
+        mobile_status = page.locator("[data-mobile-system-status]")
+        mobile_status_count = mobile_status.count()
+        browser.close()
+
+    assert mobile_status_count == 1
 
 
 def test_sidebar_reports_the_real_gateway_session_state() -> None:
@@ -319,8 +393,8 @@ def test_recent_traffic_filters_failed_requests_by_model_and_metadata() -> None:
     assert "qwen3:8b" in filtered_matches[0]
 
 
-def test_mobile_navigation_remains_named() -> None:
-    """Mobile uses the Dashboard drawer, keeping navigation fully named."""
+def test_mobile_navigation_is_a_keyboard_accessible_modal() -> None:
+    """The mobile drawer owns focus, closes with Escape, and restores the trigger."""
     base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5176")
 
     with sync_playwright() as playwright:
@@ -328,13 +402,48 @@ def test_mobile_navigation_remains_named() -> None:
         page = browser.new_page(viewport={"width": 390, "height": 844})
         page.goto(base, wait_until="domcontentloaded")
         page.wait_for_selector("main h1")
-        page.get_by_role("button", name="Open navigation").click()
-        mobile_navigation = page.locator("[role='dialog'] nav")
+        trigger = page.get_by_role("button", name="Open navigation")
+        trigger.click()
+        dialog = page.get_by_role("dialog")
+        mobile_navigation = dialog.locator("nav")
         assert mobile_navigation.get_by_role("link", name="Overview").count() == 1
         assert mobile_navigation.get_by_role("link", name="Models").count() == 1
         assert mobile_navigation.get_by_role("link", name="Traffic").count() == 1
         assert mobile_navigation.get_by_role("link", name="Logs").count() == 1
+        assert dialog.locator(":focus").count() == 1
+        page.keyboard.press("Escape")
+        assert dialog.count() == 0
+        assert trigger.evaluate("node => node === document.activeElement")
         browser.close()
+
+
+def test_mobile_status_distinguishes_offline_from_connecting() -> None:
+    """An offline gateway must not be announced as an in-progress connection."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5176")
+    overview = json.dumps({
+        "active_requests": 0,
+        "completed_requests": 0,
+        "failed_requests": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "loaded_vram_bytes": 0,
+        "vram_total_gb": 16,
+        "reserved_vram_bytes": 0,
+        "available_vram_bytes": 0,
+        "settled_earnings_micros": 0,
+        "settled_earnings_available": False,
+        "gateway_state": "offline",
+    })
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.route("**/api/overview", lambda route: route.fulfill(status=200, content_type="application/json", body=overview))
+        page.goto(base, wait_until="networkidle")
+        status = page.locator("[data-mobile-system-status]").inner_text()
+        browser.close()
+
+    assert status == "GATEWAY DISCONNECTED"
 
 
 def test_navigation_uses_dashboard_app_shell_dimensions() -> None:
@@ -355,7 +464,7 @@ def test_navigation_uses_dashboard_app_shell_dimensions() -> None:
         browser.close()
 
     assert shell_display == "grid"
-    assert sidebar_width == 232
+    assert sidebar_width == 252
     assert overview_height >= 36
 
 
@@ -369,7 +478,7 @@ def test_chinese_navigation_uses_four_character_labels() -> None:
         page.goto(base, wait_until="domcontentloaded")
         page.wait_for_selector("main h1")
         page.locator("#console-locale").select_option("zh")
-        labels = page.locator("aside nav a").all_inner_texts()
+        labels = page.locator("aside nav a > span.flex-1").all_inner_texts()
         browser.close()
 
     assert labels == ["节点总览", "本地推理", "模型管理", "本地对话", "图像编辑", "存储迁移", "请求流量", "运行日志"]
@@ -719,7 +828,9 @@ def test_local_playground_disables_image_attachment_for_a_text_only_model() -> N
         attachment.wait_for()
         disabled = attachment.is_disabled()
         capability = page.locator("[data-model-capability]")
-        capability.wait_for()
+        page.wait_for_function(
+            """() => document.querySelector('[data-model-capability]')?.textContent === 'Text model · Tools'"""
+        )
         capability_text = capability.inner_text()
         browser.close()
 
@@ -1189,11 +1300,26 @@ def test_model_catalog_reuses_an_installed_selection_instead_of_downloading_agai
     """An installed catalog model offers a direct use action rather than another pull."""
     base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
     installed = json.dumps({"models": [{"name": "qwen3:32b", "size": 20 * 1024 ** 3, "details": {}}]})
+    overview = json.dumps({
+        "active_requests": 0,
+        "completed_requests": 0,
+        "failed_requests": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "loaded_vram_bytes": 0,
+        "vram_total_gb": 48,
+        "reserved_vram_bytes": 0,
+        "available_vram_bytes": 48 * 1024 ** 3,
+        "settled_earnings_micros": 0,
+        "settled_earnings_available": False,
+        "gateway_state": "online",
+    })
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 960})
         page.route("**/api/models", lambda route: route.fulfill(status=200, content_type="application/json", body=installed))
+        page.route("**/api/overview", lambda route: route.fulfill(status=200, content_type="application/json", body=overview))
         page.goto(base, wait_until="domcontentloaded")
         page.wait_for_selector("main h1")
         page.locator("aside").get_by_role("link", name="Models").click()
@@ -1464,6 +1590,27 @@ def test_image_edit_result_can_be_downloaded() -> None:
 
     assert href == "data:image/png;base64,aW1hZ2U="
     assert filename == "everyapi-image-edit.png"
+
+
+def test_image_edit_displays_a_structured_api_error() -> None:
+    """Image Lab uses the shared structured error envelope instead of stringifying it."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 960})
+        page.route("**/api/image-runtime", lambda route: route.fulfill(status=200, content_type="application/json", body='{"status":"ready","models":["Qwen/Qwen-Image-Edit-2511"]}'))
+        page.route("**/api/image/edit", lambda route: route.fulfill(status=503, content_type="application/json", body='{"error":{"code":"runtime_unavailable","message":"The local image runtime is unavailable.","retryable":true}}'))
+        page.goto(f"{base}/image-edit", wait_until="networkidle")
+        page.locator("#source-image").set_input_files({"name": "source.png", "mimeType": "image/png", "buffer": b"image"})
+        page.get_by_label("Edit instruction").fill("make it neon")
+        page.get_by_role("button", name="Edit image").click()
+        alert = page.get_by_role("alert")
+        alert.wait_for()
+        message = alert.inner_text()
+        browser.close()
+
+    assert message == "The local image runtime is unavailable."
 
 
 def test_model_catalog_reserves_capacity_for_models_already_in_memory() -> None:
