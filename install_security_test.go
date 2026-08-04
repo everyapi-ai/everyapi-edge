@@ -249,6 +249,12 @@ exit 0
 	writeExecutable("ollama", "exit 0\n")
 	writeExecutable("brew", "exit 1\n")
 	writeExecutable("sysctl", "echo 51539607552\n")
+	writeExecutable("uname", `
+case "$1" in
+  -s) echo Darwin ;;
+  -m) echo arm64 ;;
+esac
+`)
 
 	cmd := exec.Command("bash", "install.sh", "--dir", installDir, "--gpu", "macos")
 	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+binDir+":"+os.Getenv("PATH"))
