@@ -329,6 +329,17 @@ ensure_macos_ollama() {
   ok "native Ollama is ready"
 }
 
+ensure_macos_diffusers() {
+  local helper="./scripts/install-macos-diffusers.sh"
+  if [ ! -x "$helper" ]; then
+    err "the verified bundle is missing $helper"
+    exit 1
+  fi
+  info "installing the native Apple MPS image runtime…"
+  "$helper" "$HOME/.everyapi/edge/images" "$VRAM_GB"
+  ok "native Diffusers is ready"
+}
+
 detect_macos_memory_gb() {
   local bytes gib=$(( 1024 * 1024 * 1024 ))
   bytes=$(sysctl -n hw.memsize 2>/dev/null || true)
@@ -541,12 +552,16 @@ if [ -z "$GPU" ]; then
   elif command -v rocminfo >/dev/null 2>&1; then
     GPU="rocm"
   else
-    warn "no GPU detected — falling back to nvidia config (will run CPU-only)"
-    GPU="nvidia"
+    err "no supported GPU detected (expected NVIDIA, AMD ROCm, or Apple Silicon)"
+    exit 1
   fi
 fi
 case "$GPU" in
   nvidia)
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+      err "the NVIDIA profile requires nvidia-smi and a working NVIDIA driver"
+      exit 1
+    fi
     COMPOSE_FILE="docker-compose.yml"
     GPU_MODEL="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 | tr -d '\r\n')"
     VRAM_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
@@ -556,10 +571,18 @@ case "$GPU" in
     esac
     ;;
   rocm)
+    if ! command -v rocminfo >/dev/null 2>&1; then
+      err "the ROCm profile requires rocminfo and a working ROCm installation"
+      exit 1
+    fi
     COMPOSE_FILE="docker-compose.rocm.yml"
     GPU_MODEL="$(rocminfo 2>/dev/null | awk -F: '/^[[:space:]]*Name:/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
     ;;
   macos)
+    if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
+      err "the macOS image profile requires Apple Silicon (arm64)"
+      exit 1
+    fi
     COMPOSE_FILE="docker-compose.macos.yml"
     GPU_MODEL="Apple Silicon"
     VRAM_GB="$(detect_macos_memory_gb)"
@@ -676,6 +699,7 @@ ok "wrote .env (mode 0600)"
 
 if [ "$GPU" = "macos" ]; then
   ensure_macos_ollama
+  ensure_macos_diffusers
 fi
 
 info "pulling images…"

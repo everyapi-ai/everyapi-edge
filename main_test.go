@@ -38,6 +38,44 @@ func TestDiscoverOllamaModelsUsesTagNamesAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestDiscoverDiffusersModelsRequiresReadyHealthAndDeduplicates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("path = %q, want /health", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"status":"ready","backend":"mps","models":["sana-600m","qwen-edit","sana-600m",""]}`)
+	}))
+	defer srv.Close()
+
+	got, err := discoverDiffusersModels(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("discoverDiffusersModels: %v", err)
+	}
+	want := []string{"qwen-edit", "sana-600m"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("models = %v, want %v", got, want)
+	}
+}
+
+func TestDiscoverDiffusersModelsRejectsUnavailableRuntime(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"unavailable","models":[],"error":"accelerator required"}`)
+	}))
+	defer srv.Close()
+
+	if _, err := discoverDiffusersModels(context.Background(), srv.URL); err == nil {
+		t.Fatal("unavailable runtime should return an error")
+	}
+}
+
+func TestMergeModelsSortsAndDeduplicatesAcrossRuntimes(t *testing.T) {
+	got := mergeModels([]string{"qwen3:8b", "shared"}, []string{"sana-600m", "shared"})
+	want := []string{"qwen3:8b", "sana-600m", "shared"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("models = %v, want %v", got, want)
+	}
+}
+
 func TestAppleSiliconWithoutHostMetadataDoesNotUseContainerMemory(t *testing.T) {
 	detected := false
 	got := resolvedMemoryGB(0, "Apple Silicon", func() int {

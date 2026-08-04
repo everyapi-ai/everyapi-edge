@@ -1,37 +1,24 @@
-# EveryAPI BYO-GPU supplier bundle — AMD ROCm variant.
-#
-# Identical to docker-compose.yml except the GPU passthrough block
-# uses ROCm devices (/dev/kfd, /dev/dri) and the `video` group
-# instead of the NVIDIA container runtime. Use this on AMD Radeon
-# Instinct / RX 7000 / RX 6000 setups with ROCm 5.7+ installed
-# on the host.
-#
-# Pick by file:
-#   docker compose -f docker-compose.rocm.yml up -d
-#
-# Or rename to docker-compose.yml if you want the default
-# `docker compose up` invocation to work.
+# EveryAPI Edge — Windows NVIDIA bundle.
+# Requires Docker Desktop with the WSL2 backend and NVIDIA GPU integration.
 
 services:
   diffusers:
-    build:
-      context: ./diffusers
-      dockerfile: Dockerfile.rocm
+    build: ./diffusers
     container_name: everyapi-edge-diffusers
     restart: unless-stopped
     environment:
       EVERYAPI_DIFFUSERS_MODEL: ${EVERYAPI_DIFFUSERS_MODEL:-Qwen/Qwen-Image-Edit-2511}
       EVERYAPI_VRAM_GB: ${EVERYAPI_VRAM_GB:-0}
       HF_TOKEN: ${HF_TOKEN:-}
-    devices:
-      - /dev/kfd
-      - /dev/dri
-    group_add:
-      - video
-    security_opt:
-      - seccomp=unconfined
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     volumes:
-      - ${EVERYAPI_IMAGE_MODEL_PATH:-${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}/images}:/models/cache
+      - ${EVERYAPI_IMAGE_MODEL_PATH:?image model path required}:/models/cache
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8188/health', timeout=3)"]
       interval: 10s
@@ -40,32 +27,22 @@ services:
       start_period: 20m
 
   ollama:
-    image: ollama/ollama:rocm
+    image: ollama/ollama:latest
     container_name: everyapi-edge-ollama
     restart: unless-stopped
     environment:
-      # Backstop the live capacity guard: one model may remain resident.
       OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
       OLLAMA_MODELS: /models
-    # ROCm passthrough — exposes the AMD GPU devices to the
-    # container. Requires the host to have ROCm 5.7+ + rocm-dkms
-    # installed; verify with `rocminfo` on the host before
-    # bringing this up.
-    devices:
-      - /dev/kfd
-      - /dev/dri
-    group_add:
-      - video
-    # SYS_PTRACE is needed by ROCm's profiler tooling that ollama
-    # uses for kernel scheduling. Without it ollama still runs but
-    # falls back to slower paths on some kernel versions.
-    cap_add:
-      - SYS_PTRACE
-    security_opt:
-      - seccomp=unconfined
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     volumes:
-      - ${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}:/models
+      - ${EVERYAPI_MODEL_PATH:?model path required}:/models
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -92,11 +69,11 @@ services:
       EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}
       EVERYAPI_GPU_MODEL: ${EVERYAPI_GPU_MODEL:-}
       EVERYAPI_VRAM_GB: ${EVERYAPI_VRAM_GB:-}
+      EVERYAPI_PLATFORM: ${EVERYAPI_PLATFORM:-windows/amd64}
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
       EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
       EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
     ports:
-      # Local-network management surface. Keep it on a trusted LAN only.
       - "${EVERYAPI_CONSOLE_PORT:-8421}:8421"

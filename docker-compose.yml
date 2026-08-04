@@ -27,6 +27,7 @@ services:
     restart: unless-stopped
     environment:
       EVERYAPI_DIFFUSERS_MODEL: ${EVERYAPI_DIFFUSERS_MODEL:-Qwen/Qwen-Image-Edit-2511}
+      EVERYAPI_VRAM_GB: ${EVERYAPI_VRAM_GB:-0}
       HF_TOKEN: ${HF_TOKEN:-}
     deploy:
       resources:
@@ -42,6 +43,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+      start_period: 20m
 
   ollama:
     image: ollama/ollama:latest

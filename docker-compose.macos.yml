@@ -32,6 +32,7 @@ services:
       EVERYAPI_NODE_ID: ${EVERYAPI_NODE_ID:?node id required}
       EVERYAPI_REGISTRATION_TOKEN: ${EVERYAPI_REGISTRATION_TOKEN:-}
       OLLAMA_URL: http://host.docker.internal:11434
+      EVERYAPI_DIFFUSERS_URL: http://host.docker.internal:8188
       EVERYAPI_OLLAMA_STORAGE_PATH: /models
       EVERYAPI_IDENTITY_PATH: /var/lib/everyapi-edge/identity.json
       EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}

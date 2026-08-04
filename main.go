@@ -49,6 +49,7 @@ import (
 var Version = "dev"
 
 const maxOllamaTagsResponseBytes int64 = 1 << 20
+const maxDiffusersHealthResponseBytes int64 = 1 << 20
 
 // currentClient holds the WS client active inside the reconnect loop.
 // The log-tee writer reads it on every Write and forwards the line to
@@ -179,7 +180,7 @@ func main() {
 		return
 	}
 
-	fwd := forward.New(cfg.OllamaURL)
+	fwd := forward.New(cfg.OllamaURL, cfg.DiffusersURL)
 	var requests sync.Map
 	fwd.Observer = forward.ObserverFuncs{
 		StartedFunc: func(event forward.RequestEvent) {
@@ -414,6 +415,60 @@ func discoverOllamaModels(ctx context.Context, ollamaURL string) ([]string, erro
 	return models, nil
 }
 
+func discoverDiffusersModels(ctx context.Context, diffusersURL string) ([]string, error) {
+	endpoint, err := url.Parse(diffusersURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse Diffusers URL: %w", err)
+	}
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/health"
+	endpoint.RawQuery = ""
+	endpoint.Fragment = ""
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build Diffusers health request: %w", err)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request Diffusers health: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Diffusers health returned %s", resp.Status)
+	}
+
+	var payload struct {
+		Status string   `json:"status"`
+		Models []string `json:"models"`
+		Error  string   `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxDiffusersHealthResponseBytes)).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode Diffusers health: %w", err)
+	}
+	if payload.Status != "ready" {
+		return nil, fmt.Errorf("Diffusers runtime is %s: %s", payload.Status, payload.Error)
+	}
+	return mergeModels(payload.Models), nil
+}
+
+func mergeModels(groups ...[]string) []string {
+	seen := make(map[string]struct{})
+	for _, group := range groups {
+		for _, model := range group {
+			name := strings.TrimSpace(model)
+			if name != "" {
+				seen[name] = struct{}{}
+			}
+		}
+	}
+	models := make([]string, 0, len(seen))
+	for model := range seen {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	return models
+}
+
 // runWithReconnect drives one client lifecycle after another with
 // exponential backoff capped at 30s. The reconnect loop is here (not
 // inside Client) so a future test can stub the client without also
@@ -447,8 +502,17 @@ func runWithReconnect(
 		if modelErr != nil {
 			log.Printf("warning: could not discover Ollama models: %v", modelErr)
 		} else {
-			sessionMeta.Models = models
+			sessionMeta.Models = mergeModels(sessionMeta.Models, models)
 			log.Printf("discovered %d Ollama models", len(models))
+		}
+		if cfg.DiffusersURL != "" {
+			imageModels, imageModelErr := discoverDiffusersModels(ctx, cfg.DiffusersURL)
+			if imageModelErr != nil {
+				log.Printf("warning: could not discover Diffusers models: %v", imageModelErr)
+			} else {
+				sessionMeta.Models = mergeModels(sessionMeta.Models, imageModels)
+				log.Printf("discovered %d Diffusers models", len(imageModels))
+			}
 		}
 		cli, err := client.New(client.Config{
 			GatewayURL:        cfg.GatewayURL,

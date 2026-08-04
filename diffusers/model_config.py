@@ -7,6 +7,8 @@ from pathlib import Path
 
 
 DEFAULT_MODEL = "Qwen/Qwen-Image-Edit-2511"
+DEFAULT_GENERATION_MODEL = "Efficient-Large-Model/Sana_600M_1024px_diffusers"
+SUPPORTED_GENERATION_MODELS = frozenset({DEFAULT_GENERATION_MODEL})
 SUPPORTED_IMAGE_EDITORS = frozenset(
     {
         "Qwen/Qwen-Image-Edit",

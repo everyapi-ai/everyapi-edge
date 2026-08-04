@@ -1,12 +1,12 @@
 // Package forward is the RequestHandler installed in the WS client:
 // translates an inbound protocol.RequestBody into a real HTTP call
-// against the local Ollama, streams the response body back as
+// against the selected local runtime, streams the response body back as
 // Chunk frames, and finalises with Done carrying the token counts
 // Ollama returns.
 //
 // Path whitelist is enforced — a compromised gateway must not be
 // able to coerce the agent into POST'ing to arbitrary local URLs.
-// Only the OpenAI-compatible /v1/* paths Ollama exposes are
+// Only the OpenAI-compatible /v1/* paths the configured runtimes expose are
 // allowed; anything else returns an Error frame immediately
 // without touching the network.
 package forward
@@ -30,8 +30,9 @@ import (
 // Forwarder is what main.go constructs and hands to the WS client
 // as the RequestHandler.
 type Forwarder struct {
-	OllamaURL  string       // e.g. http://ollama:11434
-	HTTPClient *http.Client // defaulted in New() if nil
+	OllamaURL    string       // e.g. http://ollama:11434
+	DiffusersURL string       // e.g. http://diffusers:8188
+	HTTPClient   *http.Client // defaulted in New() if nil
 	// Observer receives redacted request lifecycle events for the local Edge
 	// console. It never receives request bodies or headers.
 	Observer Observer
@@ -101,10 +102,11 @@ const (
 )
 
 // New constructs a Forwarder with defaults filled in.
-func New(ollamaURL string) *Forwarder {
+func New(ollamaURL, diffusersURL string) *Forwarder {
 	return &Forwarder{
-		OllamaURL:  strings.TrimRight(ollamaURL, "/"),
-		HTTPClient: &http.Client{
+		OllamaURL:    strings.TrimRight(ollamaURL, "/"),
+		DiffusersURL: strings.TrimRight(diffusersURL, "/"),
+		HTTPClient:   &http.Client{
 			// No client-level timeout — we use a per-request context
 			// timeout in Handle so streaming long completions
 			// doesn't trip an idle-conn watchdog.
@@ -119,11 +121,16 @@ func New(ollamaURL string) *Forwarder {
 // but defense in depth: validating here means a future relay-side
 // regression or malicious gateway can't trick the agent into
 // hitting /api/admin/exec or similar invented routes.
-var allowedPaths = map[string]bool{
+var ollamaPaths = map[string]bool{
 	"/v1/chat/completions": true,
 	"/v1/completions":      true,
 	"/v1/embeddings":       true,
 	"/v1/models":           true,
+}
+
+var diffusersPaths = map[string]bool{
+	"/v1/images/generations": true,
+	"/v1/images/edits":       true,
 }
 
 // Handle is the protocol.RequestHandler signature the WS client
@@ -132,10 +139,17 @@ var allowedPaths = map[string]bool{
 // counts parsed off Ollama's final SSE event (when streaming) or
 // JSON body (when not).
 func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send func(protocol.ChunkBody) error) (done protocol.DoneBody, fault *protocol.ErrorBody) {
-	if !allowedPaths[req.Path] {
+	upstreamURL, allowed := f.upstreamURL(req.Path)
+	if !allowed {
 		return protocol.DoneBody{}, &protocol.ErrorBody{
 			Code:    "path_not_allowed",
 			Message: fmt.Sprintf("agent refuses to forward %q (whitelist enforced)", req.Path),
+		}
+	}
+	if upstreamURL == "" {
+		return protocol.DoneBody{}, &protocol.ErrorBody{
+			Code:    "runtime_unavailable",
+			Message: "the local image runtime is not configured",
 		}
 	}
 	if req.Method == "" {
@@ -162,7 +176,7 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
-	url := f.OllamaURL + req.Path
+	url := upstreamURL + req.Path
 	hReq, err := http.NewRequestWithContext(ctx, req.Method, url, bytes.NewReader(req.Body))
 	if err != nil {
 		return protocol.DoneBody{}, &protocol.ErrorBody{Code: "request_build_failed", Message: err.Error()}
@@ -239,6 +253,16 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	usage.PromptTokens, usage.CompletionTokens = tee.Tokens()
 	usage.DurationMs = time.Since(started).Milliseconds()
 	return usage, nil
+}
+
+func (f *Forwarder) upstreamURL(path string) (string, bool) {
+	if ollamaPaths[path] {
+		return f.OllamaURL, true
+	}
+	if diffusersPaths[path] {
+		return f.DiffusersURL, true
+	}
+	return "", false
 }
 
 // requestModel extracts only the public model selector. A malformed body is

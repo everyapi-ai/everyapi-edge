@@ -97,6 +97,20 @@ func TestInstallerPreparesAndVerifiesAutoSelectedModel(t *testing.T) {
 	}
 }
 
+func TestInstallerDoesNotAdvertiseImageSupportWithoutAnAccelerator(t *testing.T) {
+	contents, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	if strings.Contains(script, "falling back to nvidia config (will run CPU-only)") {
+		t.Fatal("installer silently selects an image profile without a supported accelerator")
+	}
+	if !strings.Contains(script, "no supported GPU detected") {
+		t.Fatal("installer must explain the supported accelerator requirement")
+	}
+}
+
 func TestGPUComposeLimitsOllamaToOneResidentModel(t *testing.T) {
 	for _, filename := range []string{"docker-compose.yml", "docker-compose.rocm.yml"} {
 		contents, err := os.ReadFile(filename)
@@ -179,6 +193,12 @@ func TestExistingNodeUpgradeReusesIdentityWithoutRegistrationToken(t *testing.T)
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(installDir, "data", "agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(installDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, "scripts", "install-macos-diffusers.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(installDir, "data", "agent", "identity.json"), []byte(`{"private_key":"persisted"}`), 0o600); err != nil {

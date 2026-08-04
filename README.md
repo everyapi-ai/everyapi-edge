@@ -2,8 +2,8 @@
 
 The supplier-side daemon for the EveryAPI BYO-GPU marketplace. Runs
 on your GPU machine, connects out to the EveryAPI gateway over a
-reverse WebSocket, and serves inference requests by forwarding them
-to a local Ollama. No port forwarding, no public IP, no domain
+reverse WebSocket, and serves inference requests through local Ollama and
+Diffusers runtimes. No port forwarding, no public IP, no domain
 needed — your machine just needs outbound HTTPS to api.everyapi.ai.
 
 ## Five-minute onboarding
@@ -16,14 +16,18 @@ needed — your machine just needs outbound HTTPS to api.everyapi.ai.
    click create. You'll see a one-time **registration token** —
    copy it (we never show it again).
 
-3. **Run the bundle.** On the machine with the GPU:
+3. **Run the installer.** On macOS or Linux:
 
    ```bash
-   git clone https://github.com/everyapi-ai/everyapi-edge
-   cd everyapi-edge
-   cp .env.example .env
-   # fill in EVERYAPI_NODE_ID + EVERYAPI_REGISTRATION_TOKEN (from step 2)
-   docker compose up -d
+   curl -fsSL https://dl.everyapi.ai/edge/install.sh | bash -s -- \
+     --node-id 5 --token edgert_...
+   ```
+
+   On Windows PowerShell:
+
+   ```powershell
+   git clone https://github.com/everyapi-ai/everyapi-edge $HOME/everyapi-edge
+   & $HOME/everyapi-edge/install.ps1 -NodeId 5 -Token edgert_...
    ```
 
 4. **Watch the dashboard.** Within ~30 seconds the node row flips
@@ -64,21 +68,21 @@ Two GPU variants are provided alongside it:
 |-------------------------------|-------------------------------------|
 | `docker-compose.yml`          | NVIDIA — most common case           |
 | `docker-compose.rocm.yml`     | AMD Radeon Instinct / RX 7000/6000 with ROCm 5.7+ installed |
-| `docker-compose.macos.yml`    | Apple Silicon (M1/M2/M3/M4) — runs ollama natively for Metal |
+| `docker-compose.macos.yml`    | Apple Silicon (M1/M2/M3/M4) — native Ollama + Diffusers MPS |
+| `docker-compose.windows.yml`  | Windows 10/11, Docker Desktop WSL2, NVIDIA GPU |
 
 Pick by filename:
 
 ```bash
 docker compose -f docker-compose.rocm.yml up -d     # AMD
 docker compose -f docker-compose.macos.yml up -d    # macOS
+docker compose -f docker-compose.windows.yml up -d  # Windows NVIDIA
 ```
 
-The macOS variant runs the agent in docker but runs Ollama natively
-(Metal acceleration isn't available through the docker container).
-The installer installs Ollama with Homebrew when needed, starts it,
-then verifies the selected model. If Homebrew is unavailable, it
-stops with the official Ollama download link rather than starting an
-Edge node that cannot serve requests.
+The macOS variant runs the agent in Docker but runs Ollama and Diffusers
+natively because Metal/MPS is not available through a Linux container. The
+installer creates an arm64 Python environment, registers Diffusers with
+launchd, and verifies both local runtimes before reporting success.
 
 The agent's `OLLAMA_URL` resolves to `host.docker.internal:11434`
 in that file, which Docker Desktop / OrbStack / Colima all expose
@@ -100,9 +104,24 @@ library in place. On Apple Silicon this host-side step is what records unified
 physical memory and `darwin/arm64`; the Linux agent container cannot infer
 either host value accurately from its own runtime.
 
-CPU-only nodes WILL run — the agent connects fine and Ollama
-serves from CPU. Throughput will be too low to be commercially
-useful for chat workloads, but embeddings can work.
+The supported image matrix is macOS Apple Silicon/MPS, Linux NVIDIA/CUDA,
+Linux AMD/ROCm, and Windows NVIDIA through Docker Desktop WSL2. CPU-only and
+Windows DirectML image nodes are rejected explicitly instead of being shown as
+image-capable. DirectML can be added later when its PyTorch/Diffusers version
+contract supports the selected pipelines reliably.
+
+## Image generation
+
+The image runtime advertises
+`Efficient-Large-Model/Sana_600M_1024px_diffusers`, a small Sana 0.6B
+text-to-image model suitable for 16 GB-class machines, and keeps the existing
+allow-listed Qwen image editors. Buyer requests use the OpenAI-compatible
+`POST /v1/images/generations` endpoint. Models download into
+`$HOME/.everyapi/edge/images` during runtime startup. Installation can take
+several minutes, and the node does not advertise Sana until loading succeeds.
+
+ComfyUI is not bundled. Edge uses Diffusers directly so the gateway sees one
+stable API and model-discovery contract on every supported OS.
 
 ## Security model
 
@@ -128,10 +147,10 @@ useful for chat workloads, but embeddings can work.
   keys, email addresses, and internal user IDs are never stored in
   the agent.
 
-- The agent enforces a path whitelist on inbound requests. Even
+- The agent enforces a path-to-runtime whitelist on inbound requests. Even
   if the gateway were compromised, it could not coerce your
   machine into POST'ing to arbitrary local URLs — only the
-  OpenAI-compatible /v1/* paths Ollama exposes are accepted.
+  the explicit Ollama and Diffusers OpenAI-compatible paths are accepted.
 
 ## Troubleshooting
 
