@@ -38,6 +38,42 @@ func TestDiscoverOllamaModelsUsesTagNamesAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestAppleSiliconWithoutHostMetadataDoesNotUseContainerMemory(t *testing.T) {
+	detected := false
+	got := resolvedMemoryGB(0, "Apple Silicon", func() int {
+		detected = true
+		return 16
+	})
+	if got != 0 {
+		t.Fatalf("memory = %d GiB, want unknown rather than Docker VM memory", got)
+	}
+	if detected {
+		t.Fatal("Apple Silicon fallback queried memory from inside the Linux container")
+	}
+}
+
+func TestConfiguredAppleSiliconMemoryRemainsAuthoritative(t *testing.T) {
+	got := resolvedMemoryGB(48, "Apple Silicon", func() int { return 16 })
+	if got != 48 {
+		t.Fatalf("memory = %d GiB, want configured host total 48", got)
+	}
+}
+
+func TestConfiguredHostPlatformOverridesContainerRuntime(t *testing.T) {
+	if got := resolvedPlatform("darwin/arm64", "Apple Silicon", "linux", "arm64"); got != "darwin/arm64" {
+		t.Fatalf("platform = %q, want macOS host platform", got)
+	}
+	if got := resolvedPlatform("", "RTX 4090", "linux", "amd64"); got != "linux/amd64" {
+		t.Fatalf("fallback platform = %q, want agent runtime", got)
+	}
+}
+
+func TestAppleSiliconWithoutHostMetadataDoesNotUseContainerPlatform(t *testing.T) {
+	if got := resolvedPlatform("", "Apple Silicon", "linux", "arm64"); got != "" {
+		t.Fatalf("platform = %q, want unknown rather than Linux container runtime", got)
+	}
+}
+
 func TestRemoteControlHandlerAllowsOnlyModelManagementEndpoints(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/models" {

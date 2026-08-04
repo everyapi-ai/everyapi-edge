@@ -116,13 +116,11 @@ func main() {
 	if err := updateManager.Bootstrap(); err != nil {
 		log.Fatalf("update bootstrap: %v", err)
 	}
-	// The installer records discrete GPU VRAM in EVERYAPI_VRAM_GB. For a
-	// hand-started agent (and Apple Silicon's unified memory), keep the local
-	// model catalog useful by discovering a conservative host-memory budget.
-	consoleMemoryGB := cfg.VRAMTotalGB
-	if consoleMemoryGB == 0 {
-		consoleMemoryGB = detectedMemoryGB()
-	}
+	// The host installer/CLI records accelerator memory in EVERYAPI_VRAM_GB.
+	// For runtimes that share the host kernel, retain automatic discovery; a
+	// Linux container on Apple Silicon must use the explicit host measurement.
+	consoleMemoryGB := resolvedMemoryGB(cfg.VRAMTotalGB, cfg.GPUModel, detectedMemoryGB)
+	hostPlatform := resolvedPlatform(os.Getenv("EVERYAPI_PLATFORM"), cfg.GPUModel, runtime.GOOS, runtime.GOARCH)
 	log.Printf("starting %s — %s", Version, cfg.String())
 
 	// Early-exit if a previous session received a terminal Disconnect
@@ -159,7 +157,7 @@ func main() {
 		AgentVersion: Version,
 		Version:      Version,
 		GPUModel:     cfg.GPUModel,
-		Platform:     runtime.GOOS + "/" + runtime.GOARCH,
+		Platform:     hostPlatform,
 		CountryISO2:  cfg.CountryISO2,
 		Update: func(updateCtx context.Context, report func(console.UpdateStatus)) error {
 			return updateManager.RunLatest(updateCtx, func(status edgeupdate.Status) {
@@ -200,7 +198,7 @@ func main() {
 		Hardware: protocol.Hardware{
 			GPUModel:    cfg.GPUModel,
 			VRAMTotalGB: consoleMemoryGB,
-			Platform:    runtime.GOOS + "/" + runtime.GOARCH,
+			Platform:    hostPlatform,
 		},
 		Location: protocol.Location{CountryISO2: cfg.CountryISO2},
 	}
@@ -209,6 +207,31 @@ func main() {
 		log.Fatalf("fatal: %v", err)
 	}
 	log.Print("shutting down cleanly")
+}
+
+func resolvedMemoryGB(configured int, gpuModel string, detect func() int) int {
+	if configured > 0 {
+		return configured
+	}
+	// The macOS bundle runs this Linux binary inside Docker. /proc/meminfo is
+	// therefore the Docker VM limit, not Apple Silicon's unified host memory.
+	// Only the host installer/CLI can measure that total accurately. Until an
+	// older node runs the standard host upgrade, report unknown instead of
+	// advertising the VM's usually much smaller allocation as physical memory.
+	if strings.Contains(strings.ToLower(gpuModel), "apple silicon") {
+		return 0
+	}
+	return detect()
+}
+
+func resolvedPlatform(configured, gpuModel, runtimeOS, runtimeArch string) string {
+	if configured = strings.TrimSpace(configured); configured != "" {
+		return configured
+	}
+	if strings.Contains(strings.ToLower(gpuModel), "apple silicon") {
+		return ""
+	}
+	return runtimeOS + "/" + runtimeArch
 }
 
 func detectedMemoryGB() int {

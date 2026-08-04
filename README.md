@@ -84,6 +84,22 @@ The agent's `OLLAMA_URL` resolves to `host.docker.internal:11434`
 in that file, which Docker Desktop / OrbStack / Colima all expose
 on macOS by default.
 
+### Upgrade an installer-managed node
+
+Run the same installer command again on the supplier host:
+
+```bash
+curl -fsSL https://dl.everyapi.ai/edge/install.sh | bash
+```
+
+The installer verifies the existing checkout, reuses its node ID, gateway,
+name, supported operator settings, and persisted Ed25519 identity, then
+refreshes the bundle and host hardware metadata. It ignores any stale consumed
+registration token, does not require a new one, and leaves the existing model
+library in place. On Apple Silicon this host-side step is what records unified
+physical memory and `darwin/arm64`; the Linux agent container cannot infer
+either host value accurately from its own runtime.
+
 CPU-only nodes WILL run — the agent connects fine and Ollama
 serves from CPU. Throughput will be too low to be commercially
 useful for chat workloads, but embeddings can work.
@@ -148,6 +164,9 @@ identity loss as equivalent to "machine was compromised.")
 
 - It does not update silently. A seller or authorized platform operator must
   explicitly choose **Update** in the Edge Control Room or App Dashboard.
+  When an update changes host-detected metadata such as Apple Silicon unified
+  memory, rerun the installer command above once so the host configuration is
+  regenerated; no node re-registration is required.
   The agent then resolves only the official latest stable `edge-v*` release,
   selects the fixed asset for its OS/architecture, verifies it against the
   release's SHA-256 checksum file, and restarts itself. The gateway cannot send

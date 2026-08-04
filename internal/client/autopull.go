@@ -78,9 +78,9 @@ func (c *Client) pullRecommendedModels(ctx context.Context, models []string) {
 	}
 }
 
-// pullOllamaModel runs one blocking `ollama pull`. The streaming response
-// is drained rather than parsed: only completion matters here, and ollama
-// signals failure through the HTTP status plus a truncated stream.
+// pullOllamaModel runs one blocking `ollama pull`. Ollama can report a pull
+// failure in a JSON stream object while keeping the HTTP status at 200, so a
+// successful return requires a terminal success object rather than merely EOF.
 func pullOllamaModel(ctx context.Context, ollamaURL, model string) error {
 	payload, err := json.Marshal(struct {
 		Name   string `json:"name"`
@@ -113,13 +113,34 @@ func pullOllamaModel(ctx context.Context, ollamaURL, model string) error {
 	// long as the download runs.
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	succeeded := false
 	for scanner.Scan() {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var update struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		}
+		if err := json.Unmarshal(line, &update); err != nil {
+			return fmt.Errorf("decode ollama pull response: %w", err)
+		}
+		if update.Error != "" {
+			return fmt.Errorf("ollama pull failed: %s", update.Error)
+		}
+		if update.Status == "success" {
+			succeeded = true
+		}
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
 		return err
+	}
+	if !succeeded {
+		return fmt.Errorf("ollama pull ended without success")
 	}
 	return nil
 }

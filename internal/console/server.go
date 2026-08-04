@@ -1586,21 +1586,38 @@ func (h *handler) runPull(job *pullJob) {
 				err = fmt.Errorf("local runtime returned %s", response.Status)
 			} else {
 				scanner := bufio.NewScanner(io.LimitReader(response.Body, 4<<20))
+				succeeded := false
 				for scanner.Scan() {
+					line := bytes.TrimSpace(scanner.Bytes())
+					if len(line) == 0 {
+						continue
+					}
 					var update pullJob
-					if json.Unmarshal(scanner.Bytes(), &update) == nil {
-						if storageErr := h.pullStorageError(update); storageErr != nil {
-							err = storageErr
-							cancel()
-							break
-						}
-						h.mu.Lock()
-						updatePullProgress(job, update, time.Now())
-						h.mu.Unlock()
+					if decodeErr := json.Unmarshal(line, &update); decodeErr != nil {
+						err = fmt.Errorf("decode local runtime pull response: %w", decodeErr)
+						break
+					}
+					if update.Error != "" {
+						err = fmt.Errorf("local runtime pull failed: %s", update.Error)
+						break
+					}
+					if storageErr := h.pullStorageError(update); storageErr != nil {
+						err = storageErr
+						cancel()
+						break
+					}
+					h.mu.Lock()
+					updatePullProgress(job, update, time.Now())
+					h.mu.Unlock()
+					if update.Status == "success" {
+						succeeded = true
 					}
 				}
 				if scanErr := scanner.Err(); scanErr != nil && err == nil {
 					err = scanErr
+				}
+				if err == nil && !succeeded {
+					err = errors.New("local runtime pull ended without success")
 				}
 			}
 		}

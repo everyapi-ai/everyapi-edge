@@ -1122,6 +1122,47 @@ func TestHandlerStartsModelPullAndExposesProgress(t *testing.T) {
 	}
 }
 
+func TestHandlerModelPullSurfacesStreamingError(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/pull" {
+			t.Fatalf("unexpected Ollama path %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"error":"proxyconnect tcp: connection refused"}` + "\n"))
+	}))
+	defer ollama.Close()
+
+	h := &handler{cfg: Config{OllamaURL: ollama.URL}, store: NewStore(16), storageAvailable: availableStorageBytes}
+	job := &pullJob{Name: "qwen3:8b", Status: "queued"}
+	h.pull = job
+	h.runPull(job)
+
+	snapshot := h.pullSnapshot()
+	if snapshot.Latest == nil || snapshot.Latest.Status != "failed" ||
+		!strings.Contains(snapshot.Latest.Error, "proxyconnect tcp: connection refused") {
+		t.Fatalf("streaming pull result = %+v", snapshot.Latest)
+	}
+}
+
+func TestHandlerModelPullRequiresTerminalSuccess(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"pulling manifest"}` + "\n"))
+	}))
+	defer ollama.Close()
+
+	h := &handler{cfg: Config{OllamaURL: ollama.URL}, store: NewStore(16), storageAvailable: availableStorageBytes}
+	job := &pullJob{Name: "qwen3:8b", Status: "queued"}
+	h.pull = job
+	h.runPull(job)
+
+	snapshot := h.pullSnapshot()
+	if snapshot.Latest == nil || snapshot.Latest.Status != "failed" ||
+		!strings.Contains(snapshot.Latest.Error, "without success") {
+		t.Fatalf("truncated pull result = %+v", snapshot.Latest)
+	}
+}
+
 func TestHandlerExposesVersionAndStartsLatestUpdate(t *testing.T) {
 	started := make(chan struct{}, 1)
 	h := NewHandler(Config{

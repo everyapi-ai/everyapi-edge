@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -154,6 +155,113 @@ func TestMacOSInstallerKeepsModelsInEveryAPIHome(t *testing.T) {
 	}
 }
 
+func TestMacOSInstallerPersistsHostUnifiedMemory(t *testing.T) {
+	contents, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	for _, required := range []string{
+		"detect_macos_memory_gb",
+		`VRAM_GB="$(detect_macos_memory_gb)"`,
+		`physical_gb=$(detect_macos_memory_gb)`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("macOS installer does not persist host unified memory: missing %q", required)
+		}
+	}
+}
+
+func TestExistingNodeUpgradeReusesIdentityWithoutRegistrationToken(t *testing.T) {
+	home := t.TempDir()
+	installDir := filepath.Join(home, "everyapi-edge")
+	if err := os.MkdirAll(filepath.Join(installDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(installDir, "data", "agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, "data", "agent", "identity.json"), []byte(`{"private_key":"persisted"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldEnv := "EVERYAPI_GATEWAY=https://gateway.example.test\n" +
+		"EVERYAPI_NODE_ID=842\n" +
+		"EVERYAPI_REGISTRATION_TOKEN=edgert_stale_consumed\n" +
+		"EVERYAPI_NODE_NAME=existing-mac\n" +
+		"EVERYAPI_COUNTRY=jp\n" +
+		"EVERYAPI_WORKLOADS=chat, embedding\n" +
+		"EVERYAPI_CONSOLE_PORT=9842\n"
+	if err := os.WriteFile(filepath.Join(installDir, ".env"), []byte(oldEnv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(home, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExecutable("git", `
+if [ "$1" = "-C" ] && [ "$3" = "remote" ]; then
+  echo https://github.com/everyapi-ai/everyapi-edge
+fi
+exit 0
+`)
+	writeExecutable("docker", `
+case "$*" in
+  "--version") echo "Docker version 27.0.0, build test" ;;
+  *"ps -q agent"*) echo "existing-agent" ;;
+  "logs --since "*) echo "connected to gateway with 1 models" ;;
+  *" up -d"*)
+    if grep -q '^EVERYAPI_REGISTRATION_TOKEN=edgert_' .env; then
+      echo "upgrade attempted stale token registration" >&2
+      exit 42
+    fi
+    ;;
+esac
+exit 0
+`)
+	writeExecutable("curl", "exit 0\n")
+	writeExecutable("ollama", "exit 0\n")
+	writeExecutable("brew", "exit 1\n")
+	writeExecutable("sysctl", "echo 51539607552\n")
+
+	cmd := exec.Command("bash", "install.sh", "--dir", installDir, "--gpu", "macos")
+	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+binDir+":"+os.Getenv("PATH"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("existing-node upgrade failed or prompted for a new token: %v\n%s", err, output)
+	}
+	updated, err := os.ReadFile(filepath.Join(installDir, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(updated)
+	for _, required := range []string{
+		"EVERYAPI_GATEWAY=https://gateway.example.test",
+		"EVERYAPI_NODE_ID=842",
+		"EVERYAPI_NODE_NAME=existing-mac",
+		"EVERYAPI_REGISTRATION_TOKEN=",
+		"EVERYAPI_GPU_MODEL=Apple Silicon",
+		"EVERYAPI_VRAM_GB=48",
+		"EVERYAPI_PLATFORM=darwin/arm64",
+		"EVERYAPI_COUNTRY=JP",
+		"EVERYAPI_WORKLOADS=chat,embedding",
+		"EVERYAPI_CONSOLE_PORT=9842",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Errorf("upgraded env is missing %q:\n%s", required, contents)
+		}
+	}
+	if strings.Contains(contents, "EVERYAPI_REGISTRATION_TOKEN=edgert_") {
+		t.Fatalf("upgrade retained a consumed registration token:\n%s", contents)
+	}
+}
+
 func TestMacOSComposeDocumentsEveryAPIModelRoot(t *testing.T) {
 	contents, err := os.ReadFile("docker-compose.macos.yml")
 	if err != nil {
@@ -162,6 +270,9 @@ func TestMacOSComposeDocumentsEveryAPIModelRoot(t *testing.T) {
 	compose := string(contents)
 	if strings.Contains(compose, "~/.ollama") || !strings.Contains(compose, "${HOME}/.everyapi/edge") {
 		t.Fatalf("macOS Compose documents the wrong model root: %s", compose)
+	}
+	if !strings.Contains(compose, "EVERYAPI_PLATFORM: ${EVERYAPI_PLATFORM:-darwin/arm64}") {
+		t.Fatal("macOS Compose must publish the host platform instead of the Linux container runtime")
 	}
 }
 

@@ -10,6 +10,10 @@
 #
 #   curl -fsSL https://dl.everyapi.ai/edge/install.sh | bash
 #
+# The same command upgrades an installer-managed node. Its verified checkout,
+# node metadata, and persisted Ed25519 identity are reused; a consumed one-time
+# registration token is neither needed nor requested.
+#
 # What it does:
 #
 #   1. Detects the GPU (nvidia-smi / rocminfo / Darwin host) and picks
@@ -19,8 +23,8 @@
 #      Does NOT modify anything outside that directory, and refuses to
 #      install into a git working tree so the agent's credentials never
 #      land in a source checkout.
-#   3. Writes .env with the supplied node id + token + GPU metadata and the
-#      model storage location used by the local Control Room.
+#   3. Writes .env with the new or recovered node metadata plus host-detected
+#      GPU metadata and the model storage location used by the Control Room.
 #   4. Detects available accelerator memory, pulls a conservatively-sized
 #      Ollama model, and verifies a real local inference request.
 #   5. Starts the agent and waits for its gateway Welcome before declaring
@@ -44,6 +48,7 @@ main() {
 # ----- Defaults --------------------------------------------------------------
 
 GATEWAY="https://api.everyapi.ai"
+GATEWAY_EXPLICIT=0
 NODE_ID=""
 TOKEN=""
 NODE_NAME=""
@@ -62,6 +67,12 @@ INSTALL_DIR="${INSTALL_DIR:-./everyapi-edge}"
 BUNDLE_SOURCE="https://github.com/everyapi-ai/everyapi-edge"
 GPU_MODEL=""
 VRAM_GB=""
+HOST_PLATFORM=""
+COUNTRY=""
+WORKLOADS=""
+CONSOLE_PORT=""
+EXISTING_INSTALL=0
+UPGRADE_MODE=0
 
 # ----- Pretty print ----------------------------------------------------------
 
@@ -83,7 +94,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --node-id)  NODE_ID="$2"; shift 2 ;;
     --token)    TOKEN="$2"; shift 2 ;;
-    --gateway)  GATEWAY="$2"; shift 2 ;;
+    --gateway)  GATEWAY="$2"; GATEWAY_EXPLICIT=1; shift 2 ;;
     --name)     NODE_NAME="$2"; shift 2 ;;
     --gpu)      GPU="$2"; shift 2 ;;
     --model)    MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
@@ -174,6 +185,88 @@ if command -v git >/dev/null 2>&1; then
   fi
 fi
 
+# ----- Recover an existing node before prompting ----------------------------
+
+# Never source a persisted dotenv file: it is data, not shell code. Read only
+# the identity fields that this installer owns, and only after the checkout's
+# origin has been verified as the official Edge bundle.
+read_existing_env_value() {
+  local key="$1" line
+  [ -f "$INSTALL_DIR/.env" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) printf '%s' "${line#*=}"; return 0 ;;
+    esac
+  done <"$INSTALL_DIR/.env"
+}
+
+if [ -d "$INSTALL_DIR" ]; then
+  if [ ! -d "$INSTALL_DIR/.git" ]; then
+    err "refusing existing non-EveryAPI directory: $INSTALL_DIR"
+    exit 1
+  fi
+  EXISTING_REMOTE=$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)
+  case "$EXISTING_REMOTE" in
+    "$BUNDLE_SOURCE"|"$BUNDLE_SOURCE.git") ;;
+    *)
+      err "refusing existing non-EveryAPI directory: $INSTALL_DIR"
+      err "unexpected git origin: ${EXISTING_REMOTE:-<none>}"
+      exit 1
+      ;;
+  esac
+  EXISTING_INSTALL=1
+  if [ -z "$NODE_ID" ]; then
+    NODE_ID=$(read_existing_env_value EVERYAPI_NODE_ID)
+  fi
+  if [ -z "$NODE_NAME" ]; then
+    NODE_NAME=$(read_existing_env_value EVERYAPI_NODE_NAME)
+  fi
+  if [ "$GATEWAY_EXPLICIT" -eq 0 ]; then
+    EXISTING_GATEWAY=$(read_existing_env_value EVERYAPI_GATEWAY)
+    if [ -n "$EXISTING_GATEWAY" ]; then
+      GATEWAY="$EXISTING_GATEWAY"
+    fi
+  fi
+  if [ -z "$TOKEN" ]; then
+    TOKEN=$(read_existing_env_value EVERYAPI_REGISTRATION_TOKEN)
+  fi
+  COUNTRY=$(read_existing_env_value EVERYAPI_COUNTRY)
+  WORKLOADS=$(read_existing_env_value EVERYAPI_WORKLOADS)
+  CONSOLE_PORT=$(read_existing_env_value EVERYAPI_CONSOLE_PORT)
+  if [ -s "$INSTALL_DIR/data/agent/identity.json" ]; then
+    UPGRADE_MODE=1
+    # A persisted identity is authoritative for reconnects. Older installs or
+    # interrupted cleanup may leave a now-consumed token in .env; forwarding
+    # it would incorrectly force the agent back through first registration.
+    TOKEN=""
+    info "found the existing node identity — no new registration token is required"
+  fi
+fi
+
+# Revalidate the recovered allowlisted values before using or rewriting them.
+COUNTRY=$(printf '%s' "$COUNTRY" | tr '[:lower:]' '[:upper:]')
+WORKLOADS=$(printf '%s' "$WORKLOADS" | tr -d '[:space:]')
+validate_no_newlines "gateway" "$GATEWAY"
+validate_no_newlines "node name" "$NODE_NAME"
+validate_no_newlines "registration token" "$TOKEN"
+validate_no_newlines "country" "$COUNTRY"
+validate_no_newlines "workloads" "$WORKLOADS"
+validate_no_newlines "console port" "$CONSOLE_PORT"
+if [ -n "$COUNTRY" ] && [[ ! "$COUNTRY" =~ ^[A-Z]{2}$ ]]; then
+  err "country must be an uppercase ISO 3166-1 alpha-2 code"
+  exit 1
+fi
+if [ -n "$WORKLOADS" ] && [[ ! "$WORKLOADS" =~ ^(chat|coding|image|video|audio|render|embedding)(,(chat|coding|image|video|audio|render|embedding))*$ ]]; then
+  err "workloads contains an unsupported value"
+  exit 1
+fi
+if [ -n "$CONSOLE_PORT" ]; then
+  if [[ ! "$CONSOLE_PORT" =~ ^[0-9]+$ ]] || [ "$CONSOLE_PORT" -lt 1 ] || [ "$CONSOLE_PORT" -gt 65535 ]; then
+    err "console port must be between 1 and 65535"
+    exit 1
+  fi
+fi
+
 # ----- Prerequisites ---------------------------------------------------------
 
 require() {
@@ -236,16 +329,25 @@ ensure_macos_ollama() {
   ok "native Ollama is ready"
 }
 
+detect_macos_memory_gb() {
+  local bytes gib=$(( 1024 * 1024 * 1024 ))
+  bytes=$(sysctl -n hw.memsize 2>/dev/null || true)
+  if [[ "$bytes" =~ ^[0-9]+$ ]] && [ "$bytes" -gt 0 ]; then
+    echo $(( (bytes + gib - 1) / gib ))
+  else
+    echo 0
+  fi
+}
+
 # Returns a conservative usable memory budget in GiB. On multi-GPU Linux machines we
 # deliberately use the smallest GPU: it is safer to select a model that runs
 # on every advertised device than to assume the runtime will shard it.
 detect_model_memory_gb() {
   case "$GPU" in
     macos)
-      local bytes physical_gb reserve_gb
-      bytes=$(sysctl -n hw.memsize 2>/dev/null || true)
-      if [[ "$bytes" =~ ^[0-9]+$ ]]; then
-        physical_gb=$(( bytes / 1024 / 1024 / 1024 ))
+      local physical_gb reserve_gb
+      physical_gb=$(detect_macos_memory_gb)
+      if [ "$physical_gb" -gt 0 ]; then
         reserve_gb=$(( physical_gb / 4 ))
         if [ "$reserve_gb" -lt 4 ]; then
           reserve_gb=4
@@ -459,6 +561,9 @@ case "$GPU" in
     ;;
   macos)
     COMPOSE_FILE="docker-compose.macos.yml"
+    GPU_MODEL="Apple Silicon"
+    VRAM_GB="$(detect_macos_memory_gb)"
+    HOST_PLATFORM="darwin/arm64"
     ;;
   *)
     err "unsupported --gpu value: $GPU (expected nvidia / rocm / macos)"
@@ -478,7 +583,7 @@ if [ -z "$NODE_ID" ]; then
   printf '%bEVERYAPI_NODE_ID%b (from the dashboard /seller/edge → New node): ' "$BOLD" "$RESET"
   read -r NODE_ID
 fi
-if [ -z "$TOKEN" ]; then
+if [ -z "$TOKEN" ] && [ "$UPGRADE_MODE" -eq 0 ]; then
   printf '%bEVERYAPI_REGISTRATION_TOKEN%b (one-time, from the same dashboard step): ' "$BOLD" "$RESET"
   read -r TOKEN
 fi
@@ -490,6 +595,12 @@ case "$NODE_ID" in
   ''|*[!0-9]*) err "node id must be a positive integer (got: $NODE_ID)"; exit 1 ;;
 esac
 case "$TOKEN" in
+  '')
+    if [ "$UPGRADE_MODE" -eq 0 ]; then
+      err "registration token has an invalid format"
+      exit 1
+    fi
+    ;;
   edgert_*)
     if [[ ! "$TOKEN" =~ ^edgert_[A-Za-z0-9_-]+$ ]]; then
       err "token contains invalid characters"
@@ -514,20 +625,7 @@ fi
 
 # ----- Materialise bundle ----------------------------------------------------
 
-if [ -d "$INSTALL_DIR" ]; then
-  if [ ! -d "$INSTALL_DIR/.git" ]; then
-    err "refusing existing non-EveryAPI directory: $INSTALL_DIR"
-    exit 1
-  fi
-  EXISTING_REMOTE=$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)
-  case "$EXISTING_REMOTE" in
-    "$BUNDLE_SOURCE"|"$BUNDLE_SOURCE.git") ;;
-    *)
-      err "refusing existing non-EveryAPI directory: $INSTALL_DIR"
-      err "unexpected git origin: ${EXISTING_REMOTE:-<none>}"
-      exit 1
-      ;;
-  esac
+if [ "$EXISTING_INSTALL" -eq 1 ]; then
   if [ "$FORCE" -eq 1 ]; then
     info "--force requested; refreshing the verified checkout without deleting it"
   fi
@@ -564,7 +662,11 @@ EVERYAPI_REGISTRATION_TOKEN=$TOKEN
 EVERYAPI_NODE_NAME=$NODE_NAME
 EVERYAPI_GPU_MODEL=$GPU_MODEL
 EVERYAPI_VRAM_GB=$VRAM_GB
+EVERYAPI_PLATFORM=$HOST_PLATFORM
 EVERYAPI_MODEL_PATH=$HOME/.everyapi/edge
+EVERYAPI_COUNTRY=$COUNTRY
+EVERYAPI_WORKLOADS=$WORKLOADS
+EVERYAPI_CONSOLE_PORT=$CONSOLE_PORT
 EOF
 chmod 600 "$TMP_ENV"
 mv "$TMP_ENV" .env
@@ -596,6 +698,18 @@ if ! wait_for_agent_connection "$AGENT_CONTAINER_ID" "$AGENT_LOG_SINCE"; then
   exit 1
 fi
 clear_consumed_registration_token
+
+if [ "$UPGRADE_MODE" -eq 1 ] && [ "$MODEL_EXPLICIT" -eq 0 ]; then
+  ok "existing node upgraded; its persisted model library is unchanged"
+  ok "done"
+  echo
+  echo "Next steps:"
+  echo "  • Open the EveryAPI dashboard → Seller → Edge nodes"
+  echo "    The existing node is Online with refreshed host hardware metadata"
+  echo "  • Logs:"
+  echo "      docker compose -f $COMPOSE_FILE logs -f agent"
+  return 0
+fi
 
 if ! prepare_model; then
   err "agent remains running, but no verified model is available"

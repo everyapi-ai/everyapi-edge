@@ -91,6 +91,32 @@ func TestPullOllamaModelSurfacesHTTPError(t *testing.T) {
 	}
 }
 
+func TestPullOllamaModelSurfacesStreamingError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"error":"proxyconnect tcp: connection refused"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	err := pullOllamaModel(context.Background(), srv.URL, "qwen3")
+	if err == nil || !strings.Contains(err.Error(), "proxyconnect tcp: connection refused") {
+		t.Fatalf("streaming pull error = %v", err)
+	}
+}
+
+func TestPullOllamaModelRequiresTerminalSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"pulling manifest"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	err := pullOllamaModel(context.Background(), srv.URL, "qwen3")
+	if err == nil || !strings.Contains(err.Error(), "without success") {
+		t.Fatalf("truncated pull error = %v", err)
+	}
+}
+
 // TestPullRecommendedModelsCapsAndContinues pins the two safety properties
 // of the batch path: the gateway cannot make the agent pull an unbounded
 // number of models onto someone else's disk, and one failing model does not
