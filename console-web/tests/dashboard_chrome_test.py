@@ -1231,6 +1231,130 @@ def test_installed_model_library_shows_catalog_provider_and_multimodal_type() ->
     assert cells[:4] == ["Google", "gemma3:27b", "Installed", "Multimodal"]
 
 
+def test_installed_model_library_contains_overflow_and_keeps_metadata_on_one_line() -> None:
+    """Dense model metadata scrolls inside its panel without wrapping or widening the page."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
+    installed = json.dumps({"models": [
+        {
+            "name": "qwen3:14b",
+            "size": 9_300_000_000,
+            "details": {"parameter_size": "14.8B", "quantization_level": "Q4_K_M"},
+        },
+        {
+            "name": "gemma3:27b",
+            "size": 17_400_000_000,
+            "details": {"parameter_size": "27.4B", "quantization_level": "Q4_K_M"},
+        },
+    ]})
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        captures = []
+        for viewport in (
+            {"width": 1440, "height": 960},
+            {"width": 1536, "height": 960},
+            {"width": 1024, "height": 768},
+            {"width": 390, "height": 844},
+        ):
+            context = browser.new_context(viewport=viewport, locale="zh-CN")
+            page = context.new_page()
+            page.route("**/api/models", lambda route: route.fulfill(
+                status=200, content_type="application/json", body=installed,
+            ))
+            page.route("**/api/runtime", lambda route: route.fulfill(
+                status=200, content_type="application/json", body='{"version":"0.0.0","models":[]}',
+            ))
+            page.goto(f"{base}/models", wait_until="domcontentloaded")
+            row = page.locator('[data-installed-model="qwen3:14b"]')
+            row.wait_for()
+            capture = page.evaluate("""() => {
+                const row = document.querySelector('[data-installed-model="qwen3:14b"]')
+                const scroller = row.closest('table').parentElement
+                return {
+                    viewportWidth: window.innerWidth,
+                    documentWidth: document.documentElement.scrollWidth,
+                    scrollerClientWidth: scroller.clientWidth,
+                    scrollerScrollWidth: scroller.scrollWidth,
+                    scrollerLabel: scroller.getAttribute('aria-label'),
+                    scrollerTabIndex: scroller.tabIndex,
+                    whiteSpace: [...row.querySelectorAll('td')]
+                        .slice(0, 6)
+                        .map((cell) => getComputedStyle(cell).whiteSpace),
+                }
+            }""")
+            capture["hintCount"] = page.get_by_text("左右滑动查看全部模型信息").count()
+            captures.append(capture)
+            context.close()
+        browser.close()
+
+    assert all(capture["documentWidth"] <= capture["viewportWidth"] for capture in captures)
+    assert all(
+        capture["scrollerScrollWidth"] <= capture["scrollerClientWidth"]
+        for capture in captures[:2]
+    )
+    assert all(
+        capture["scrollerScrollWidth"] > capture["scrollerClientWidth"]
+        for capture in captures[2:]
+    )
+    assert all(capture["hintCount"] == 1 for capture in captures[2:])
+    assert all(capture["scrollerLabel"] == "已安装模型表格" for capture in captures)
+    assert all(capture["scrollerTabIndex"] == 0 for capture in captures)
+    assert all(
+        white_space == "nowrap"
+        for capture in captures
+        for white_space in capture["whiteSpace"]
+    )
+
+
+def test_mobile_wide_tables_disclose_and_label_horizontal_scrolling() -> None:
+    """Hidden columns stay discoverable to touch and keyboard users."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
+    installed = json.dumps({"models": [{
+        "name": "qwen3:14b",
+        "size": 9_300_000_000,
+        "details": {"parameter_size": "14.8B", "quantization_level": "Q4_K_M"},
+    }]})
+    requests = json.dumps([{
+        "id": "req-local-001",
+        "model": "qwen3:14b",
+        "path": "/v1/chat/completions",
+        "consumer": "local-verification-consumer-with-a-long-name",
+        "started_at": "2026-08-04T07:00:00Z",
+        "completed_at": "2026-08-04T07:00:01Z",
+    }])
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(viewport={"width": 390, "height": 844}, locale="zh-CN")
+        page = context.new_page()
+        page.set_default_timeout(2_000)
+        page.route("**/api/models", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=installed,
+        ))
+        page.route("**/api/runtime", lambda route: route.fulfill(
+            status=200, content_type="application/json", body='{"version":"0.0.0","models":[]}',
+        ))
+        page.route("**/api/requests", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=requests,
+        ))
+
+        page.goto(f"{base}/models", wait_until="domcontentloaded")
+        model_hint = page.get_by_text("左右滑动查看全部模型信息")
+        model_hint.wait_for()
+        model_scroller = page.get_by_role("region", name="已安装模型表格")
+        model_tab_index = model_scroller.get_attribute("tabindex")
+
+        page.goto(f"{base}/traffic", wait_until="domcontentloaded")
+        traffic_hint = page.get_by_text("左右滑动查看全部请求信息")
+        traffic_hint.wait_for()
+        traffic_scroller = page.get_by_role("region", name="最近请求表格")
+        traffic_tab_index = traffic_scroller.get_attribute("tabindex")
+        browser.close()
+
+    assert model_tab_index == "0"
+    assert traffic_tab_index == "0"
+
+
 def test_installed_model_library_filters_by_provider_type_and_name() -> None:
     """A busy local library can be narrowed without changing model state."""
     base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")

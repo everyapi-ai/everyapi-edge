@@ -450,7 +450,7 @@ export const ModelsPage = () => {
   return (
     <div className='flex flex-col gap-5'>
       <PageHeader title={t('models.title')} description={t('models.description')} />
-      <div className='grid gap-4 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]'>
+      <div className='grid gap-4 min-[1800px]:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]'>
         <Panel title={t('models.pull')}>
           {overview.isPending ? (
             <p className='text-sm text-muted'>{t('models.recommendationsLoading')}</p>
@@ -633,7 +633,7 @@ export const ModelsPage = () => {
           <PullProgress />
         </Panel>
 
-        <Panel title={t('models.title')}>
+        <Panel title={t('models.title')} className='min-w-0'>
           <QueryState
             isPending={models.isPending}
             isError={models.isError}
@@ -705,8 +705,14 @@ export const ModelsPage = () => {
             <p data-installed-model-count className='mb-3 text-xs text-faint'>
               {t('models.filterCount', { count: filteredModels.length })}
             </p>
-            <div className='overflow-x-auto'>
-              <table className='w-full min-w-[560px] border-collapse text-sm'>
+            <p className='mb-2 text-xs text-faint xl:hidden'>{t('models.tableScrollHint')}</p>
+            <div
+              role='region'
+              aria-label={t('models.tableLabel')}
+              tabIndex={0}
+              className='max-w-full overflow-x-auto rounded-sm focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none'
+            >
+              <table className='w-full min-w-[800px] border-collapse text-sm'>
                 <thead>
                   <tr>
                     {[
@@ -720,7 +726,7 @@ export const ModelsPage = () => {
                       <th
                         key={heading}
                         scope='col'
-                        className='border-b border-line px-3 py-2.5 text-left text-xs font-medium text-faint'
+                        className='border-b border-line px-3 py-2.5 text-left text-xs font-medium whitespace-nowrap text-faint'
                       >
                         {heading}
                       </th>
@@ -731,13 +737,16 @@ export const ModelsPage = () => {
                 <tbody>
                   {filteredModels.map((model) => (
                     <tr key={model.name} data-installed-model={model.name}>
-                      <td data-model-provider className='border-b border-line px-3 py-3 text-ink-2'>
+                      <td
+                        data-model-provider
+                        className='border-b border-line px-3 py-3 whitespace-nowrap text-ink-2'
+                      >
                         {providerFor(model.name)}
                       </td>
-                      <td className='border-b border-line px-3 py-3 font-medium text-ink'>
+                      <td className='border-b border-line px-3 py-3 font-medium whitespace-nowrap text-ink'>
                         {model.name}
                       </td>
-                      <td className='border-b border-line px-3 py-3 text-muted'>
+                      <td className='border-b border-line px-3 py-3 whitespace-nowrap text-muted'>
                         <span
                           data-model-residency
                           className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${loadedModels.has(model.name) ? 'bg-accent/14 text-accent' : 'bg-surface-2 text-ink-dim'}`}
@@ -747,13 +756,16 @@ export const ModelsPage = () => {
                             : t('models.installed')}
                         </span>
                       </td>
-                      <td data-model-kind className='border-b border-line px-3 py-3 text-muted'>
+                      <td
+                        data-model-kind
+                        className='border-b border-line px-3 py-3 whitespace-nowrap text-muted'
+                      >
                         {t(typeKey[modelTypeFor(model.name)])}
                       </td>
-                      <td className='border-b border-line px-3 py-3 text-ink-2'>
+                      <td className='border-b border-line px-3 py-3 whitespace-nowrap text-ink-2'>
                         {formatGigabytes(model.size)}
                       </td>
-                      <td className='border-b border-line px-3 py-3 text-muted'>
+                      <td className='border-b border-line px-3 py-3 whitespace-nowrap text-muted'>
                         {model.details?.parameter_size ?? t('common.unknown')} /{' '}
                         {model.details?.quantization_level ?? t('common.unknown')}
                       </td>

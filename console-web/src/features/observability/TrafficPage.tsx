@@ -116,7 +116,13 @@ export const TrafficPage = () => {
           <p data-traffic-count className='mb-3 text-xs text-faint'>
             {t('traffic.matching', { count: filteredRequests.length })}
           </p>
-          <div className='overflow-x-auto'>
+          <p className='mb-2 text-xs text-faint xl:hidden'>{t('traffic.tableScrollHint')}</p>
+          <div
+            role='region'
+            aria-label={t('traffic.tableLabel')}
+            tabIndex={0}
+            className='overflow-x-auto rounded-sm focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none'
+          >
             <table className='w-full min-w-[860px] border-collapse text-sm'>
               <thead>
                 <tr>
