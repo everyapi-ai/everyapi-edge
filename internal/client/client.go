@@ -1,12 +1,6 @@
-// Package client owns the agent's WebSocket connection to the
-// EveryAPI gateway: opens the connection, completes Auth, runs the
-// read/write loops until terminated, and surfaces inbound Request
-// frames to a Handler (the forwarder in internal/forward, wired by
-// main).
+// Package client owns the agent's WebSocket connection to the EveryAPI gateway: opens the connection, completes Auth, runs the read/write loops until terminated, and surfaces inbound Request frames to a Handler (the forwarder in internal/forward, wired by main).
 //
-// One Client = one logical "connect or die"; main.go wraps it in the
-// reconnect loop so a transient network blip doesn't take the agent
-// down.
+// One Client = one logical "connect or die"; main.go wraps it in the reconnect loop so a transient network blip doesn't take the agent down.
 package client
 
 import (
@@ -32,99 +26,52 @@ import (
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 )
 
-// Config is what main.go passes in. Everything is required except
-// HTTPClient (defaulted) and Handler (allowed nil for tests).
+// Config is what main.go passes in. Everything is required except HTTPClient (defaulted) and Handler (allowed nil for tests).
 type Config struct {
-	// GatewayURL — base URL of the EveryAPI gateway, e.g.
-	// https://api.everyapi.ai. The agent derives WS / HTTP endpoints
-	// off this base (wss host for /edge/connect, https for the
-	// challenge endpoint).
+	// GatewayURL — base URL of the EveryAPI gateway, e.g. https://api.everyapi.ai. The agent derives WS / HTTP endpoints off this base (wss host for /edge/connect, https for the challenge endpoint).
 	GatewayURL string
-	// NodeID is the EdgeNode primary key the gateway minted when
-	// the seller registered through the dashboard.
+	// NodeID is the EdgeNode primary key the gateway minted when the seller registered through the dashboard.
 	NodeID int64
-	// RegistrationToken is the one-time secret returned with the
-	// node row. Used on FIRST connect only; subsequent connects
-	// rely on the Ed25519 identity. Empty after the first
-	// successful Welcome.
+	// RegistrationToken is the one-time secret returned with the node row. Used on FIRST connect only; subsequent connects rely on the Ed25519 identity. Empty after the first successful Welcome.
 	RegistrationToken string
 	// Identity is the loaded Ed25519 keypair (see internal/identity).
 	Identity identity.Decoded
-	// Meta is the snapshot the agent reports on every connect —
-	// hardware, location, currently-installed models, agent version.
+	// Meta is the snapshot the agent reports on every connect — hardware, location, currently-installed models, agent version.
 	Meta protocol.NodeMeta
-	// Handler is invoked for every inbound Request frame. The
-	// returned io.Reader streams response chunks; closing it signals
-	// the agent that the request is done. A nil Handler drops
-	// Request frames on the floor (test-only).
+	// Handler is invoked for every inbound Request frame. The returned io.Reader streams response chunks; closing it signals the agent that the request is done. A nil Handler drops Request frames on the floor (test-only).
 	Handler RequestHandler
-	// OnConnected runs immediately after the gateway accepts the Auth
-	// frame and sends Welcome. Callers must return promptly; it is used
-	// by the agent entrypoint to make a successful first registration
-	// observable to its installer.
+	// OnConnected runs immediately after the gateway accepts the Auth frame and sends Welcome. Callers must return promptly; it is used by the agent entrypoint to make a successful first registration observable to its installer.
 	OnConnected func()
-	// HTTPClient is used for the challenge endpoint. Defaulted in
-	// New() if nil; injectable for tests.
+	// HTTPClient is used for the challenge endpoint. Defaulted in New() if nil; injectable for tests.
 	HTTPClient *http.Client
-	// MaxConcurrentRequests caps how many inbound Request frames the
-	// agent forwards at once. A buggy or hostile gateway can stream
-	// Request frames faster than the local GPU drains them; without a
-	// cap each frame would spawn an unbounded goroutine + HTTP call to
-	// Ollama (resource exhaustion on the supplier host). Requests past
-	// the cap are rejected immediately with a "node_busy" Error frame
-	// (the gateway retries them on another channel/node). Defaulted in
-	// New() if <= 0.
+	// MaxConcurrentRequests caps how many inbound Request frames the agent forwards at once. A buggy or hostile gateway can stream Request frames faster than the local GPU drains them; without a cap each frame would spawn an unbounded goroutine + HTTP call to Ollama (resource exhaustion on the supplier host). Requests past the cap are rejected immediately with a "node_busy" Error frame (the gateway retries them on another channel/node). Defaulted in New() if <= 0.
 	MaxConcurrentRequests int
-	// Log receives agent diagnostics that would otherwise only go to stderr.
-	// main routes this into both docker logs and the supplier-local console.
-	// OllamaURL is the local model runtime, used only by the auto-pull
-	// path: the gateway's Welcome frame names models this node is missing
-	// from its owner's declared target set, and the agent pulls them here.
-	// Empty disables auto-pull.
+	// Log receives agent diagnostics that would otherwise only go to stderr. main routes this into both docker logs and the supplier-local console. OllamaURL is the local model runtime, used only by the auto-pull path: the gateway's Welcome frame names models this node is missing from its owner's declared target set, and the agent pulls them here. Empty disables auto-pull.
 	OllamaURL string
-	// VRAMTotalGB is the scheduler budget discovered at agent startup. It is
-	// sent with every heartbeat so the gateway can preserve a runtime safety
-	// reserve when it balances requests across nodes.
+	// VRAMTotalGB is the scheduler budget discovered at agent startup. It is sent with every heartbeat so the gateway can preserve a runtime safety reserve when it balances requests across nodes.
 	VRAMTotalGB int
 
 	Log func(level, message string)
-	// Settlement receives gateway-committed seller receipts. It must be
-	// idempotent because reconnect replay can deliver a receipt twice.
+	// Settlement receives gateway-committed seller receipts. It must be idempotent because reconnect replay can deliver a receipt twice.
 	Settlement func(protocol.SettlementBody)
-	// Update runs the fixed latest-stable updater. The gateway controls only
-	// when it runs; it cannot supply a version, URL, checksum, or command.
+	// Update runs the fixed latest-stable updater. The gateway controls only when it runs; it cannot supply a version, URL, checksum, or command.
 	Update func(context.Context, func(protocol.UpdateStatusBody)) error
-	// ControlHandler executes administrator-only Control Room operations. It is
-	// optional so older agents reject remote management explicitly.
+	// ControlHandler executes administrator-only Control Room operations. It is optional so older agents reject remote management explicitly.
 	ControlHandler ControlHandler
 }
 
-// RequestHandler is what main.go installs to forward inbound
-// requests. The agent gives it the parsed RequestBody and a sender
-// that emits Chunk frames; the handler returns a Done frame body
-// when finished or an Error if forwarding failed. Implementations
-// run in their own goroutine so concurrent requests don't serialise.
+// RequestHandler is what main.go installs to forward inbound requests. The agent gives it the parsed RequestBody and a sender that emits Chunk frames; the handler returns a Done frame body when finished or an Error if forwarding failed. Implementations run in their own goroutine so concurrent requests don't serialise.
 //
-// ctx is the session context: it is cancelled when the WS session
-// ends (clean shutdown or read error), so a long-running forward can
-// abort its in-flight upstream call instead of leaking past the
-// connection it belongs to.
+// ctx is the session context: it is cancelled when the WS session ends (clean shutdown or read error), so a long-running forward can abort its in-flight upstream call instead of leaking past the connection it belongs to.
 type RequestHandler func(ctx context.Context, req protocol.RequestBody, send func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody)
 
-// ControlHandler returns one bounded API response for an allowlisted Control
-// Room operation. It is deliberately distinct from inference RequestHandler.
+// ControlHandler returns one bounded API response for an allowlisted Control Room operation. It is deliberately distinct from inference RequestHandler.
 type ControlHandler func(ctx context.Context, req protocol.ControlRequestBody) (protocol.ChunkBody, *protocol.ErrorBody)
 
-// defaultMaxConcurrentRequests bounds in-flight forwarded requests
-// when Config.MaxConcurrentRequests is unset. A single BYO-GPU node
-// rarely benefits from deep concurrency (Ollama serialises on the
-// GPU anyway); the cap exists to stop a frame flood from spawning
-// unbounded goroutines, not to maximise throughput.
+// defaultMaxConcurrentRequests bounds in-flight forwarded requests when Config.MaxConcurrentRequests is unset. A single BYO-GPU node rarely benefits from deep concurrency (Ollama serialises on the GPU anyway); the cap exists to stop a frame flood from spawning unbounded goroutines, not to maximise throughput.
 const defaultMaxConcurrentRequests = 16
 
-// The handshake challenge is a compact JSON envelope containing one nonce.
-// Keep a generous ceiling while preventing a hostile gateway or proxy from
-// growing the edge agent without bound before the WebSocket session starts.
+// The handshake challenge is a compact JSON envelope containing one nonce. Keep a generous ceiling while preventing a hostile gateway or proxy from growing the edge agent without bound before the WebSocket session starts.
 const maxChallengeResponseBytes int64 = 1 << 20
 
 func readChallengeResponse(body io.Reader) ([]byte, error) {
@@ -138,13 +85,7 @@ func readChallengeResponse(body io.Reader) ([]byte, error) {
 	return data, nil
 }
 
-// TerminalDisconnectError is the typed wrapper for a gateway-side
-// Disconnect frame whose Code marks the session as unrecoverable
-// (currently: node_revoked). The reconnect loop in main.go checks
-// `errors.As(err, &*TerminalDisconnectError{})` and exits cleanly
-// instead of backing off — the operator's intent on the server side
-// (delete the node row) shouldn't be undone by a tight retry loop
-// on the supplier side.
+// TerminalDisconnectError is the typed wrapper for a gateway-side Disconnect frame whose Code marks the session as unrecoverable (currently: node_revoked). The reconnect loop in main.go checks `errors.As(err, &*TerminalDisconnectError{})` and exits cleanly instead of backing off — the operator's intent on the server side (delete the node row) shouldn't be undone by a tight retry loop on the supplier side.
 type TerminalDisconnectError struct {
 	Code   string
 	Reason string
@@ -154,55 +95,29 @@ func (e *TerminalDisconnectError) Error() string {
 	return "gateway disconnect (terminal): " + e.Code + ": " + e.Reason
 }
 
-// Client is a single WebSocket session. New() returns one not yet
-// connected; Run() connects, authenticates, and blocks until the
-// session ends.
+// Client is a single WebSocket session. New() returns one not yet connected; Run() connects, authenticates, and blocks until the session ends.
 type Client struct {
 	cfg Config
 
-	// closeOnce wraps the conn-shutdown + done-fire path so multiple
-	// callers (Run's defer, the reader/writer loop's own error
-	// returns, and any external Close()) can race in without
-	// double-closing the conn or done channel.
+	// closeOnce wraps the conn-shutdown + done-fire path so multiple callers (Run's defer, the reader/writer loop's own error returns, and any external Close()) can race in without double-closing the conn or done channel.
 	closeOnce sync.Once
 	conn      *websocket.Conn
 	sendQ     chan protocol.Frame
-	// done is closed exactly once by closeConn. Senders (SendLog,
-	// sendFrame) select on it so a concurrent close doesn't panic
-	// them with "send on closed channel" — instead the send arm
-	// loses the race and the sender exits via the done arm.
-	// writerLoop also selects on it to exit cleanly after closeConn
-	// fires from outside its own error path.
+	// done is closed exactly once by closeConn. Senders (SendLog, sendFrame) select on it so a concurrent close doesn't panic them with "send on closed channel" — instead the send arm loses the race and the sender exits via the done arm. writerLoop also selects on it to exit cleanly after closeConn fires from outside its own error path.
 	done chan struct{}
 
-	// sem bounds concurrent handleRequest goroutines (buffered to
-	// cfg.MaxConcurrentRequests). readerLoop try-acquires a slot before
-	// spawning a handler; on a full pool dispatch rejects the request
-	// with a node_busy Error frame instead of parking the reader (see
-	// dispatch for why blocking here would tear the session down).
+	// sem bounds concurrent handleRequest goroutines (buffered to cfg.MaxConcurrentRequests). readerLoop try-acquires a slot before spawning a handler; on a full pool dispatch rejects the request with a node_busy Error frame instead of parking the reader (see dispatch for why blocking here would tear the session down).
 	sem chan struct{}
-	// wg tracks in-flight handlers so Run can drain them before
-	// returning — combined with session-ctx cancellation, no handler
-	// (or its upstream HTTP call) outlives the session it belongs to.
+	// wg tracks in-flight handlers so Run can drain them before returning — combined with session-ctx cancellation, no handler (or its upstream HTTP call) outlives the session it belongs to.
 	wg sync.WaitGroup
-	// inflight is the live handler count, surfaced to the gateway in
-	// each heartbeat (HeartbeatBody.ActiveReqs) so it has back-pressure
-	// visibility into how loaded this node is.
+	// inflight is the live handler count, surfaced to the gateway in each heartbeat (HeartbeatBody.ActiveReqs) so it has back-pressure visibility into how loaded this node is.
 	inflight atomic.Int64
 
-	// welcomeReceived flips true after the gateway accepts the Auth
-	// frame and we successfully parse a Welcome back. The reconnect
-	// loop in main.go reads this via WelcomeReceived() to decide
-	// whether the in-process RegistrationToken has been consumed
-	// server-side — without that gate, an Auth rejection (token
-	// already used, wrong node id, signature failure) would still
-	// burn the token in main's outer loop and brick the agent.
+	// welcomeReceived flips true after the gateway accepts the Auth frame and we successfully parse a Welcome back. The reconnect loop in main.go reads this via WelcomeReceived() to decide whether the in-process RegistrationToken has been consumed server-side — without that gate, an Auth rejection (token already used, wrong node id, signature failure) would still burn the token in main's outer loop and brick the agent.
 	welcomeReceived atomic.Bool
 }
 
-// WelcomeReceived reports whether this Client successfully completed
-// the WS handshake. False until the gateway's Welcome frame is read;
-// stays false if the connection terminated during/before Auth.
+// WelcomeReceived reports whether this Client successfully completed the WS handshake. False until the gateway's Welcome frame is read; stays false if the connection terminated during/before Auth.
 func (c *Client) WelcomeReceived() bool {
 	return c.welcomeReceived.Load()
 }
@@ -232,33 +147,17 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// Run connects, authenticates, and runs the session. Returns when the
-// connection ends — nil for a clean shutdown, non-nil for any error.
-// Callers re-invoke after a backoff for the reconnect loop.
+// Run connects, authenticates, and runs the session. Returns when the connection ends — nil for a clean shutdown, non-nil for any error. Callers re-invoke after a backoff for the reconnect loop.
 func (c *Client) Run(ctx context.Context) error {
 	if err := c.connectAndAuth(ctx); err != nil {
 		return err
 	}
 	c.log("info", "gateway session authenticated")
-	// sessionCtx cancels when Run returns for ANY reason (read error,
-	// write error, or parent cancel). In-flight handlers derive their
-	// upstream-call deadline from it, so a gateway-side disconnect
-	// aborts their HTTP work instead of leaving it to run against the
-	// local Ollama after the session is gone.
+	// sessionCtx cancels when Run returns for ANY reason (read error, write error, or parent cancel). In-flight handlers derive their upstream-call deadline from it, so a gateway-side disconnect aborts their HTTP work instead of leaving it to run against the local Ollama after the session is gone.
 	sessionCtx, cancel := context.WithCancel(ctx)
-	// readerDone closes only after readerLoop has fully returned.
-	// Shutdown MUST wait on it before wg.Wait(): every wg.Add happens
-	// on the reader goroutine (inside dispatch), so starting wg.Wait
-	// while the reader is still running races Add against Wait —
-	// either a "sync: WaitGroup misuse" panic or a Wait that returns
-	// while a freshly-spawned handler is still in flight.
+	// readerDone closes only after readerLoop has fully returned. Shutdown MUST wait on it before wg.Wait(): every wg.Add happens on the reader goroutine (inside dispatch), so starting wg.Wait while the reader is still running races Add against Wait — either a "sync: WaitGroup misuse" panic or a Wait that returns while a freshly-spawned handler is still in flight.
 	readerDone := make(chan struct{})
-	// Defers run LIFO: closeConn first (close done + conn → unblock a
-	// parked ReadMessage and any parked sender), then wait for the
-	// reader to exit (after which no further wg.Add can happen), then
-	// cancel (abort in-flight upstream calls), then wg.Wait (drain
-	// handlers) so Run never returns while goroutines it spawned are
-	// still touching the connection.
+	// Defers run LIFO: closeConn first (close done + conn → unblock a parked ReadMessage and any parked sender), then wait for the reader to exit (after which no further wg.Add can happen), then cancel (abort in-flight upstream calls), then wg.Wait (drain handlers) so Run never returns while goroutines it spawned are still touching the connection.
 	defer c.wg.Wait()
 	defer cancel()
 	defer func() { <-readerDone }()
@@ -268,9 +167,7 @@ func (c *Client) Run(ctx context.Context) error {
 	writeErr := make(chan error, 1)
 
 	go func() {
-		// readErr is buffered, so the send completes even when Run is
-		// already past its select; readerDone then closes strictly
-		// after readerLoop (and any dispatch it was inside) returned.
+		// readErr is buffered, so the send completes even when Run is already past its select; readerDone then closes strictly after readerLoop (and any dispatch it was inside) returned.
 		defer close(readerDone)
 		readErr <- c.readerLoop(sessionCtx)
 	}()
@@ -286,8 +183,7 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
-// connectAndAuth dials the WS, sends the first Auth frame, waits for
-// Welcome. On reconnect, fetches a challenge first and signs it.
+// connectAndAuth dials the WS, sends the first Auth frame, waits for Welcome. On reconnect, fetches a challenge first and signs it.
 func (c *Client) connectAndAuth(ctx context.Context) error {
 	authBody := protocol.AuthBody{
 		NodeID:          c.cfg.NodeID,
@@ -361,16 +257,10 @@ func (c *Client) connectAndAuth(ctx context.Context) error {
 	_ = conn.SetReadDeadline(time.Time{})
 
 	c.conn = conn
-	// Welcome acknowledged — the registration token (if any) has now
-	// been consumed server-side. WelcomeReceived() gates the
-	// reconnect loop's token burn so an Auth rejection earlier in the
-	// handshake (before Welcome) doesn't lose the token for retry.
+	// Welcome acknowledged — the registration token (if any) has now been consumed server-side. WelcomeReceived() gates the reconnect loop's token burn so an Auth rejection earlier in the handshake (before Welcome) doesn't lose the token for retry.
 	c.welcomeReceived.Store(true)
 
-	// Auto-pull whatever the gateway says this node is missing from its
-	// owner's declared target set. Off the handshake goroutine: a pull runs
-	// for minutes to hours, and the session must start serving buyer
-	// traffic with the models already present rather than waiting.
+	// Auto-pull whatever the gateway says this node is missing from its owner's declared target set. Off the handshake goroutine: a pull runs for minutes to hours, and the session must start serving buyer traffic with the models already present rather than waiting.
 	var welcomeBody protocol.WelcomeBody
 	if err := json.Unmarshal(welcome.Body, &welcomeBody); err == nil && len(welcomeBody.RecommendedModels) > 0 {
 		go c.pullRecommendedModels(ctx, welcomeBody.RecommendedModels)
@@ -382,10 +272,7 @@ func (c *Client) connectAndAuth(ctx context.Context) error {
 	return nil
 }
 
-// fetchChallenge POSTs to /edge/handshake/challenge and returns the
-// base64 nonce. Short timeout — if the gateway is slow here we'd
-// rather fail fast and let the reconnect loop retry than block the
-// agent for minutes.
+// fetchChallenge POSTs to /edge/handshake/challenge and returns the base64 nonce. Short timeout — if the gateway is slow here we'd rather fail fast and let the reconnect loop retry than block the agent for minutes.
 func (c *Client) fetchChallenge(ctx context.Context) (string, error) {
 	endpoint, err := c.challengeEndpoint()
 	if err != nil {
@@ -428,9 +315,7 @@ func unexpectedHandshakeFrameError() error {
 	return errors.New("unexpected gateway handshake frame")
 }
 
-// readerLoop drains inbound frames, routing Request → Handler,
-// dropping heartbeats (their only job is keeping the read deadline
-// alive).
+// readerLoop drains inbound frames, routing Request → Handler, dropping heartbeats (their only job is keeping the read deadline alive).
 func (c *Client) readerLoop(ctx context.Context) error {
 	_ = c.conn.SetReadDeadline(time.Now().Add(protocol.HeartbeatTimeout))
 	for {
@@ -448,8 +333,7 @@ func (c *Client) readerLoop(ctx context.Context) error {
 
 		var frame protocol.Frame
 		if err := json.Unmarshal(raw, &frame); err != nil {
-			// Malformed inbound from the gateway is a bug worth
-			// surfacing but not session-terminating.
+			// Malformed inbound from the gateway is a bug worth surfacing but not session-terminating.
 			c.log("warn", "malformed inbound frame from gateway")
 			continue
 		}
@@ -467,28 +351,11 @@ func (c *Client) readerLoop(ctx context.Context) error {
 		case protocol.FrameDisconnect:
 			var body protocol.DisconnectBody
 			if uErr := json.Unmarshal(frame.Body, &body); uErr != nil {
-				// Surface the parse failure on stderr instead of
-				// silently dropping it — a malformed Disconnect body
-				// whose Code field doesn't decode would otherwise fall
-				// to the transient "gateway disconnect" path with an
-				// empty code and the agent would reconnect forever
-				// against a gateway that meant to send a terminal
-				// signal. Treat unparseable Disconnect as transient
-				// (return a generic error) so the next reconnect can
-				// fetch a fresh, parseable frame; but at least the
-				// operator sees the parse error in docker logs.
-				// Do not copy frame.Body into a local log: a malformed remote
-				// peer controls it, and the Control Room must not become a
-				// secret-bearing frame dump.
+				// Surface the parse failure on stderr instead of silently dropping it — a malformed Disconnect body whose Code field doesn't decode would otherwise fall to the transient "gateway disconnect" path with an empty code and the agent would reconnect forever against a gateway that meant to send a terminal signal. Treat unparseable Disconnect as transient (return a generic error) so the next reconnect can fetch a fresh, parseable frame; but at least the operator sees the parse error in docker logs. Do not copy frame.Body into a local log: a malformed remote peer controls it, and the Control Room must not become a secret-bearing frame dump.
 				c.log("warn", "malformed Disconnect frame from gateway")
 				return errors.New("malformed gateway disconnect frame")
 			}
-			// Terminal codes propagate as typed errors so
-			// runWithReconnect in main.go can stop the reconnect
-			// loop instead of treating them like a generic blip.
-			// Everything else collapses into a generic
-			// "gateway disconnect" wrap and the outer loop retries
-			// with backoff.
+			// Terminal codes propagate as typed errors so runWithReconnect in main.go can stop the reconnect loop instead of treating them like a generic blip. Everything else collapses into a generic "gateway disconnect" wrap and the outer loop retries with backoff.
 			if body.Code == protocol.DisconnectCodeNodeRevoked {
 				return &TerminalDisconnectError{Code: body.Code, Reason: "node revoked server-side"}
 			}
@@ -540,43 +407,17 @@ func (c *Client) handleSettlement(body json.RawMessage) {
 	}
 }
 
-// errReaderClosed is the internal sentinel dispatch returns when the
-// session is closing via the done channel (vs ctx cancellation). The
-// reader loop maps it to a clean (nil) exit, matching the original
-// inline behavior where a done-close meant "stop, no error".
+// errReaderClosed is the internal sentinel dispatch returns when the session is closing via the done channel (vs ctx cancellation). The reader loop maps it to a clean (nil) exit, matching the original inline behavior where a done-close meant "stop, no error".
 var errReaderClosed = errors.New("reader closed")
 
-// errCodeNodeBusy is the Error-frame code dispatch emits when the
-// concurrency pool is full. Gateway-side this surfaces as a pre-chunk
-// FrameError: waitForFirstChunk (relay/channel/edge/adaptor.go) fails
-// the DoRequest before any byte reaches the buyer, the relay wraps it
-// as a retryable 500 (ErrorCodeDoRequestFailed), and shouldRetry
-// reroutes the request to another channel/node.
+// errCodeNodeBusy is the Error-frame code dispatch emits when the concurrency pool is full. Gateway-side this surfaces as a pre-chunk FrameError: waitForFirstChunk (relay/channel/edge/adaptor.go) fails the DoRequest before any byte reaches the buyer, the relay wraps it as a retryable 500 (ErrorCodeDoRequestFailed), and shouldRetry reroutes the request to another channel/node.
 const errCodeNodeBusy = "node_busy"
 
-// dispatch try-acquires a concurrency slot and starts a handler
-// goroutine for an inbound Request frame. It MUST NOT block on a full
-// pool: the WS read deadline (HeartbeatTimeout, 30s) is only refreshed
-// by successful reads, while forwarded requests run for minutes — a
-// reader parked here would let the deadline expire, so the next
-// ReadMessage after a slot freed would fail with an i/o timeout and
-// tear the whole session down (aborting every in-flight handler).
-// Parking would also stall Disconnect-frame handling (incl.
-// node_revoked) for the duration of the saturation. Instead, a full
-// pool rejects the request immediately with a node_busy Error frame
-// and the reader keeps draining; the gateway retries the buyer request
-// on another node (see errCodeNodeBusy). Returns ctx.Err() if the
-// session context was cancelled, errReaderClosed if closeConn fired,
-// or nil once the frame was either handed to a handler or rejected.
+// dispatch try-acquires a concurrency slot and starts a handler goroutine for an inbound Request frame. It MUST NOT block on a full pool: the WS read deadline (HeartbeatTimeout, 30s) is only refreshed by successful reads, while forwarded requests run for minutes — a reader parked here would let the deadline expire, so the next ReadMessage after a slot freed would fail with an i/o timeout and tear the whole session down (aborting every in-flight handler). Parking would also stall Disconnect-frame handling (incl. node_revoked) for the duration of the saturation. Instead, a full pool rejects the request immediately with a node_busy Error frame and the reader keeps draining; the gateway retries the buyer request on another node (see errCodeNodeBusy). Returns ctx.Err() if the session context was cancelled, errReaderClosed if closeConn fired, or nil once the frame was either handed to a handler or rejected.
 func (c *Client) dispatch(ctx context.Context, frame protocol.Frame) error {
 	select {
 	case c.sem <- struct{}{}:
-		// Slot acquired — but if done/ctx became ready at the same
-		// time, select picks an arm at random and can land here
-		// mid-shutdown. Re-check before wg.Add so no handler spawns
-		// once the session is closing (Run's reader-exit barrier makes
-		// a late Add safe for wg.Wait, but the handler would only burn
-		// an upstream call against a dead session).
+		// Slot acquired — but if done/ctx became ready at the same time, select picks an arm at random and can land here mid-shutdown. Re-check before wg.Add so no handler spawns once the session is closing (Run's reader-exit barrier makes a late Add safe for wg.Wait, but the handler would only burn an upstream call against a dead session).
 		select {
 		case <-c.done:
 			<-c.sem
@@ -591,12 +432,7 @@ func (c *Client) dispatch(ctx context.Context, frame protocol.Frame) error {
 	case <-c.done:
 		return errReaderClosed
 	default:
-		// Pool full. Reject without blocking the reader: emitError →
-		// sendFrame would park up to 5s if sendQ is saturated, and a
-		// parked reader stops refreshing the WS read deadline — the very
-		// stall this reject path exists to avoid. Drop the reject if the
-		// queue is full; the gateway's first-chunk wait still times out
-		// and reroutes, so it degrades gracefully.
+		// Pool full. Reject without blocking the reader: emitError → sendFrame would park up to 5s if sendQ is saturated, and a parked reader stops refreshing the WS read deadline — the very stall this reject path exists to avoid. Drop the reject if the queue is full; the gateway's first-chunk wait still times out and reroutes, so it degrades gracefully.
 		c.trySendError(frame.ID, errCodeNodeBusy,
 			fmt.Sprintf("node at max concurrent requests (%d)", c.cfg.MaxConcurrentRequests))
 		return nil
@@ -612,17 +448,14 @@ func (c *Client) dispatch(ctx context.Context, frame protocol.Frame) error {
 	return nil
 }
 
-// handleRequest is the per-request goroutine: parse, hand to the
-// installed Handler, emit Chunk frames as the handler streams, and
-// terminate with Done/Error.
+// handleRequest is the per-request goroutine: parse, hand to the installed Handler, emit Chunk frames as the handler streams, and terminate with Done/Error.
 func (c *Client) handleRequest(ctx context.Context, frame protocol.Frame) {
 	if frame.Type == protocol.FrameControlRequest {
 		c.handleControl(ctx, frame)
 		return
 	}
 	if c.cfg.Handler == nil {
-		// No handler installed — emit an immediate Error so the
-		// gateway doesn't wait HeartbeatTimeout for a dead request.
+		// No handler installed — emit an immediate Error so the gateway doesn't wait HeartbeatTimeout for a dead request.
 		c.emitError(frame.ID, "no_handler", "agent has no request handler installed")
 		return
 	}
@@ -677,19 +510,13 @@ func (c *Client) handleControl(ctx context.Context, frame protocol.Frame) {
 	_ = c.sendFrame(protocol.Frame{Type: protocol.FrameDone, ID: frame.ID, Body: doneJSON})
 }
 
-// emitError centralises the Error-frame send so all error paths
-// produce the same envelope. Used from handler goroutines, where the
-// sendFrame 5s timeout is acceptable.
+// emitError centralises the Error-frame send so all error paths produce the same envelope. Used from handler goroutines, where the sendFrame 5s timeout is acceptable.
 func (c *Client) emitError(reqID, code, msg string) {
 	errJSON, _ := json.Marshal(protocol.ErrorBody{Code: code, Message: msg})
 	_ = c.sendFrame(protocol.Frame{Type: protocol.FrameError, ID: reqID, Body: errJSON})
 }
 
-// trySendError enqueues an Error frame without ever blocking the
-// caller — the node_busy reject path runs on the reader goroutine,
-// where the sendFrame 5s timeout would stall reads and risk the WS
-// read deadline expiring. Mirrors SendLog's non-blocking enqueue:
-// drop the frame if sendQ is full or the client is closing.
+// trySendError enqueues an Error frame without ever blocking the caller — the node_busy reject path runs on the reader goroutine, where the sendFrame 5s timeout would stall reads and risk the WS read deadline expiring. Mirrors SendLog's non-blocking enqueue: drop the frame if sendQ is full or the client is closing.
 func (c *Client) trySendError(reqID, code, msg string) {
 	errJSON, err := json.Marshal(protocol.ErrorBody{Code: code, Message: msg})
 	if err != nil {
@@ -703,15 +530,9 @@ func (c *Client) trySendError(reqID, code, msg string) {
 	}
 }
 
-// SendLog pushes a log line to the gateway. Non-blocking with a tight
-// timeout — agent log hooks must NEVER stall on a slow gateway link
-// or we deadlock our own log writer (a stalled log call holds the
-// stdlib log package's mutex, blocking every other goroutine that
-// tries to log). On full send-queue we drop the line silently and
-// rely on the supplier's local docker logs as the authoritative copy.
+// SendLog pushes a log line to the gateway. Non-blocking with a tight timeout — agent log hooks must NEVER stall on a slow gateway link or we deadlock our own log writer (a stalled log call holds the stdlib log package's mutex, blocking every other goroutine that tries to log). On full send-queue we drop the line silently and rely on the supplier's local docker logs as the authoritative copy.
 //
-// Best-effort by design: this is dashboard convenience, not audit.
-// Lines lost on a flaky WS link don't get retransmitted.
+// Best-effort by design: this is dashboard convenience, not audit. Lines lost on a flaky WS link don't get retransmitted.
 func (c *Client) SendLog(level, msg string) {
 	if c == nil {
 		return
@@ -725,17 +546,9 @@ func (c *Client) SendLog(level, msg string) {
 		return
 	}
 	frame := protocol.Frame{Type: protocol.FrameLog, Body: body}
-	// Non-blocking enqueue — falls back to drop if sendQ is full.
-	// We don't use sendFrame's 5s timeout here because logs fire
-	// from inside the log package's mutex and a 5s stall is a
-	// deadlock vector.
+	// Non-blocking enqueue — falls back to drop if sendQ is full. We don't use sendFrame's 5s timeout here because logs fire from inside the log package's mutex and a 5s stall is a deadlock vector.
 	//
-	// The done arm covers the close race: if closeConn fires between
-	// the caller's currentClient.Load() and this select, the done
-	// channel races against the send arm. Without it, a concurrent
-	// closeConn that closed sendQ (older design) would panic the
-	// sender with "send on closed channel". Now sendQ is never
-	// closed and done is the close signal.
+	// The done arm covers the close race: if closeConn fires between the caller's currentClient.Load() and this select, the done channel races against the send arm. Without it, a concurrent closeConn that closed sendQ (older design) would panic the sender with "send on closed channel". Now sendQ is never closed and done is the close signal.
 	select {
 	case c.sendQ <- frame:
 	case <-c.done:
@@ -743,13 +556,9 @@ func (c *Client) SendLog(level, msg string) {
 	}
 }
 
-// writerLoop drains sendQ + heartbeat ticker. Single writer
-// goroutine per gorilla/websocket's concurrency rule.
+// writerLoop drains sendQ + heartbeat ticker. Single writer goroutine per gorilla/websocket's concurrency rule.
 //
-// Exits on ctx cancellation or done (closeConn fired). The done arm
-// replaces the older "sendQ closed → ok=false → return" pattern: we
-// no longer close sendQ at all, because senders (SendLog, sendFrame)
-// would panic on a closed channel under reconnect-heavy load.
+// Exits on ctx cancellation or done (closeConn fired). The done arm replaces the older "sendQ closed → ok=false → return" pattern: we no longer close sendQ at all, because senders (SendLog, sendFrame) would panic on a closed channel under reconnect-heavy load.
 func (c *Client) writerLoop(ctx context.Context) error {
 	ticker := time.NewTicker(protocol.HeartbeatInterval)
 	defer ticker.Stop()
@@ -764,10 +573,7 @@ func (c *Client) writerLoop(ctx context.Context) error {
 				return err
 			}
 		case <-ticker.C:
-			// Carry live requests and resident model memory so the gateway
-			// can avoid piling work onto a node whose capacity is already
-			// mostly committed. Collection is bounded; liveness still wins
-			// when the local runtime is unavailable.
+			// Carry live requests and resident model memory so the gateway can avoid piling work onto a node whose capacity is already mostly committed. Collection is bounded; liveness still wins when the local runtime is unavailable.
 			beat := protocol.Frame{Type: protocol.FrameHeartbeat}
 			telemetryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			telemetry := c.heartbeatTelemetry(telemetryCtx)
@@ -782,11 +588,7 @@ func (c *Client) writerLoop(ctx context.Context) error {
 	}
 }
 
-// heartbeatTelemetry takes a small, bounded snapshot of resident model
-// memory. The local runtime is the authority for this: OS-wide GPU memory can
-// include unrelated processes and would make the scheduler punish the node
-// for work it cannot manage. Failures intentionally report only the static
-// capacity and live request count; the gateway then falls back to GPU load.
+// heartbeatTelemetry takes a small, bounded snapshot of resident model memory. The local runtime is the authority for this: OS-wide GPU memory can include unrelated processes and would make the scheduler punish the node for work it cannot manage. Failures intentionally report only the static capacity and live request count; the gateway then falls back to GPU load.
 func (c *Client) heartbeatTelemetry(ctx context.Context) protocol.HeartbeatBody {
 	telemetry := protocol.HeartbeatBody{
 		NowUnixMs:   time.Now().UnixMilli(),
@@ -835,15 +637,9 @@ func (c *Client) writeFrame(frame protocol.Frame) error {
 	return c.conn.WriteMessage(websocket.TextMessage, payload)
 }
 
-// sendFrame is the non-blocking enqueue used by handleRequest. Drops
-// the frame on a full queue with a stderr warning — saturation here
-// usually means the gateway-bound link is stalled, which the writer
-// loop will surface as a write error and tear the session down.
+// sendFrame is the non-blocking enqueue used by handleRequest. Drops the frame on a full queue with a stderr warning — saturation here usually means the gateway-bound link is stalled, which the writer loop will surface as a write error and tear the session down.
 //
-// The done arm is the close-race guard: a concurrent closeConn must
-// not panic an in-flight send. With sendQ never closed (see the
-// writerLoop comment) done is the canonical "we're shutting down"
-// signal for senders.
+// The done arm is the close-race guard: a concurrent closeConn must not panic an in-flight send. With sendQ never closed (see the writerLoop comment) done is the canonical "we're shutting down" signal for senders.
 func (c *Client) sendFrame(frame protocol.Frame) error {
 	select {
 	case c.sendQ <- frame:
@@ -855,14 +651,9 @@ func (c *Client) sendFrame(frame protocol.Frame) error {
 	}
 }
 
-// closeConn tears down the WS session exactly once. Idempotent via
-// sync.Once — Run's defer, the reader/writer loop returns, and any
-// external Close() can all race in without double-closing the conn.
+// closeConn tears down the WS session exactly once. Idempotent via sync.Once — Run's defer, the reader/writer loop returns, and any external Close() can all race in without double-closing the conn.
 //
-// Closing the done channel signals every active sender to bail out;
-// sendQ is intentionally NOT closed, because a closed channel +
-// concurrent sender = panic, which under reconnect-heavy load is
-// exactly the failure mode we used to hit.
+// Closing the done channel signals every active sender to bail out; sendQ is intentionally NOT closed, because a closed channel + concurrent sender = panic, which under reconnect-heavy load is exactly the failure mode we used to hit.
 func (c *Client) closeConn() {
 	c.closeOnce.Do(func() {
 		close(c.done)
@@ -877,10 +668,7 @@ func (c *Client) closeConn() {
 	})
 }
 
-// wsEndpoint derives wss://host/edge/connect from the configured
-// gateway base. Accepts http:// or https:// as the gateway scheme
-// and flips to ws:// / wss:// accordingly so tests can point at
-// localhost over plaintext.
+// wsEndpoint derives wss://host/edge/connect from the configured gateway base. Accepts http:// or https:// as the gateway scheme and flips to ws:// / wss:// accordingly so tests can point at localhost over plaintext.
 func (c *Client) wsEndpoint() (*url.URL, error) {
 	base, err := url.Parse(c.cfg.GatewayURL)
 	if err != nil {

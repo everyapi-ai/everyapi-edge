@@ -101,8 +101,7 @@ func TestWrongLengthKeyFailsLoudly(t *testing.T) {
 }
 
 func TestFutureVersionRejected(t *testing.T) {
-	// Forward-incompatible: a newer agent wrote the file, an older
-	// agent shouldn't pretend to understand it.
+	// Forward-incompatible: a newer agent wrote the file, an older agent shouldn't pretend to understand it.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "id.json")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -147,14 +146,10 @@ func TestEncodedPubkey(t *testing.T) {
 	}
 }
 
-// TestLoadRefusesSymlink pins the symlink guard added with the perm
-// check. Lstat (not Stat) is what makes this work: a symlink pointing
-// at a 0600 file owned by another user would otherwise pass the perm
-// check by proxy.
+// TestLoadRefusesSymlink pins the symlink guard added with the perm check. Lstat (not Stat) is what makes this work: a symlink pointing at a 0600 file owned by another user would otherwise pass the perm check by proxy.
 func TestLoadRefusesSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		// Windows symlink semantics differ + perm check is skipped
-		// there; the guard is Unix-only by design.
+		// Windows symlink semantics differ + perm check is skipped there; the guard is Unix-only by design.
 		t.Skip("symlink guard is Unix-only by design")
 	}
 	dir := t.TempDir()
@@ -174,12 +169,7 @@ func TestLoadRefusesSymlink(t *testing.T) {
 	}
 }
 
-// TestLoadRefusesWorldReadableFile pins the perm-validation gate:
-// `cp -p`, a manual chmod, or a sloppy backup restore can widen the
-// 0600 the package wrote on first generate. The agent must refuse to
-// load a key file that other users on the host can read — the
-// private key is the only thing standing between a co-tenant and
-// gateway impersonation of this node.
+// TestLoadRefusesWorldReadableFile pins the perm-validation gate: `cp -p`, a manual chmod, or a sloppy backup restore can widen the 0600 the package wrote on first generate. The agent must refuse to load a key file that other users on the host can read — the private key is the only thing standing between a co-tenant and gateway impersonation of this node.
 func TestLoadRefusesWorldReadableFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "id.json")
@@ -196,8 +186,7 @@ func TestLoadRefusesWorldReadableFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error loading 0644 identity file, got nil")
 	}
-	// Loosen again to group-readable only — also a fail per the
-	// `mode & 0o077 != 0` rule.
+	// Loosen again to group-readable only — also a fail per the `mode & 0o077 != 0` rule.
 	if err := os.Chmod(path, 0o640); err != nil {
 		t.Fatalf("chmod 0640: %v", err)
 	}

@@ -1,5 +1,4 @@
-// Package update implements the Edge agent's latest-stable self-update path.
-// It deliberately accepts no caller-supplied version or asset URL.
+// Package update implements the Edge agent's latest-stable self-update path. It deliberately accepts no caller-supplied version or asset URL.
 package update
 
 import (
@@ -131,9 +130,7 @@ func writeState(dir string, value state) error {
 	return os.Rename(tmpPath, statePath(dir))
 }
 
-// Bootstrap runs before normal agent startup. An active candidate remains the
-// preferred binary across container restarts. An attempted candidate means it
-// failed before its first successful gateway Welcome and is rolled back.
+// Bootstrap runs before normal agent startup. An active candidate remains the preferred binary across container restarts. An attempted candidate means it failed before its first successful gateway Welcome and is rolled back.
 func (m *Manager) Bootstrap() error {
 	s, err := readState(m.cfg.StateDir)
 	if errors.Is(err, os.ErrNotExist) {

@@ -181,8 +181,7 @@ func TestHandleSurfacesUpstreamUnreachable(t *testing.T) {
 }
 
 func TestUsageScannerHandlesSSETail(t *testing.T) {
-	// Simulate Ollama's SSE: many data: lines followed by a usage
-	// block in the last chunk.
+	// Simulate Ollama's SSE: many data: lines followed by a usage block in the last chunk.
 	var u usageScanner
 	for i := 0; i < 50; i++ {
 		_, _ = u.Write([]byte(`data: {"id":"x","choices":[{"delta":{"content":"a"}}]}` + "\n"))
@@ -196,10 +195,7 @@ func TestUsageScannerHandlesSSETail(t *testing.T) {
 }
 
 func TestUsageScannerIgnoresUsageInStringValue(t *testing.T) {
-	// Adversarial input: model produces escaped JSON-shaped content
-	// that looks like a usage block. Without the `"usage":{` anchor
-	// the naive `"usage"` substring search would match and parse
-	// whatever JSON object happens to follow.
+	// Adversarial input: model produces escaped JSON-shaped content that looks like a usage block. Without the `"usage":{` anchor the naive `"usage"` substring search would match and parse whatever JSON object happens to follow.
 	var u usageScanner
 	_, _ = u.Write([]byte(`{"choices":[{"delta":{"content":"\"usage\": {\"prompt_tokens\": 999}"}}]}`))
 	p, c := u.Tokens()
@@ -229,8 +225,7 @@ func TestUsageScannerReturnsZerosOnAbsentUsage(t *testing.T) {
 
 func TestUsageScannerHandlesBufferOverflow(t *testing.T) {
 	var u usageScanner
-	// Write > 64 KiB before the usage block to exercise the tail-
-	// keep-half compaction.
+	// Write > 64 KiB before the usage block to exercise the tail- keep-half compaction.
 	for i := 0; i < 1000; i++ {
 		_, _ = u.Write(bytes.Repeat([]byte("x"), 256))
 	}
@@ -242,10 +237,7 @@ func TestUsageScannerHandlesBufferOverflow(t *testing.T) {
 }
 
 func TestHandleAbortsOnCancelledContext(t *testing.T) {
-	// A hung upstream + a cancelled session context must abort the
-	// in-flight forwarded request promptly instead of streaming
-	// forever — this is the goroutine/HTTP leak the per-request
-	// context guards.
+	// A hung upstream + a cancelled session context must abort the in-flight forwarded request promptly instead of streaming forever — this is the goroutine/HTTP leak the per-request context guards.
 	reached := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(reached)

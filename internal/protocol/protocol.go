@@ -1,14 +1,6 @@
-// Package protocol mirrors the EveryAPI edge node WebSocket protocol
-// definitions from backend/pkg/edge in the gateway repo. This file is
-// intentionally a DUPLICATE — the agent module is independent and
-// can't import the gateway-side package without dragging in the full
-// backend module dependency tree.
+// Package protocol mirrors the EveryAPI edge node WebSocket protocol definitions from backend/pkg/edge in the gateway repo. This file is intentionally a DUPLICATE — the agent module is independent and can't import the gateway-side package without dragging in the full backend module dependency tree.
 //
-// IMPORTANT: any change to backend/pkg/edge/protocol.go or types.go
-// MUST be mirrored here in the same PR. A future refactor will move
-// these definitions into clients/sdk so both sides import from a
-// shared module; until then, treat the gateway-side file as
-// canonical and copy from there.
+// IMPORTANT: any change to backend/pkg/edge/protocol.go or types.go MUST be mirrored here in the same PR. A future refactor will move these definitions into clients/sdk so both sides import from a shared module; until then, treat the gateway-side file as canonical and copy from there.
 package protocol
 
 import (
@@ -39,9 +31,7 @@ const (
 	FrameDisconnect FrameType = "disconnect"
 	FrameLog        FrameType = "log"
 
-	// FrameModelPull is agent → gateway, fire-and-forget: one per model the
-	// agent was asked to pull, reporting how that pull ended. Mirrors the
-	// gateway's backend/pkg/edge definition.
+	// FrameModelPull is agent → gateway, fire-and-forget: one per model the agent was asked to pull, reporting how that pull ended. Mirrors the gateway's backend/pkg/edge definition.
 	FrameModelPull      FrameType = "model_pull"
 	FrameUpdate         FrameType = "update"
 	FrameUpdateStatus   FrameType = "update_status"
@@ -85,9 +75,7 @@ type RequestBody struct {
 	Headers map[string]string `json:"headers,omitempty"`
 	Body    json.RawMessage   `json:"body,omitempty"`
 	Stream  bool              `json:"stream,omitempty"`
-	// ConsumerRef is a gateway-generated, node-scoped opaque customer label.
-	// It lets the supplier recognise repeated traffic without exposing a buyer's
-	// account ID, email, token, or any other credential.
+	// ConsumerRef is a gateway-generated, node-scoped opaque customer label. It lets the supplier recognise repeated traffic without exposing a buyer's account ID, email, token, or any other credential.
 	ConsumerRef string `json:"consumer_ref,omitempty"`
 }
 
@@ -135,8 +123,7 @@ type UpdateStatusBody struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// ControlRequestBody mirrors backend/pkg/edge. It is reserved for the
-// gateway's administrator-only, allowlisted Control Room API operations.
+// ControlRequestBody mirrors backend/pkg/edge. It is reserved for the gateway's administrator-only, allowlisted Control Room API operations.
 type ControlRequestBody struct {
 	Method string          `json:"method"`
 	Path   string          `json:"path"`
@@ -148,23 +135,13 @@ type DisconnectBody struct {
 	Reason string `json:"reason"`
 }
 
-// Disconnect codes. Mirrors backend/pkg/edge/protocol.go — see that
-// file for the canonical-source policy. The terminal codes here drive
-// the agent's "stop reconnecting" decision in main.go's
-// runWithReconnect; everything else is treated as transient and
-// retried with exponential backoff.
+// Disconnect codes. Mirrors backend/pkg/edge/protocol.go — see that file for the canonical-source policy. The terminal codes here drive the agent's "stop reconnecting" decision in main.go's runWithReconnect; everything else is treated as transient and retried with exponential backoff.
 const (
-	// DisconnectCodeNodeRevoked — gateway soft-deleted the EdgeNode
-	// row while this session was live. Terminal on the agent side:
-	// persist a sentinel and exit so the seller doesn't have to
-	// chase docker logs to understand the spin loop.
+	// DisconnectCodeNodeRevoked — gateway soft-deleted the EdgeNode row while this session was live. Terminal on the agent side: persist a sentinel and exit so the seller doesn't have to chase docker logs to understand the spin loop.
 	DisconnectCodeNodeRevoked = "node_revoked"
 )
 
-// LogBody — single line of agent log output. The agent's logger hooks
-// into Client.SendLog which serialises to a Frame{Type: FrameLog};
-// the gateway's per-session ring buffer (backend/internal/edge) holds
-// the most recent ~200 lines.
+// LogBody — single line of agent log output. The agent's logger hooks into Client.SendLog which serialises to a Frame{Type: FrameLog}; the gateway's per-session ring buffer (backend/internal/edge) holds the most recent ~200 lines.
 type LogBody struct {
 	UnixMs int64  `json:"unix_ms"`
 	Level  string `json:"level,omitempty"`
@@ -178,9 +155,7 @@ const (
 	ModelPullFailed  = "failed"
 )
 
-// ModelPullBody — one model's pull outcome. Mirrors the gateway's copy in
-// backend/pkg/edge; keep the json tags identical or the receipt silently
-// decodes to a zero value.
+// ModelPullBody — one model's pull outcome. Mirrors the gateway's copy in backend/pkg/edge; keep the json tags identical or the receipt silently decodes to a zero value.
 type ModelPullBody struct {
 	UnixMs int64  `json:"unix_ms"`
 	Model  string `json:"model"`

@@ -344,9 +344,7 @@ func TestReleasePublishesInstallerToCDN(t *testing.T) {
 	}
 }
 
-// A node is a long-lived service holding credentials, so where it lands must
-// not depend on which directory the operator happened to be standing in when
-// they ran the documented `curl … | bash` one-liner.
+// A node is a long-lived service holding credentials, so where it lands must not depend on which directory the operator happened to be standing in when they ran the documented `curl … | bash` one-liner.
 func TestInstallerDefaultsToHomeDirectory(t *testing.T) {
 	script, err := os.ReadFile("install.sh")
 	if err != nil {
@@ -360,17 +358,11 @@ func TestInstallerDefaultsToHomeDirectory(t *testing.T) {
 	}
 }
 
-// Installing into a source checkout leaves .env (node credentials) and data/
-// (the Ed25519 identity) in a working tree, where they show up in git status
-// and are one careless `git add` from being committed. The earlier guards only
-// rejected the cwd itself, so a subdirectory of a repository slipped through.
+// Installing into a source checkout leaves .env (node credentials) and data/ (the Ed25519 identity) in a working tree, where they show up in git status and are one careless `git add` from being committed. The earlier guards only rejected the cwd itself, so a subdirectory of a repository slipped through.
 //
-// This test runs from clients/edge, which is inside this repository's working
-// tree, so the target below is exactly the case under test.
+// This test runs from clients/edge, which is inside this repository's working tree, so the target below is exactly the case under test.
 func TestInstallerRefusesToInstallInsideGitWorktree(t *testing.T) {
-	// Belt and braces: if the guard ever regresses, the installer really does
-	// clone into this path, and a failing test should not also leave a bundle
-	// sitting in the working tree.
+	// Belt and braces: if the guard ever regresses, the installer really does clone into this path, and a failing test should not also leave a bundle sitting in the working tree.
 	t.Cleanup(func() { _ = os.RemoveAll("./everyapi-edge-guard-target") })
 	output := runInstallerExpectFailure(t,
 		"--node-id", "1",
@@ -386,16 +378,13 @@ func TestInstallerRefusesToInstallInsideGitWorktree(t *testing.T) {
 	}
 }
 
-// A git-managed HOME is the dotfiles pattern, not a source checkout. Refusing
-// there would break the new default for everyone who versions their home
-// directory, so the guard has to exempt it.
+// A git-managed HOME is the dotfiles pattern, not a source checkout. Refusing there would break the new default for everyone who versions their home directory, so the guard has to exempt it.
 func TestInstallerAllowsGitManagedHome(t *testing.T) {
 	home := t.TempDir()
 	if out, err := exec.Command("git", "-C", home, "init").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
-	// No --node-id: the run fails later, at the required-argument check, which
-	// is well past the guard. We assert only on which failure it was.
+	// No --node-id: the run fails later, at the required-argument check, which is well past the guard. We assert only on which failure it was.
 	cmd := exec.Command("bash", "install.sh", "--dir", home+"/everyapi-edge")
 	cmd.Env = append(os.Environ(), "HOME="+home)
 	output, err := cmd.CombinedOutput()

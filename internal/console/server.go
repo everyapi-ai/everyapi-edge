@@ -36,8 +36,7 @@ type UpdateStatus struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// NodeProfile is the startup identity of this local agent. It intentionally
-// contains no credentials, gateway URL, or host filesystem details.
+// NodeProfile is the startup identity of this local agent. It intentionally contains no credentials, gateway URL, or host filesystem details.
 type NodeProfile struct {
 	Name         string `json:"name"`
 	AgentVersion string `json:"agent_version"`
@@ -57,9 +56,7 @@ type Model struct {
 	} `json:"details,omitempty"`
 }
 
-// Runtime is the live state reported by Ollama rather than the agent's
-// historical request counters. It lets the local console distinguish a model
-// that is merely installed from one consuming VRAM right now.
+// Runtime is the live state reported by Ollama rather than the agent's historical request counters. It lets the local console distinguish a model that is merely installed from one consuming VRAM right now.
 type Runtime struct {
 	Version string         `json:"version"`
 	Models  []RuntimeModel `json:"models"`
@@ -72,18 +69,14 @@ type RuntimeModel struct {
 	ExpiresAt     string `json:"expires_at,omitempty"`
 }
 
-// ImageRuntime is the local Diffusers service capability. It is separate from
-// Ollama because image generation/editing uses diffusion pipelines rather than
-// Ollama's text and multimodal inference APIs.
+// ImageRuntime is the local Diffusers service capability. It is separate from Ollama because image generation/editing uses diffusion pipelines rather than Ollama's text and multimodal inference APIs.
 type ImageRuntime struct {
 	Status string   `json:"status"`
 	Models []string `json:"models"`
 	Error  string   `json:"error,omitempty"`
 }
 
-// Storage describes the model directory visible to this agent process. The
-// path is supplied by the bundle rather than inferred from Ollama's HTTP API:
-// Ollama deliberately does not disclose host filesystem paths over HTTP.
+// Storage describes the model directory visible to this agent process. The path is supplied by the bundle rather than inferred from Ollama's HTTP API: Ollama deliberately does not disclose host filesystem paths over HTTP.
 type Storage struct {
 	Path           string `json:"path"`
 	Accessible     bool   `json:"accessible"`
@@ -100,9 +93,7 @@ type MigrationPlan struct {
 	Blockers    []string `json:"blockers"`
 }
 
-// migrationJob copies model files before the user repoints their local
-// runtime. Copying is deliberately non-destructive: an interrupted transfer
-// must leave the current model library intact and usable.
+// migrationJob copies model files before the user repoints their local runtime. Copying is deliberately non-destructive: an interrupted transfer must leave the current model library intact and usable.
 type migrationJob struct {
 	Source      string `json:"source"`
 	Destination string `json:"destination"`
@@ -113,9 +104,7 @@ type migrationJob struct {
 	Done        bool   `json:"done"`
 }
 
-// PlaygroundMessage is deliberately a small subset of OpenAI's chat message
-// shape. The local console is for testing the installed model, not a generic
-// proxy that accepts arbitrary Ollama options or tool calls.
+// PlaygroundMessage is deliberately a small subset of OpenAI's chat message shape. The local console is for testing the installed model, not a generic proxy that accepts arbitrary Ollama options or tool calls.
 type PlaygroundMessage struct {
 	Role    string   `json:"role"`
 	Content string   `json:"content"`
@@ -139,8 +128,7 @@ type ModelCapabilities struct {
 	Capabilities []string `json:"capabilities"`
 }
 
-// ModelBenchmark is a one-token local generation measurement. It reports the
-// runtime's own token counters instead of guessing from model parameter size.
+// ModelBenchmark is a one-token local generation measurement. It reports the runtime's own token counters instead of guessing from model parameter size.
 type ModelBenchmark struct {
 	Model           string  `json:"model"`
 	EvalCount       int     `json:"eval_count"`
@@ -236,9 +224,7 @@ func newHandler(cfg Config, store *Store, picker func() (string, error)) http.Ha
 	return newHandlers(cfg, store, picker).Control
 }
 
-// Handlers separates the browser management surface from the in-process
-// gateway control surface. Both share the same feature state, but only browser
-// mutations require same-origin evidence.
+// Handlers separates the browser management surface from the in-process gateway control surface. Both share the same feature state, but only browser mutations require same-origin evidence.
 type Handlers struct {
 	Browser http.Handler
 	Control http.Handler

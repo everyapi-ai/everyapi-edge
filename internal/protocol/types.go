@@ -1,5 +1,4 @@
-// Mirror of backend/pkg/edge/types.go — see protocol.go for the
-// canonical-source policy.
+// Mirror of backend/pkg/edge/types.go — see protocol.go for the canonical-source policy.
 package protocol
 
 type Hardware struct {
@@ -30,10 +29,7 @@ type NodeMeta struct {
 	UpdatedAt int64    `json:"updated_at,omitempty"`
 }
 
-// KnownWorkloads mirrors backend/pkg/edge.AllWorkloads. The agent
-// validates EVERYAPI_WORKLOADS against this list at startup so a typo
-// fails fast on the supplier's machine instead of being silently
-// dropped by the gateway.
+// KnownWorkloads mirrors backend/pkg/edge.AllWorkloads. The agent validates EVERYAPI_WORKLOADS against this list at startup so a typo fails fast on the supplier's machine instead of being silently dropped by the gateway.
 var KnownWorkloads = []string{
 	"chat",
 	"coding",

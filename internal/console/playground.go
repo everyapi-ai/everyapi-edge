@@ -178,9 +178,7 @@ func (h *handler) playgroundChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, PlaygroundResponse{Model: output.Model, Content: output.Choices[0].Message.Content, Usage: output.Usage})
 }
 
-// canStartPlaygroundModel prevents local chat from bypassing the same memory
-// budget shown in the model library. A loaded model is already accounted for;
-// a cold model is conservatively estimated from its installed artifact size.
+// canStartPlaygroundModel prevents local chat from bypassing the same memory budget shown in the model library. A loaded model is already accounted for; a cold model is conservatively estimated from its installed artifact size.
 func (h *handler) canStartPlaygroundModel(ctx context.Context, model string) (bool, error) {
 	if h.cfg.VRAMTotalGB <= 0 {
 		return true, nil

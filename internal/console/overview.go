@@ -87,10 +87,7 @@ func (h *handler) startUpdate(w http.ResponseWriter, r *http.Request) {
 
 const gibibyte = int64(1024 * 1024 * 1024)
 
-// memoryReserveBytes leaves room for the operating system and Ollama's KV
-// cache. A model that merely fits the device will become unstable as its
-// context grows, so this reservation is part of admission rather than a UI
-// warning.
+// memoryReserveBytes leaves room for the operating system and Ollama's KV cache. A model that merely fits the device will become unstable as its context grows, so this reservation is part of admission rather than a UI warning.
 func memoryReserveBytes(totalGB int) int64 {
 	if totalGB <= 0 {
 		return 0

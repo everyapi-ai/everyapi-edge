@@ -8,9 +8,7 @@ import (
 
 var errCrossSiteMutation = errors.New("cross-site mutation denied")
 
-// sameOriginMutations protects the browser-facing management API from being
-// driven by an unrelated website. Metadata-free internal callers use the
-// separate Control handler, which deliberately does not install this guard.
+// sameOriginMutations protects the browser-facing management API from being driven by an unrelated website. Metadata-free internal callers use the separate Control handler, which deliberately does not install this guard.
 func sameOriginMutations(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {

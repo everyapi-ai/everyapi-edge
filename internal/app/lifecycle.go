@@ -1,5 +1,4 @@
-// Package app contains Edge process orchestration that is independent from
-// concrete gateway, console, and runtime implementations.
+// Package app contains Edge process orchestration that is independent from concrete gateway, console, and runtime implementations.
 package app
 
 import (

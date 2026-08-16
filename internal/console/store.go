@@ -1,7 +1,4 @@
-// Package console provides the supplier-local Edge Control Room. It is kept
-// deliberately separate from the gateway protocol: local operational data is
-// useful even while the gateway is unreachable, and request bodies never enter
-// this package.
+// Package console provides the supplier-local Edge Control Room. It is kept deliberately separate from the gateway protocol: local operational data is useful even while the gateway is unreachable, and request bodies never enter this package.
 package console
 
 import (
@@ -11,8 +8,7 @@ import (
 	"time"
 )
 
-// maxLogMessageBytes prevents a failing dependency or an untrusted peer from
-// turning the bounded log entry count into unbounded process memory use.
+// maxLogMessageBytes prevents a failing dependency or an untrusted peer from turning the bounded log entry count into unbounded process memory use.
 const maxLogMessageBytes = 4 * 1024
 
 var runtimeBrand = regexp.MustCompile(`(?i)\bollama\b`)
@@ -21,8 +17,7 @@ func sanitizeRuntimeBrand(message string) string {
 	return runtimeBrand.ReplaceAllString(message, "local runtime")
 }
 
-// RequestStart contains the only request metadata the local UI is allowed to
-// retain. In particular, it deliberately has no request body or headers.
+// RequestStart contains the only request metadata the local UI is allowed to retain. In particular, it deliberately has no request body or headers.
 type RequestStart struct {
 	ID        string
 	Model     string
@@ -54,8 +49,7 @@ type Request struct {
 	Error            string    `json:"error,omitempty"`
 }
 
-// LogEntry is a bounded copy of the agent's own log line. It is local process
-// telemetry, not an upstream inference transcript.
+// LogEntry is a bounded copy of the agent's own log line. It is local process telemetry, not an upstream inference transcript.
 type LogEntry struct {
 	At      time.Time `json:"at"`
 	Level   string    `json:"level"`
@@ -86,20 +80,17 @@ type Overview struct {
 	GatewayNextReconnectAt   time.Time `json:"gateway_next_reconnect_at,omitempty"`
 }
 
-// Settlement is a gateway-committed, node-specific seller receipt. Amount is
-// USD micros so the control room never has to infer a currency conversion.
+// Settlement is a gateway-committed, node-specific seller receipt. Amount is USD micros so the control room never has to infer a currency conversion.
 type Settlement struct {
 	RequestID          string    `json:"request_id"`
 	SellerAmountMicros int64     `json:"seller_amount_micros"`
 	SettledAt          time.Time `json:"settled_at"`
 }
 
-// RequestHandle is returned by Start and handed to Finish. It avoids exposing
-// request maps to the forwarder and makes double-finishes harmless.
+// RequestHandle is returned by Start and handed to Finish. It avoids exposing request maps to the forwarder and makes double-finishes harmless.
 type RequestHandle struct{ id string }
 
-// Store is a bounded in-memory record of the current process. Restarting the
-// agent clears it; durable billing remains authoritative at the gateway.
+// Store is a bounded in-memory record of the current process. Restarting the agent clears it; durable billing remains authoritative at the gateway.
 type Store struct {
 	mu                sync.RWMutex
 	capacity          int
@@ -111,8 +102,7 @@ type Store struct {
 	overview          Overview
 }
 
-// Log appends one local agent line. Standard log output is already line-based;
-// the caller removes trailing newlines before recording it.
+// Log appends one local agent line. Standard log output is already line-based; the caller removes trailing newlines before recording it.
 func (s *Store) Log(level, message string) {
 	if message == "" {
 		return
@@ -147,9 +137,7 @@ func NewStore(capacity int) *Store {
 	return &Store{capacity: capacity, active: make(map[string]*Request), settlements: make(map[string]Settlement), overview: Overview{GatewayState: "connecting"}}
 }
 
-// SetGatewayState records the real upstream session state separately from the
-// local control room HTTP listener. A reachable local page must not imply that
-// the node is currently able to receive gateway work.
+// SetGatewayState records the real upstream session state separately from the local control room HTTP listener. A reachable local page must not imply that the node is currently able to receive gateway work.
 func (s *Store) SetGatewayState(state, reason string) {
 	if state != "connecting" && state != "online" && state != "offline" && state != "preview" {
 		state = "offline"
@@ -174,10 +162,7 @@ func (s *Store) SetGatewayState(state, reason string) {
 	}
 }
 
-// ScheduleGatewayReconnect records a retry the agent has actually scheduled.
-// It intentionally does not derive a date from a generic offline state: an
-// authentication or terminal failure must never be presented as a promised
-// reconnect that the process will not make.
+// ScheduleGatewayReconnect records a retry the agent has actually scheduled. It intentionally does not derive a date from a generic offline state: an authentication or terminal failure must never be presented as a promised reconnect that the process will not make.
 func (s *Store) ScheduleGatewayReconnect(next time.Time, attempt int) {
 	if next.IsZero() || attempt < 1 {
 		return
@@ -188,8 +173,7 @@ func (s *Store) ScheduleGatewayReconnect(next time.Time, attempt int) {
 	s.overview.GatewayNextReconnectAt = next.UTC()
 }
 
-// Settle stores one final receipt. It is deliberately idempotent because the
-// gateway replays recent committed receipts after an agent reconnects.
+// Settle stores one final receipt. It is deliberately idempotent because the gateway replays recent committed receipts after an agent reconnects.
 func (s *Store) Settle(receipt Settlement) {
 	if receipt.RequestID == "" || receipt.SettledAt.IsZero() {
 		return

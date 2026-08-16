@@ -1,28 +1,12 @@
-// Package identity owns the agent's Ed25519 keypair: generate on first
-// run, persist to disk with 0600 mode, load on subsequent runs. The
-// private key never leaves the supplier's machine — the gateway only
-// ever sees the public key (handed over in the first WS Auth frame)
-// and signatures over server-issued challenges.
+// Package identity owns the agent's Ed25519 keypair: generate on first run, persist to disk with 0600 mode, load on subsequent runs. The private key never leaves the supplier's machine — the gateway only ever sees the public key (handed over in the first WS Auth frame) and signatures over server-issued challenges.
 //
-// Storage format is plain JSON with base64-encoded keys; the file
-// lives at ${EVERYAPI_EDGE_HOME}/identity.json (default
-// $HOME/.everyapi-edge/identity.json). The reasons for not using
-// PEM / OS keychain / etc:
+// Storage format is plain JSON with base64-encoded keys; the file lives at ${EVERYAPI_EDGE_HOME}/identity.json (default $HOME/.everyapi-edge/identity.json). The reasons for not using PEM / OS keychain / etc:
 //
-//   - The agent runs unattended in a docker container; OS keychain
-//     APIs (Keychain Services on macOS, Secret Service on Linux)
-//     would force a daemon dependency or block on a desktop login
-//     session that doesn't exist in containers.
+//   - The agent runs unattended in a docker container; OS keychain APIs (Keychain Services on macOS, Secret Service on Linux) would force a daemon dependency or block on a desktop login session that doesn't exist in containers.
 //
-//   - PEM is overkill for a 32-byte secret. The JSON envelope lets a
-//     future schema bump (e.g. wrapping the key in a passphrase-
-//     derived KEK) extend cleanly without breaking older agents.
+//   - PEM is overkill for a 32-byte secret. The JSON envelope lets a future schema bump (e.g. wrapping the key in a passphrase- derived KEK) extend cleanly without breaking older agents.
 //
-//   - Linux file permissions (0600 file, 0700 directory) is the
-//     same trust model the docker socket and most agent secrets use.
-//     If the supplier's machine is compromised root-equivalent,
-//     escalating to "read the agent's identity" was always trivial
-//     regardless of the storage backend.
+//   - Linux file permissions (0600 file, 0700 directory) is the same trust model the docker socket and most agent secrets use. If the supplier's machine is compromised root-equivalent, escalating to "read the agent's identity" was always trivial regardless of the storage backend.
 package identity
 
 import (
@@ -37,21 +21,17 @@ import (
 	"runtime"
 )
 
-// Identity is the on-disk representation. Versioned so a future
-// schema change (e.g. encrypted private key) has a migration hook.
+// Identity is the on-disk representation. Versioned so a future schema change (e.g. encrypted private key) has a migration hook.
 type Identity struct {
 	Version    int    `json:"version"`
 	PublicKey  string `json:"public_key"`  // base64 std
 	PrivateKey string `json:"private_key"` // base64 std
 }
 
-// CurrentVersion is the schema version any freshly-generated
-// identity carries. Bump when the on-disk format changes.
+// CurrentVersion is the schema version any freshly-generated identity carries. Bump when the on-disk format changes.
 const CurrentVersion = 1
 
-// Decoded unwraps the on-disk identity into the runtime types
-// callers want — base64 to []byte to ed25519.* — with the length
-// checks the std lib would otherwise panic on.
+// Decoded unwraps the on-disk identity into the runtime types callers want — base64 to []byte to ed25519.* — with the length checks the std lib would otherwise panic on.
 type Decoded struct {
 	Public  ed25519.PublicKey
 	Private ed25519.PrivateKey
@@ -62,18 +42,12 @@ func (d Decoded) EncodedPubkey() string {
 	return base64.StdEncoding.EncodeToString(d.Public)
 }
 
-// Sign produces an Ed25519 signature over msg using the loaded key.
-// Callers base64-encode the result themselves (the protocol field
-// is a string).
+// Sign produces an Ed25519 signature over msg using the loaded key. Callers base64-encode the result themselves (the protocol field is a string).
 func (d Decoded) Sign(msg []byte) []byte {
 	return ed25519.Sign(d.Private, msg)
 }
 
-// LoadOrGenerate is the only entry point: returns the identity at
-// path, generating + persisting a fresh keypair if the file doesn't
-// exist. A corrupt file (parse failure, wrong-size keys) is treated
-// as a hard error — silently regenerating would orphan the gateway-
-// side row that already trusts the original pubkey.
+// LoadOrGenerate is the only entry point: returns the identity at path, generating + persisting a fresh keypair if the file doesn't exist. A corrupt file (parse failure, wrong-size keys) is treated as a hard error — silently regenerating would orphan the gateway- side row that already trusts the original pubkey.
 func LoadOrGenerate(path string) (Decoded, error) {
 	expanded, err := expandPath(path)
 	if err != nil {
@@ -90,37 +64,16 @@ func LoadOrGenerate(path string) (Decoded, error) {
 	return generateAndPersist(expanded)
 }
 
-// assertSafeIdentityFile refuses to load an identity file that's a
-// symlink or that has group / other access bits set. The file
-// generated by this package is 0600, but `cp -p` from a 0644 source,
-// a manual chmod, or a sloppy backup restore can widen it; the
-// private key is the only thing standing between an attacker on the
-// same host and gateway impersonation of this node.
+// assertSafeIdentityFile refuses to load an identity file that's a symlink or that has group / other access bits set. The file generated by this package is 0600, but `cp -p` from a 0644 source, a manual chmod, or a sloppy backup restore can widen it; the private key is the only thing standing between an attacker on the same host and gateway impersonation of this node.
 //
 // Caveats:
-//   - Windows file modes from os.{Stat,Lstat} aren't POSIX bits; the
-//     perm check is skipped on GOOS=windows. NTFS ACLs are a
-//     different security model; treat that platform as out-of-scope
-//     for this gate until it's a shipped target.
-//   - Lstat (not Stat) so a symlink pointing at a 0600 file owned by
-//     another user can't satisfy the check by proxy. We refuse
-//     symlinks outright.
-//   - There's a benign TOCTOU between this Stat and the subsequent
-//     ReadFile — an attacker who can chmod the file in the window
-//     could already read it directly, so the race doesn't add
-//     attack surface beyond what same-uid access already gives.
+//   - Windows file modes from os.{Stat,Lstat} aren't POSIX bits; the perm check is skipped on GOOS=windows. NTFS ACLs are a different security model; treat that platform as out-of-scope for this gate until it's a shipped target.
+//   - Lstat (not Stat) so a symlink pointing at a 0600 file owned by another user can't satisfy the check by proxy. We refuse symlinks outright.
+//   - There's a benign TOCTOU between this Stat and the subsequent ReadFile — an attacker who can chmod the file in the window could already read it directly, so the race doesn't add attack surface beyond what same-uid access already gives.
 func assertSafeIdentityFile(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
-		// Missing file is the generate-on-first-run path — let
-		// LoadOrGenerate's ReadFile handle it. Any OTHER error
-		// (EACCES from a restrictive directory ACL, EIO from a
-		// flaky disk, ELOOP from a circular symlink) must fail
-		// closed: a path the agent can't stat but can read would
-		// otherwise bypass both the symlink and perm gates and
-		// proceed to ReadFile silently. Return the wrapped error
-		// so operators see what was wrong, not "no such file"
-		// shadowing a real permission problem.
+		// Missing file is the generate-on-first-run path — let LoadOrGenerate's ReadFile handle it. Any OTHER error (EACCES from a restrictive directory ACL, EIO from a flaky disk, ELOOP from a circular symlink) must fail closed: a path the agent can't stat but can read would otherwise bypass both the symlink and perm gates and proceed to ReadFile silently. Return the wrapped error so operators see what was wrong, not "no such file" shadowing a real permission problem.
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
@@ -133,13 +86,7 @@ func assertSafeIdentityFile(path string) error {
 		)
 	}
 	if runtime.GOOS == "windows" {
-		// NTFS ACLs aren't expressible as POSIX perm bits; skip the
-		// numeric check. A future Windows-specific check could call
-		// into syscall to inspect the SID/DACL. The symlink check
-		// above DOES fire on Windows for `mklink` symbolic links,
-		// but `mklink /J` junctions report ModeDir|ModeIrregular and
-		// slip through — Windows isn't a shipped edge-agent target
-		// so this gap is documented rather than fixed.
+		// NTFS ACLs aren't expressible as POSIX perm bits; skip the numeric check. A future Windows-specific check could call into syscall to inspect the SID/DACL. The symlink check above DOES fire on Windows for `mklink` symbolic links, but `mklink /J` junctions report ModeDir|ModeIrregular and slip through — Windows isn't a shipped edge-agent target so this gap is documented rather than fixed.
 		return nil
 	}
 	if mode := info.Mode().Perm(); mode&0o077 != 0 {
@@ -192,14 +139,10 @@ func generateAndPersist(path string) (Decoded, error) {
 	if err != nil {
 		return Decoded{}, fmt.Errorf("encode identity: %w", err)
 	}
-	// O_EXCL guards against a concurrent agent racing on the same
-	// path. The supplier almost never runs two agents but the race
-	// is recoverable (one wins, the other restarts and reads).
+	// O_EXCL guards against a concurrent agent racing on the same path. The supplier almost never runs two agents but the race is recoverable (one wins, the other restarts and reads).
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		// If we lost the race, fall back to reading what the winner
-		// just wrote rather than failing the startup. Two restarts
-		// in a single boot cycle is wasted work, not a fault.
+		// If we lost the race, fall back to reading what the winner just wrote rather than failing the startup. Two restarts in a single boot cycle is wasted work, not a fault.
 		if errors.Is(err, os.ErrExist) {
 			data, readErr := os.ReadFile(path)
 			if readErr == nil {
@@ -219,9 +162,7 @@ func generateAndPersist(path string) (Decoded, error) {
 	return Decoded{Public: pub, Private: priv}, nil
 }
 
-// expandPath rewrites a leading "~" to the user's home so the
-// default in main.go ("~/.everyapi-edge/identity.json") works in
-// docker (where $HOME is /root) and in operator shells alike.
+// expandPath rewrites a leading "~" to the user's home so the default in main.go ("~/.everyapi-edge/identity.json") works in docker (where $HOME is /root) and in operator shells alike.
 func expandPath(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("identity path is empty")

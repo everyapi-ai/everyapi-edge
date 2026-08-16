@@ -201,12 +201,7 @@ func TestHandlerReportsLocalModelCapabilities(t *testing.T) {
 	}
 }
 
-// The console UI is a compiled bundle (console-web, built by `make console`),
-// so this asserts on the shape the Go side owns rather than on UI copy: the
-// mount point React renders into, and the fact that everything is inlined. It
-// deliberately does NOT match translated strings — those live in the bundle's
-// i18n dictionary and get minified, and pinning them here would make every copy
-// edit a Go test failure.
+// The console UI is a compiled bundle (console-web, built by `make console`), so this asserts on the shape the Go side owns rather than on UI copy: the mount point React renders into, and the fact that everything is inlined. It deliberately does NOT match translated strings — those live in the bundle's i18n dictionary and get minified, and pinning them here would make every copy edit a Go test failure.
 func TestEmbeddedControlRoomServesSelfContainedDocument(t *testing.T) {
 	h := NewHandler(Config{OllamaURL: "http://ollama:11434"}, NewStore(16))
 	response := httptest.NewRecorder()
@@ -218,14 +213,12 @@ func TestEmbeddedControlRoomServesSelfContainedDocument(t *testing.T) {
 	if !strings.Contains(body, `<div id="root">`) {
 		t.Fatalf("embedded page is missing the React mount point: %.400s", body)
 	}
-	// The handler serves exactly one route for the UI, so an asset reference
-	// that survived the build would 404 at runtime and leave a blank console.
+	// The handler serves exactly one route for the UI, so an asset reference that survived the build would 404 at runtime and leave a blank console.
 	if externalAsset.MatchString(body) {
 		t.Fatalf("embedded page references an external asset; the bundle must be inlined: %s",
 			externalAsset.FindString(body))
 	}
-	// A stale placeholder (or an un-built checkout) would pass the checks above
-	// while shipping no application at all.
+	// A stale placeholder (or an un-built checkout) would pass the checks above while shipping no application at all.
 	if len(body) < 100_000 {
 		t.Fatalf("embedded page is %d bytes; the console bundle looks unbuilt", len(body))
 	}

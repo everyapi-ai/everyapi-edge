@@ -469,9 +469,7 @@ func availableStorageBytes(path string) (int64, error) {
 	return available, err
 }
 
-// pullStorageError compares only the remaining bytes in the current layer with
-// free space. Bytes already written must not be counted twice, and an
-// unavailable capacity probe must not turn into a false rejection.
+// pullStorageError compares only the remaining bytes in the current layer with free space. Bytes already written must not be counted twice, and an unavailable capacity probe must not turn into a false rejection.
 func (h *handler) pullStorageError(update pullJob) error {
 	if update.Total <= update.Completed || h.cfg.StoragePath == "" {
 		return nil
@@ -496,9 +494,7 @@ func formatByteCount(bytes int64) string {
 	return fmt.Sprintf("%d MB", bytes/megabyte)
 }
 
-// updatePullProgress turns the runtime's byte counters into a conservative
-// transfer estimate. The counters can reset between layers, so only forward
-// progress contributes to the rate and a reset clears the prior sample.
+// updatePullProgress turns the runtime's byte counters into a conservative transfer estimate. The counters can reset between layers, so only forward progress contributes to the rate and a reset clears the prior sample.
 func updatePullProgress(job *pullJob, update pullJob, observedAt time.Time) {
 	job.Status, job.Completed, job.Total = update.Status, update.Completed, update.Total
 	if job.Total <= 0 || job.Completed < 0 {
@@ -516,8 +512,7 @@ func updatePullProgress(job *pullJob, update pullJob, observedAt time.Time) {
 		return
 	}
 	rate := float64(job.Completed-job.sampledBytes) / elapsed
-	// Pull status arrives per layer. An exponential moving average prevents a
-	// tiny finishing layer from making the ETA jump wildly.
+	// Pull status arrives per layer. An exponential moving average prevents a tiny finishing layer from making the ETA jump wildly.
 	if job.RateBytesPerSecond > 0 {
 		rate = job.RateBytesPerSecond*0.65 + rate*0.35
 	}

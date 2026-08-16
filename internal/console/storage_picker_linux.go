@@ -7,10 +7,7 @@ import (
 	"os/exec"
 )
 
-// chooseStorageDirectory keeps the console path-free on common Linux desktop
-// environments. We intentionally use system chooser tools rather than a
-// browser file input: the agent, not the browser, must be able to access the
-// selected directory when it performs the copy.
+// chooseStorageDirectory keeps the console path-free on common Linux desktop environments. We intentionally use system chooser tools rather than a browser file input: the agent, not the browser, must be able to access the selected directory when it performs the copy.
 func chooseStorageDirectory() (string, error) {
 	if _, err := exec.LookPath("zenity"); err == nil {
 		output, chooseErr := exec.Command("zenity", "--file-selection", "--directory", "--title=Choose EveryAPI model directory").Output()

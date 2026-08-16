@@ -1,6 +1,4 @@
-// Package runtime owns the wire boundary between Edge and local inference
-// engines. Callers work with typed health, discovery, and routing contracts
-// instead of constructing engine-specific URLs throughout the application.
+// Package runtime owns the wire boundary between Edge and local inference engines. Callers work with typed health, discovery, and routing contracts instead of constructing engine-specific URLs throughout the application.
 package runtime
 
 import (

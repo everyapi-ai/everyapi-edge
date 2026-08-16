@@ -1,7 +1,4 @@
-// Package config gathers the agent's startup configuration from
-// environment variables. Env (not flags / config file) because the
-// canonical packaging is docker-compose, where env vars are the
-// supplier's only interface to the running container.
+// Package config gathers the agent's startup configuration from environment variables. Env (not flags / config file) because the canonical packaging is docker-compose, where env vars are the supplier's only interface to the running container.
 package config
 
 import (
@@ -18,54 +15,34 @@ import (
 
 // Config is what main.go assembles before constructing the client.
 type Config struct {
-	// LocalPreview runs the local control room without registering or
-	// reconnecting to a gateway. It exists for LAN UI evaluation only.
+	// LocalPreview runs the local control room without registering or reconnecting to a gateway. It exists for LAN UI evaluation only.
 	LocalPreview bool
 	// GatewayURL — base URL of the EveryAPI gateway. Required.
 	GatewayURL string
-	// NodeID — the EdgeNode primary key the seller created via the
-	// dashboard. Required, positive int.
+	// NodeID — the EdgeNode primary key the seller created via the dashboard. Required, positive int.
 	NodeID int64
-	// RegistrationToken — the one-time secret the dashboard handed
-	// over. Required on first run, OPTIONAL on subsequent runs
-	// (the Ed25519 identity in IdentityPath takes over).
+	// RegistrationToken — the one-time secret the dashboard handed over. Required on first run, OPTIONAL on subsequent runs (the Ed25519 identity in IdentityPath takes over).
 	RegistrationToken string
-	// IdentityPath — where the Ed25519 keypair is persisted. The
-	// docker-compose default mounts $HOST_VOL into the container at
-	// this path so the key survives container restarts.
+	// IdentityPath — where the Ed25519 keypair is persisted. The docker-compose default mounts $HOST_VOL into the container at this path so the key survives container restarts.
 	IdentityPath string
 	// OllamaURL — where to forward inbound buyer requests.
 	OllamaURL string
-	// DiffusersURL is an optional local image-generation/editing runtime.
-	// It is intentionally separate from Ollama because diffusion pipelines use
-	// a different model format and API surface.
+	// DiffusersURL is an optional local image-generation/editing runtime. It is intentionally separate from Ollama because diffusion pipelines use a different model format and API surface.
 	DiffusersURL string
-	// NodeName / Hardware / Location — supplier-declared metadata
-	// reported on every connect. Picked up from env so the
-	// docker-compose .env is the single config seam.
+	// NodeName / Hardware / Location — supplier-declared metadata reported on every connect. Picked up from env so the docker-compose .env is the single config seam.
 	NodeName    string
 	GPUModel    string
 	VRAMTotalGB int
 	CountryISO2 string
-	// Workloads — capability declaration (EVERYAPI_WORKLOADS, comma-
-	// separated; see protocol.KnownWorkloads). Optional: the gateway
-	// only uses this to backfill nodes whose seller never declared
-	// workloads in the dashboard — the dashboard value wins otherwise.
+	// Workloads — capability declaration (EVERYAPI_WORKLOADS, comma- separated; see protocol.KnownWorkloads). Optional: the gateway only uses this to backfill nodes whose seller never declared workloads in the dashboard — the dashboard value wins otherwise.
 	Workloads []string
-	// ConsoleAddr is the local HTTP listener for the embedded supplier console.
-	// A direct binary defaults to loopback; Compose deliberately overrides it to
-	// 0.0.0.0 inside the container while Compose publishes the port on the
-	// supplier's trusted LAN. A direct binary remains loopback-only by default.
+	// ConsoleAddr is the local HTTP listener for the embedded supplier console. A direct binary defaults to loopback; Compose deliberately overrides it to 0.0.0.0 inside the container while Compose publishes the port on the supplier's trusted LAN. A direct binary remains loopback-only by default.
 	ConsoleAddr string
-	// OllamaStoragePath is the model root visible to the agent process. It is
-	// used by the local console for storage inspection and migration planning.
+	// OllamaStoragePath is the model root visible to the agent process. It is used by the local console for storage inspection and migration planning.
 	OllamaStoragePath string
 }
 
-// Validate returns the first config defect, or nil if the agent
-// can start. main.go calls this before doing anything expensive
-// (keypair generation, network dials) so misconfiguration fails
-// in <100ms.
+// Validate returns the first config defect, or nil if the agent can start. main.go calls this before doing anything expensive (keypair generation, network dials) so misconfiguration fails in <100ms.
 func (c Config) Validate() error {
 	if !c.LocalPreview {
 		if strings.TrimSpace(c.GatewayURL) == "" {
@@ -105,8 +82,7 @@ func knownWorkload(w string) bool {
 	return false
 }
 
-// FromEnv reads every recognised variable. Missing optional fields
-// stay zero-valued; required-field defects surface from Validate().
+// FromEnv reads every recognised variable. Missing optional fields stay zero-valued; required-field defects surface from Validate().
 func FromEnv() Config {
 	return Config{
 		LocalPreview:      parseBool(os.Getenv("EVERYAPI_LOCAL_PREVIEW")),
@@ -145,10 +121,7 @@ func defaultOllamaStoragePath() string {
 	return filepath.Join(home, ".everyapi", "edge")
 }
 
-// parseWorkloads splits the comma-separated declaration, trimming
-// whitespace and lowercasing so ".env hand-edits" like "Chat, CODING"
-// still parse. Unknown values survive parsing and fail Validate() —
-// dropping them here would hide the typo from the supplier.
+// parseWorkloads splits the comma-separated declaration, trimming whitespace and lowercasing so ".env hand-edits" like "Chat, CODING" still parse. Unknown values survive parsing and fail Validate() — dropping them here would hide the typo from the supplier.
 func parseWorkloads(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -180,9 +153,7 @@ func defaultStr(v, def string) string {
 	return v
 }
 
-// String renders a config for logging WITHOUT the registration token —
-// printing that to logs is exactly the leak we hashed it for on the
-// server side.
+// String renders a config for logging WITHOUT the registration token — printing that to logs is exactly the leak we hashed it for on the server side.
 func (c Config) String() string {
 	hadToken := "no"
 	if c.RegistrationToken != "" {

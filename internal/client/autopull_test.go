@@ -14,18 +14,12 @@ import (
 
 // A receipt must never delay the download it is reporting on.
 //
-// reportModelPull first used sendFrame, which waits up to 5s for room in
-// the send queue. That is the right tolerance for a frame that matters, but
-// this runs inside the pull loop at two receipts per model, so a full
-// Welcome set on a stalled link spent 20 x 2 x 5s doing nothing — enough to
-// push the cap test above past the 2-minute CI timeout.
+// reportModelPull first used sendFrame, which waits up to 5s for room in the send queue. That is the right tolerance for a frame that matters, but this runs inside the pull loop at two receipts per model, so a full Welcome set on a stalled link spent 20 x 2 x 5s doing nothing — enough to push the cap test above past the 2-minute CI timeout.
 //
-// Both cases below leave the queue unusable in the two ways production can:
-// a client with no live session at all, and one whose link has backed up.
+// Both cases below leave the queue unusable in the two ways production can: a client with no live session at all, and one whose link has backed up.
 func TestReportModelPullNeverBlocks(t *testing.T) {
 	cases := map[string]*Client{
-		// sendQ and done are both nil, as in the cap test. A nil channel
-		// blocks forever, so a waiting implementation hangs outright.
+		// sendQ and done are both nil, as in the cap test. A nil channel blocks forever, so a waiting implementation hangs outright.
 		"no session": {cfg: Config{Log: func(string, string) {}}},
 		"queue full": func() *Client {
 			c := &Client{cfg: Config{Log: func(string, string) {}}, sendQ: make(chan protocol.Frame, 2)}
@@ -52,8 +46,7 @@ func TestReportModelPullNeverBlocks(t *testing.T) {
 	}
 }
 
-// TestPullOllamaModelDrainsStream covers the happy path: a streaming pull
-// is drained to completion and reported as success.
+// TestPullOllamaModelDrainsStream covers the happy path: a streaming pull is drained to completion and reported as success.
 func TestPullOllamaModelDrainsStream(t *testing.T) {
 	var gotBody atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,9 +70,7 @@ func TestPullOllamaModelDrainsStream(t *testing.T) {
 	}
 }
 
-// TestPullOllamaModelSurfacesHTTPError pins that a non-200 from ollama is an
-// error rather than a silent no-op — otherwise a node would report success
-// for a model it never downloaded.
+// TestPullOllamaModelSurfacesHTTPError pins that a non-200 from ollama is an error rather than a silent no-op — otherwise a node would report success for a model it never downloaded.
 func TestPullOllamaModelSurfacesHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "no such model", http.StatusNotFound)
@@ -117,10 +108,7 @@ func TestPullOllamaModelRequiresTerminalSuccess(t *testing.T) {
 	}
 }
 
-// TestPullRecommendedModelsCapsAndContinues pins the two safety properties
-// of the batch path: the gateway cannot make the agent pull an unbounded
-// number of models onto someone else's disk, and one failing model does not
-// abort the rest.
+// TestPullRecommendedModelsCapsAndContinues pins the two safety properties of the batch path: the gateway cannot make the agent pull an unbounded number of models onto someone else's disk, and one failing model does not abort the rest.
 func TestPullRecommendedModelsCapsAndContinues(t *testing.T) {
 	var pulls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -146,8 +134,7 @@ func TestPullRecommendedModelsCapsAndContinues(t *testing.T) {
 	}
 }
 
-// TestPullRecommendedModelsNoOllamaURL pins that auto-pull stays inert when
-// no local runtime is configured, rather than issuing requests to "".
+// TestPullRecommendedModelsNoOllamaURL pins that auto-pull stays inert when no local runtime is configured, rather than issuing requests to "".
 func TestPullRecommendedModelsNoOllamaURL(t *testing.T) {
 	c := &Client{cfg: Config{Log: func(string, string) {}}}
 	c.pullRecommendedModels(context.Background(), []string{"qwen3"})

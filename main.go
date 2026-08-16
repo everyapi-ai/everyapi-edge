@@ -1,11 +1,6 @@
-// EveryAPI edge agent — the supplier-side daemon that connects to
-// the EveryAPI gateway over a reverse WebSocket and serves inference
-// requests by forwarding them to a local Ollama. Protocol contract
-// lives in internal/protocol (mirror of backend/pkg/edge from the
-// gateway repo).
+// EveryAPI edge agent — the supplier-side daemon that connects to the EveryAPI gateway over a reverse WebSocket and serves inference requests by forwarding them to a local Ollama. Protocol contract lives in internal/protocol (mirror of backend/pkg/edge from the gateway repo).
 //
-// main wires config + identity + WS client + forwarder, then runs
-// the reconnect loop until SIGINT/SIGTERM.
+// main wires config + identity + WS client + forwarder, then runs the reconnect loop until SIGINT/SIGTERM.
 package main
 
 import (
@@ -48,11 +43,7 @@ import (
 // Version is patched at build time via -ldflags "-X main.Version=...".
 var Version = "dev"
 
-// logTee writes to the underlying writer (stderr) AND, when a WS
-// client is live, fires a FrameLog through it. The send is async +
-// drops on full queue so the standard log package's mutex is held
-// only for the duration of the underlying stderr write — a stalled
-// gateway link doesn't back up local logging.
+// logTee writes to the underlying writer (stderr) AND, when a WS client is live, fires a FrameLog through it. The send is async + drops on full queue so the standard log package's mutex is held only for the duration of the underlying stderr write — a stalled gateway link doesn't back up local logging.
 type logTee struct {
 	underlying io.Writer
 	client     atomic.Pointer[client.Client]
@@ -65,9 +56,7 @@ func (t *logTee) Write(p []byte) (int, error) {
 		store.Log("info", msg)
 	}
 	if cli := t.client.Load(); cli != nil {
-		// Strip the trailing newline the log package adds — the
-		// dashboard renders one line per LogBody and would
-		// otherwise show double-spaced lines.
+		// Strip the trailing newline the log package adds — the dashboard renders one line per LogBody and would otherwise show double-spaced lines.
 		if msg != "" {
 			cli.SendLog("info", msg)
 		}
@@ -78,10 +67,7 @@ func (t *logTee) Write(p []byte) (int, error) {
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmicroseconds)
 	log.SetPrefix("[edge-agent] ")
-	// Tee log output to the gateway so the seller's dashboard
-	// can stream agent logs without the supplier exposing docker
-	// logs. The underlying writer stays stderr so `docker compose
-	// logs agent` still works on the supplier's machine.
+	// Tee log output to the gateway so the seller's dashboard can stream agent logs without the supplier exposing docker logs. The underlying writer stays stderr so `docker compose logs agent` still works on the supplier's machine.
 	logSink := &logTee{underlying: os.Stderr}
 	log.SetOutput(logSink)
 
@@ -99,20 +85,12 @@ func main() {
 	if err := updateManager.Bootstrap(); err != nil {
 		log.Fatalf("update bootstrap: %v", err)
 	}
-	// The host installer/CLI records accelerator memory in EVERYAPI_VRAM_GB.
-	// For runtimes that share the host kernel, retain automatic discovery; a
-	// Linux container on Apple Silicon must use the explicit host measurement.
+	// The host installer/CLI records accelerator memory in EVERYAPI_VRAM_GB. For runtimes that share the host kernel, retain automatic discovery; a Linux container on Apple Silicon must use the explicit host measurement.
 	consoleMemoryGB := resolvedMemoryGB(cfg.VRAMTotalGB, cfg.GPUModel, detectedMemoryGB)
 	hostPlatform := resolvedPlatform(os.Getenv("EVERYAPI_PLATFORM"), cfg.GPUModel, runtime.GOOS, runtime.GOARCH)
 	log.Printf("starting %s — %s", Version, cfg.String())
 
-	// Early-exit if a previous session received a terminal Disconnect
-	// frame (node_revoked) and persisted the sentinel. Without this,
-	// docker compose's restart policy ("unless-stopped") would respawn
-	// the container after the agent exited, and the new instance would
-	// just spin on auth-rejected reconnects until the cap. The sentinel
-	// lives alongside the identity file so it survives container
-	// restarts without polluting other paths.
+	// Early-exit if a previous session received a terminal Disconnect frame (node_revoked) and persisted the sentinel. Without this, docker compose's restart policy ("unless-stopped") would respawn the container after the agent exited, and the new instance would just spin on auth-rejected reconnects until the cap. The sentinel lives alongside the identity file so it survives container restarts without polluting other paths.
 	if reason, revoked := readRevokedSentinel(cfg.IdentityPath); revoked {
 		log.Printf("node revoked server-side (%s) — agent will not start. "+
 			"Run `everyapi edge remove` on the supplier host to clean up.", reason)
@@ -196,11 +174,7 @@ func resolvedMemoryGB(configured int, gpuModel string, detect func() int) int {
 	if configured > 0 {
 		return configured
 	}
-	// The macOS bundle runs this Linux binary inside Docker. /proc/meminfo is
-	// therefore the Docker VM limit, not Apple Silicon's unified host memory.
-	// Only the host installer/CLI can measure that total accurately. Until an
-	// older node runs the standard host upgrade, report unknown instead of
-	// advertising the VM's usually much smaller allocation as physical memory.
+	// The macOS bundle runs this Linux binary inside Docker. /proc/meminfo is therefore the Docker VM limit, not Apple Silicon's unified host memory. Only the host installer/CLI can measure that total accurately. Until an older node runs the standard host upgrade, report unknown instead of advertising the VM's usually much smaller allocation as physical memory.
 	if strings.Contains(strings.ToLower(gpuModel), "apple silicon") {
 		return 0
 	}
@@ -228,9 +202,7 @@ func detectedMemoryGB() int {
 	} else if gpuGB := detectedNVIDIAMemoryGB(); gpuGB > 0 {
 		return gpuGB
 	} else if data, err := os.ReadFile("/proc/meminfo"); err == nil {
-		// CPU-only Ollama is supported too. The system-memory fallback prevents
-		// offering a model that cannot be resident at all; the individual model
-		// requirements still leave headroom for runtime and context.
+		// CPU-only Ollama is supported too. The system-memory fallback prevents offering a model that cannot be resident at all; the individual model requirements still leave headroom for runtime and context.
 		for _, line := range strings.Split(string(data), "\n") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 && fields[0] == "MemTotal:" {
@@ -285,17 +257,10 @@ func shutdownConsole(server *http.Server) {
 	_ = server.Shutdown(ctx)
 }
 
-// remoteControlResponseBytes deliberately leaves headroom below the websocket
-// envelope limit. A control operation is management metadata, never a model
-// artifact or image; refusing oversized output prevents a gateway from using
-// an administrator link as a bulk exfiltration channel.
+// remoteControlResponseBytes deliberately leaves headroom below the websocket envelope limit. A control operation is management metadata, never a model artifact or image; refusing oversized output prevents a gateway from using an administrator link as a bulk exfiltration channel.
 const remoteControlResponseBytes = 768 << 10
 
-// remoteControlHandler executes only model-management Control Room endpoints
-// through the agent's existing outbound gateway session. The allowlist is
-// intentionally checked here as well as in the gateway: a compromised or old
-// gateway must not turn a dashboard administrator into arbitrary localhost
-// access on supplier hardware.
+// remoteControlHandler executes only model-management Control Room endpoints through the agent's existing outbound gateway session. The allowlist is intentionally checked here as well as in the gateway: a compromised or old gateway must not turn a dashboard administrator into arbitrary localhost access on supplier hardware.
 func remoteControlHandler(handler http.Handler) client.ControlHandler {
 	return func(ctx context.Context, operation protocol.ControlRequestBody) (protocol.ChunkBody, *protocol.ErrorBody) {
 		if handler == nil || !isAllowedRemoteControl(operation.Method, operation.Path) {
@@ -346,10 +311,7 @@ func isAllowedRemoteControl(method, rawPath string) bool {
 	return false
 }
 
-// discoverOllamaModels reads the native Ollama tag list immediately before a
-// gateway handshake. The gateway uses this list to create routable channel
-// abilities, so reporting a static or stale list would make an online node
-// appear healthy while accepting no buyer traffic.
+// discoverOllamaModels reads the native Ollama tag list immediately before a gateway handshake. The gateway uses this list to create routable channel abilities, so reporting a static or stale list would make an online node appear healthy while accepting no buyer traffic.
 func discoverOllamaModels(ctx context.Context, ollamaURL string) ([]string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	return edgeruntime.NewTextClient(ollamaURL, client).Models(ctx)
@@ -385,16 +347,9 @@ func mergeModels(groups ...[]string) []string {
 	return models
 }
 
-// runWithReconnect drives one client lifecycle after another with
-// exponential backoff capped at 30s. The reconnect loop is here (not
-// inside Client) so a future test can stub the client without also
-// stubbing the backoff behavior.
+// runWithReconnect drives one client lifecycle after another with exponential backoff capped at 30s. The reconnect loop is here (not inside Client) so a future test can stub the client without also stubbing the backoff behavior.
 //
-// First connect uses the RegistrationToken from config. After a
-// successful Welcome the token is cleared from the client's config
-// so subsequent reconnects fall through to the Ed25519 signature
-// path — the token is one-shot on the server side and reusing it
-// would just produce "registration token not recognised" errors.
+// First connect uses the RegistrationToken from config. After a successful Welcome the token is cleared from the client's config so subsequent reconnects fall through to the Ed25519 signature path — the token is one-shot on the server side and reusing it would just produce "registration token not recognised" errors.
 func runWithReconnect(
 	ctx context.Context,
 	cfg config.Config,
@@ -409,36 +364,18 @@ func runWithReconnect(
 	return runGatewayLifecycle(ctx, cfg, id, meta, fwd, updateManager, controlHandler, store, logSink)
 }
 
-// revokedSentinelPath sits next to the identity file so it shares
-// the same volume mount in docker-compose and survives container
-// restarts. Named `.revoked` so a `ls -l` next to identity.json
-// makes the failure mode obvious without grepping logs.
+// revokedSentinelPath sits next to the identity file so it shares the same volume mount in docker-compose and survives container restarts. Named `.revoked` so a `ls -l` next to identity.json makes the failure mode obvious without grepping logs.
 func revokedSentinelPath(identityPath string) string {
 	return filepath.Join(filepath.Dir(identityPath), ".revoked")
 }
 
-// readRevokedSentinel returns the persisted reason text + true when
-// the sentinel file exists AND has content. Any read error
-// short-circuits to "not revoked" — the worst case is the agent
-// tries (and fails) one more reconnect cycle, which is the pre-PR
-// behavior and not a regression.
+// readRevokedSentinel returns the persisted reason text + true when the sentinel file exists AND has content. Any read error short-circuits to "not revoked" — the worst case is the agent tries (and fails) one more reconnect cycle, which is the pre-PR behavior and not a regression.
 //
-// A zero-byte sentinel is treated as not-revoked: writeRevokedSentinel
-// always appends a newline, so an empty file is either a write that
-// failed mid-flight or someone hand-touched the path. Either way,
-// blocking startup on a reasonless sentinel would be a worse failure
-// mode than retrying once.
+// A zero-byte sentinel is treated as not-revoked: writeRevokedSentinel always appends a newline, so an empty file is either a write that failed mid-flight or someone hand-touched the path. Either way, blocking startup on a reasonless sentinel would be a worse failure mode than retrying once.
 func readRevokedSentinel(identityPath string) (string, bool) {
 	b, err := os.ReadFile(revokedSentinelPath(identityPath))
 	if err != nil {
-		// IsNotExist is the normal "no sentinel here" path. Any
-		// OTHER error (EACCES from a maintainer chmod-ing the file
-		// to 0000, EIO from a flaky disk) gets surfaced on stderr
-		// so the operator sees why the early-exit branch was
-		// silently skipped rather than discovering it from a
-		// runaway reconnect loop. We still return not-revoked so
-		// the agent attempts to start — the alternative (hard-fail
-		// on unreadable sentinel) trades one footgun for another.
+		// IsNotExist is the normal "no sentinel here" path. Any OTHER error (EACCES from a maintainer chmod-ing the file to 0000, EIO from a flaky disk) gets surfaced on stderr so the operator sees why the early-exit branch was silently skipped rather than discovering it from a runaway reconnect loop. We still return not-revoked so the agent attempts to start — the alternative (hard-fail on unreadable sentinel) trades one footgun for another.
 		if !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "edge-agent: read .revoked sentinel: %v — continuing as not-revoked\n", err)
 		}
@@ -451,42 +388,20 @@ func readRevokedSentinel(identityPath string) (string, bool) {
 	return reason, true
 }
 
-// maxSentinelBytes caps the on-disk reason. The gateway-side reason
-// is short today ("node deleted via /api/seller/edge/nodes"), but a
-// future protocol bump that lets the gateway send arbitrary operator
-// notes would otherwise let a compromised upstream write unbounded
-// data into the supplier's identity dir. 4 KiB covers any reasonable
-// human-readable reason and stays well under filesystem-block
-// thresholds.
+// maxSentinelBytes caps the on-disk reason. The gateway-side reason is short today ("node deleted via /api/seller/edge/nodes"), but a future protocol bump that lets the gateway send arbitrary operator notes would otherwise let a compromised upstream write unbounded data into the supplier's identity dir. 4 KiB covers any reasonable human-readable reason and stays well under filesystem-block thresholds.
 const maxSentinelBytes = 4 * 1024
 
-// writeRevokedSentinel persists the reason text so a maintainer can
-// `cat .revoked` and see why the agent stopped. Best-effort: a write
-// failure means the next boot will retry one more time, which is
-// fine. 0600 because the file lives in the identity dir which we
-// already enforce as private.
+// writeRevokedSentinel persists the reason text so a maintainer can `cat .revoked` and see why the agent stopped. Best-effort: a write failure means the next boot will retry one more time, which is fine. 0600 because the file lives in the identity dir which we already enforce as private.
 //
-// Truncates oversize reasons rather than rejecting — the sentinel's
-// presence is what matters for the early-exit decision; the reason
-// is operator-facing context.
+// Truncates oversize reasons rather than rejecting — the sentinel's presence is what matters for the early-exit decision; the reason is operator-facing context.
 //
-// Truncation walks back to a UTF-8 rune boundary so we never write
-// half a rune into .revoked. The operator-facing reason can carry
-// multi-byte content from any locale (or "…" itself, which is 3
-// bytes), and a malformed-by-truncation file would render as a
-// replacement character or worse in `cat`.
+// Truncation walks back to a UTF-8 rune boundary so we never write half a rune into .revoked. The operator-facing reason can carry multi-byte content from any locale (or "…" itself, which is 3 bytes), and a malformed-by-truncation file would render as a replacement character or worse in `cat`.
 func writeRevokedSentinel(identityPath, reason string) error {
 	payload := reason + "\n"
 	if len(payload) > maxSentinelBytes {
 		const trunc = "…(truncated)\n"
 		budget := maxSentinelBytes - len(trunc)
-		// Walk back from the byte-budget cut until we stand ON a
-		// rune-start byte, then slice exclusive at that index so
-		// the preserved prefix ends on the last byte of the
-		// PREVIOUS complete rune. budget==0 is the degenerate exit
-		// (entire payload was continuation bytes, impossible in
-		// real UTF-8 input but defensive); payload[:0] + trunc is
-		// just the marker, still valid UTF-8 and under cap.
+		// Walk back from the byte-budget cut until we stand ON a rune-start byte, then slice exclusive at that index so the preserved prefix ends on the last byte of the PREVIOUS complete rune. budget==0 is the degenerate exit (entire payload was continuation bytes, impossible in real UTF-8 input but defensive); payload[:0] + trunc is just the marker, still valid UTF-8 and under cap.
 		for budget > 0 && !utf8.RuneStart(payload[budget]) {
 			budget--
 		}
@@ -495,23 +410,11 @@ func writeRevokedSentinel(identityPath, reason string) error {
 	return os.WriteFile(revokedSentinelPath(identityPath), []byte(payload), 0o600)
 }
 
-// nextBackoff is the conventional doubling-with-cap WITH ±25%
-// jitter. Stays linear in the cap window so a persistent gateway
-// outage doesn't drift to minute-long wait times for a transient
-// blip.
+// nextBackoff is the conventional doubling-with-cap WITH ±25% jitter. Stays linear in the cap window so a persistent gateway outage doesn't drift to minute-long wait times for a transient blip.
 //
-// Jitter is the fleet-coordination concern: without it, 100 agents
-// that all lost contact at t=0 would all wake up at t=1s, 2s, 4s,
-// 8s, 16s, 30s, ... in lockstep, and every recovery attempt is a
-// thundering-herd against the just-recovered gateway. ±25% spreads
-// the retries so the gateway sees a smooth load curve as the fleet
-// reconnects. 25% is enough to break sync; tighter risks chasing
-// hot spots in time; wider distorts the doubling shape too much
-// for an operator reading the log to recognise the backoff pattern.
+// Jitter is the fleet-coordination concern: without it, 100 agents that all lost contact at t=0 would all wake up at t=1s, 2s, 4s, 8s, 16s, 30s, ... in lockstep, and every recovery attempt is a thundering-herd against the just-recovered gateway. ±25% spreads the retries so the gateway sees a smooth load curve as the fleet reconnects. 25% is enough to break sync; tighter risks chasing hot spots in time; wider distorts the doubling shape too much for an operator reading the log to recognise the backoff pattern.
 //
-// math/rand is fine here — we're not seeding cryptographic decisions,
-// just breaking lockstep on a recovering fleet. Go 1.20+'s default
-// rand source is per-call seeded; no global state to coordinate.
+// math/rand is fine here — we're not seeding cryptographic decisions, just breaking lockstep on a recovering fleet. Go 1.20+'s default rand source is per-call seeded; no global state to coordinate.
 func nextBackoff(b time.Duration) time.Duration {
 	const max = 30 * time.Second
 	doubled := b * 2
