@@ -37,6 +37,59 @@ func TestImageRuntimeComposeProfilesMatchHostAccelerators(t *testing.T) {
 	}
 }
 
+// The speech runtime rides the same GPU as ollama and diffusers, so every accelerated bundle gets it. macOS is deliberately absent: its image runtime already runs natively on the host rather than in Compose, and no native speech installer ships yet.
+func TestSpeechRuntimeIsWiredIntoEveryAcceleratedBundle(t *testing.T) {
+	tests := []struct {
+		file     string
+		required []string
+	}{
+		{"docker-compose.yml", []string{"speech:", "build: ./speech", "EVERYAPI_SPEECH_URL: http://speech:8189"}},
+		{"docker-compose.rocm.yml", []string{"speech:", "dockerfile: Dockerfile.rocm", "EVERYAPI_SPEECH_URL: http://speech:8189"}},
+		{"docker-compose.windows.yml", []string{"speech:", "build: ./speech", "EVERYAPI_SPEECH_URL: http://speech:8189"}},
+	}
+	for _, test := range tests {
+		t.Run(test.file, func(t *testing.T) {
+			contents := readPackagingFile(t, test.file)
+			for _, required := range test.required {
+				if !strings.Contains(contents, required) {
+					t.Errorf("%s is missing %q", test.file, required)
+				}
+			}
+		})
+	}
+
+	macos := readPackagingFile(t, "docker-compose.macos.yml")
+	if strings.Contains(macos, "EVERYAPI_SPEECH_URL") {
+		t.Error("macOS bundle advertises a speech runtime it does not install")
+	}
+}
+
+// Kokoro cannot phonemise out-of-vocabulary words without espeak-ng, and misaki pip-installs the spaCy pipeline on first use unless it is baked in. Both would surface as a failure on a live buyer request, not at build time.
+func TestSpeechImagesBundleTheirPhonemiserAssets(t *testing.T) {
+	for _, filename := range []string{"speech/Dockerfile", "speech/Dockerfile.rocm"} {
+		contents := readPackagingFile(t, filename)
+		for _, required := range []string{"espeak-ng", "spacy download en_core_web_sm", "COPY app.py model_config.py runtime.py ."} {
+			if !strings.Contains(contents, required) {
+				t.Errorf("%s is missing %q", filename, required)
+			}
+		}
+	}
+}
+
+func TestEdgeReleaseSmokeBuildsSpeechImages(t *testing.T) {
+	workflow := readPackagingFile(t, "../../.github/workflows/edge-release.yml")
+	for _, required := range []string{
+		"Smoke build CUDA speech runtime",
+		"file: clients/edge/speech/Dockerfile",
+		"Smoke build ROCm speech runtime",
+		"file: clients/edge/speech/Dockerfile.rocm",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("Edge release is missing %q", required)
+		}
+	}
+}
+
 func TestDiffusersImagesIncludeSharedRuntimeModule(t *testing.T) {
 	for _, filename := range []string{"diffusers/Dockerfile", "diffusers/Dockerfile.rocm"} {
 		contents := readPackagingFile(t, filename)

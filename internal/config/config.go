@@ -29,6 +29,8 @@ type Config struct {
 	OllamaURL string
 	// DiffusersURL is an optional local image-generation/editing runtime. It is intentionally separate from Ollama because diffusion pipelines use a different model format and API surface.
 	DiffusersURL string
+	// SpeechURL is an optional local text-to-speech runtime, separate again because Kokoro synthesis returns audio bytes rather than the token stream Ollama produces.
+	SpeechURL string
 	// NodeName / Hardware / Location — supplier-declared metadata reported on every connect. Picked up from env so the docker-compose .env is the single config seam.
 	NodeName    string
 	GPUModel    string
@@ -92,6 +94,7 @@ func FromEnv() Config {
 		IdentityPath:      defaultStr(os.Getenv("EVERYAPI_IDENTITY_PATH"), "/var/lib/everyapi-edge/identity.json"),
 		OllamaURL:         defaultStr(os.Getenv("OLLAMA_URL"), "http://ollama:11434"),
 		DiffusersURL:      strings.TrimSpace(os.Getenv("EVERYAPI_DIFFUSERS_URL")),
+		SpeechURL:         strings.TrimSpace(os.Getenv("EVERYAPI_SPEECH_URL")),
 		NodeName:          os.Getenv("EVERYAPI_NODE_NAME"),
 		GPUModel:          os.Getenv("EVERYAPI_GPU_MODEL"),
 		VRAMTotalGB:       int(parseInt64(os.Getenv("EVERYAPI_VRAM_GB"))),

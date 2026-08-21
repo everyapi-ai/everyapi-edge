@@ -39,6 +39,30 @@ services:
       retries: 6
       start_period: 20m
 
+  speech:
+    build:
+      context: ./speech
+      dockerfile: Dockerfile.rocm
+    container_name: everyapi-edge-speech
+    restart: unless-stopped
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    security_opt:
+      - seccomp=unconfined
+    volumes:
+      - ${EVERYAPI_SPEECH_MODEL_PATH:-${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}/speech}:/models/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8189/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20m
+
   ollama:
     image: ollama/ollama:rocm
     container_name: everyapi-edge-ollama
@@ -79,6 +103,8 @@ services:
     depends_on:
       diffusers:
         condition: service_healthy
+      speech:
+        condition: service_healthy
       ollama:
         condition: service_healthy
     environment:
@@ -87,6 +113,7 @@ services:
       EVERYAPI_REGISTRATION_TOKEN: ${EVERYAPI_REGISTRATION_TOKEN:-}
       OLLAMA_URL: http://ollama:11434
       EVERYAPI_DIFFUSERS_URL: http://diffusers:8188
+      EVERYAPI_SPEECH_URL: http://speech:8189
       EVERYAPI_OLLAMA_STORAGE_PATH: /models
       EVERYAPI_IDENTITY_PATH: /var/lib/everyapi-edge/identity.json
       EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}

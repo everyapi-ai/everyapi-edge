@@ -1,0 +1,5 @@
+fastapi[standard]>=0.128,<0.129
+kokoro>=0.9.4,<0.10
+misaki[zh]>=0.9.4,<0.10
+soundfile>=0.13,<0.14
+numpy>=1.26,<3

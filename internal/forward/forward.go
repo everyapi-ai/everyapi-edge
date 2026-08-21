@@ -76,12 +76,12 @@ const (
 )
 
 // New constructs a Forwarder with defaults filled in.
-func New(ollamaURL, diffusersURL string) *Forwarder {
+func New(ollamaURL, diffusersURL, speechURL string) *Forwarder {
 	httpClient := &http.Client{
 		// No client-level timeout — Handle owns the streaming deadline.
 	}
 	return &Forwarder{
-		runtimes:   edgeruntime.NewRouter(ollamaURL, diffusersURL, httpClient),
+		runtimes:   edgeruntime.NewRouter(ollamaURL, diffusersURL, speechURL, httpClient),
 		ChunkBytes: DefaultChunkBytes,
 	}
 }
@@ -98,7 +98,7 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	if errors.Is(err, edgeruntime.ErrRuntimeUnavailable) {
 		return protocol.DoneBody{}, &protocol.ErrorBody{
 			Code:    "runtime_unavailable",
-			Message: "the local image runtime is not configured",
+			Message: err.Error(),
 		}
 	}
 	if err != nil {

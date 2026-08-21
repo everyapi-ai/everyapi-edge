@@ -14,14 +14,26 @@ import (
 type Kind string
 
 const (
-	KindText  Kind = "text"
-	KindImage Kind = "image"
+	KindText   Kind = "text"
+	KindImage  Kind = "image"
+	KindSpeech Kind = "speech"
 )
 
 var (
 	ErrPathNotAllowed     = errors.New("runtime path is not allowed")
 	ErrRuntimeUnavailable = errors.New("runtime is not configured")
 )
+
+// UnavailableError names which runtime was missing. Callers report the reason to the gateway, and with three runtimes a single untyped sentinel would tell an operator whose speech service is down that their image runtime is misconfigured.
+type UnavailableError struct {
+	Kind Kind
+}
+
+func (e *UnavailableError) Error() string {
+	return fmt.Sprintf("the local %s runtime is not configured", e.Kind)
+}
+
+func (e *UnavailableError) Unwrap() error { return ErrRuntimeUnavailable }
 
 type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
@@ -91,32 +103,38 @@ func joinURL(baseURL, path string) (string, error) {
 }
 
 type Router struct {
-	text  *Target
-	image *Target
+	text   *Target
+	image  *Target
+	speech *Target
 }
 
-func NewRouter(textURL, imageURL string, client HTTPDoer) *Router {
+func NewRouter(textURL, imageURL, speechURL string, client HTTPDoer) *Router {
 	return &Router{
-		text:  newTarget(KindText, textURL, client),
-		image: newTarget(KindImage, imageURL, client),
+		text:   newTarget(KindText, textURL, client),
+		image:  newTarget(KindImage, imageURL, client),
+		speech: newTarget(KindSpeech, speechURL, client),
 	}
 }
 
 func (r *Router) Resolve(path string) (*Target, error) {
 	switch path {
 	case "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/models":
-		if r.text.baseURL == "" {
-			return nil, ErrRuntimeUnavailable
-		}
-		return r.text, nil
+		return configured(r.text)
 	case "/v1/images/generations", "/v1/images/edits":
-		if r.image.baseURL == "" {
-			return nil, ErrRuntimeUnavailable
-		}
-		return r.image, nil
+		return configured(r.image)
+	// Transcription and translation are absent on purpose: both upload audio as multipart/form-data, and the agent protocol carries a JSON request body, so the gateway cannot deliver such a request here.
+	case "/v1/audio/speech":
+		return configured(r.speech)
 	default:
 		return nil, ErrPathNotAllowed
 	}
+}
+
+func configured(target *Target) (*Target, error) {
+	if target.baseURL == "" {
+		return nil, &UnavailableError{Kind: target.kind}
+	}
+	return target, nil
 }
 
 func checkResponse(response *http.Response) error {

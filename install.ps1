@@ -105,7 +105,8 @@ if ((Test-Path -LiteralPath $identityPath) -and (Get-Item $identityPath).Length 
 
 $modelRoot = (Join-Path $HOME ".everyapi/edge").Replace('\', '/')
 $imageModelRoot = (Join-Path $modelRoot "images").Replace('\', '/')
-New-Item -ItemType Directory -Force -Path $modelRoot, $imageModelRoot | Out-Null
+$speechModelRoot = (Join-Path $modelRoot "speech").Replace('\', '/')
+New-Item -ItemType Directory -Force -Path $modelRoot, $imageModelRoot, $speechModelRoot | Out-Null
 $envPath = Join-Path $InstallDir ".env"
 $temporaryEnv = Join-Path $InstallDir (".env." + [guid]::NewGuid().ToString("N") + ".tmp")
 $envLines = @(
@@ -118,7 +119,9 @@ $envLines = @(
     "EVERYAPI_PLATFORM=windows/amd64",
     "EVERYAPI_MODEL_PATH=$modelRoot",
     "EVERYAPI_IMAGE_MODEL_PATH=$imageModelRoot",
-    "EVERYAPI_DIFFUSERS_URL=http://diffusers:8188"
+    "EVERYAPI_SPEECH_MODEL_PATH=$speechModelRoot",
+    "EVERYAPI_DIFFUSERS_URL=http://diffusers:8188",
+    "EVERYAPI_SPEECH_URL=http://speech:8189"
 )
 [IO.File]::WriteAllLines($temporaryEnv, $envLines, [Text.UTF8Encoding]::new($false))
 Move-Item -LiteralPath $temporaryEnv -Destination $envPath -Force
@@ -126,7 +129,7 @@ Move-Item -LiteralPath $temporaryEnv -Destination $envPath -Force
 Push-Location $InstallDir
 try {
     Invoke-CheckedNative docker @("compose", "-f", $composeFile, "pull", "--ignore-buildable")
-    Invoke-CheckedNative docker @("compose", "-f", $composeFile, "build", "diffusers")
+    Invoke-CheckedNative docker @("compose", "-f", $composeFile, "build", "diffusers", "speech")
     $logSince = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     Invoke-CheckedNative docker @("compose", "-f", $composeFile, "up", "-d")
     Wait-AgentConnection $logSince

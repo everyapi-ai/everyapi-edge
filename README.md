@@ -2,8 +2,8 @@
 
 The supplier-side daemon for the EveryAPI BYO-GPU marketplace. Runs
 on your GPU machine, connects out to the EveryAPI gateway over a
-reverse WebSocket, and serves inference requests through local Ollama and
-Diffusers runtimes. No port forwarding, no public IP, no domain
+reverse WebSocket, and serves inference requests through local Ollama,
+Diffusers, and Kokoro runtimes. No port forwarding, no public IP, no domain
 needed — your machine just needs outbound HTTPS to api.everyapi.ai.
 
 ## Five-minute onboarding
@@ -123,6 +123,16 @@ several minutes, and the node does not advertise Sana until loading succeeds.
 ComfyUI is not bundled. Edge uses Diffusers directly so the gateway sees one
 stable API and model-discovery contract on every supported OS.
 
+## Speech
+
+The speech runtime advertises `hexgrad/Kokoro-82M` and serves the OpenAI-compatible `POST /v1/audio/speech` endpoint. Weights and voices are about 330 MB and download into `$HOME/.everyapi/edge/speech` at startup; the node does not advertise the model until every voice it offers is warm, so no buyer request ever waits on a download. Peak VRAM stays under 1 GB, so the speech container shares the card with Ollama and Diffusers rather than needing one of its own.
+
+Buyers can request `mp3`, `wav`, `flac`, or raw `pcm`, and the six stock OpenAI voice names map onto Kokoro voices. English (`af_*`, `am_*`, `bf_*`, `bm_*`) and Mandarin (`zf_*`, `zm_*`) voices are advertised; Kokoro's other locales need grapheme-to-phoneme dependencies that are not in the image yet.
+
+Speech ships in the NVIDIA, ROCm, and Windows bundles. It is not in the macOS bundle: that variant runs its accelerated runtimes natively on the host, and no native speech installer exists yet.
+
+Transcription (`/v1/audio/transcriptions`) is not served. Audio upload is `multipart/form-data` and the agent protocol carries a JSON request body, so those bytes have no way to reach a node — the gateway rejects the request rather than dispatching it.
+
 ## Security model
 
 - The agent generates an Ed25519 keypair on first run and stores
@@ -150,7 +160,12 @@ stable API and model-discovery contract on every supported OS.
 - The agent enforces a path-to-runtime whitelist on inbound requests. Even
   if the gateway were compromised, it could not coerce your
   machine into POST'ing to arbitrary local URLs — only the
-  the explicit Ollama and Diffusers OpenAI-compatible paths are accepted.
+  the explicit Ollama, Diffusers, and speech OpenAI-compatible paths
+  are accepted.
+
+- Speech voices are allow-listed. Kokoro loads a voice by fetching
+  `voices/<name>.pt` from its model repository, so passing the buyer's
+  string through would let a request choose what your node downloads.
 
 ## Troubleshooting
 

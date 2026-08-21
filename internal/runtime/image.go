@@ -17,11 +17,15 @@ const (
 	StatusUnavailable Status = "unavailable"
 )
 
-type ImageHealth struct {
+// RuntimeHealth is the discovery contract every local runtime serves on /health. The agent reports the union of the ready model lists to the gateway before each handshake.
+type RuntimeHealth struct {
 	Status Status
 	Models []string
 	Error  string
 }
+
+// ImageHealth is the image runtime's name for that shared contract, kept so the console and discovery call sites read in terms of the runtime they query.
+type ImageHealth = RuntimeHealth
 
 type ImageClient struct {
 	target *Target
@@ -36,13 +40,17 @@ func (c *ImageClient) Do(ctx context.Context, method, path string, headers http.
 }
 
 func (c *ImageClient) Health(ctx context.Context) (ImageHealth, error) {
-	response, err := c.target.Do(ctx, http.MethodGet, "/health", nil, nil)
+	return fetchHealth(ctx, c.target)
+}
+
+func fetchHealth(ctx context.Context, target *Target) (RuntimeHealth, error) {
+	response, err := target.Do(ctx, http.MethodGet, "/health", nil, nil)
 	if err != nil {
-		return ImageHealth{}, err
+		return RuntimeHealth{}, err
 	}
 	defer response.Body.Close()
 	if err := checkResponse(response); err != nil {
-		return ImageHealth{}, err
+		return RuntimeHealth{}, err
 	}
 
 	var payload struct {
@@ -51,7 +59,7 @@ func (c *ImageClient) Health(ctx context.Context) (ImageHealth, error) {
 		Error  string   `json:"error"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxDiscoveryResponseBytes)).Decode(&payload); err != nil {
-		return ImageHealth{}, fmt.Errorf("decode local image runtime health: %w", err)
+		return RuntimeHealth{}, fmt.Errorf("decode local %s runtime health: %w", target.kind, err)
 	}
 	seen := make(map[string]struct{}, len(payload.Models))
 	models := make([]string, 0, len(payload.Models))
@@ -67,5 +75,5 @@ func (c *ImageClient) Health(ctx context.Context) (ImageHealth, error) {
 		models = append(models, name)
 	}
 	sort.Strings(models)
-	return ImageHealth{Status: payload.Status, Models: models, Error: payload.Error}, nil
+	return RuntimeHealth{Status: payload.Status, Models: models, Error: payload.Error}, nil
 }

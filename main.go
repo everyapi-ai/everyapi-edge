@@ -140,7 +140,7 @@ func main() {
 		return
 	}
 
-	fwd := forward.New(cfg.OllamaURL, cfg.DiffusersURL)
+	fwd := forward.New(cfg.OllamaURL, cfg.DiffusersURL, cfg.SpeechURL)
 	var requests sync.Map
 	fwd.Observer = forward.ObserverFuncs{
 		StartedFunc: func(event forward.RequestEvent) {
@@ -325,6 +325,18 @@ func discoverDiffusersModels(ctx context.Context, diffusersURL string) ([]string
 	}
 	if health.Status != edgeruntime.StatusReady {
 		return nil, fmt.Errorf("local image runtime is %s: %s", health.Status, health.Error)
+	}
+	return health.Models, nil
+}
+
+func discoverSpeechModels(ctx context.Context, speechURL string) ([]string, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	health, err := edgeruntime.NewSpeechClient(speechURL, client).Health(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if health.Status != edgeruntime.StatusReady {
+		return nil, fmt.Errorf("local speech runtime is %s: %s", health.Status, health.Error)
 	}
 	return health.Models, nil
 }

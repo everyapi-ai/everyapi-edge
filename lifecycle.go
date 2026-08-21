@@ -80,6 +80,15 @@ func runGatewayLifecycle(
 				log.Printf("discovered %d Diffusers models", len(imageModels))
 			}
 		}
+		if cfg.SpeechURL != "" {
+			speechModels, speechModelErr := discoverSpeechModels(ctx, cfg.SpeechURL)
+			if speechModelErr != nil {
+				log.Printf("warning: could not discover speech models: %v", speechModelErr)
+			} else {
+				sessionMeta.Models = mergeModels(sessionMeta.Models, speechModels)
+				log.Printf("discovered %d speech models", len(speechModels))
+			}
+		}
 
 		cli, err := client.New(client.Config{
 			GatewayURL:        cfg.GatewayURL,

@@ -74,7 +74,7 @@ func TestRuntimeErrorDoesNotExposeImplementationBrand(t *testing.T) {
 }
 
 func TestRouterAllowsOnlyKnownRuntimePaths(t *testing.T) {
-	router := NewRouter("http://text.internal", "http://image.internal", http.DefaultClient)
+	router := NewRouter("http://text.internal", "http://image.internal", "http://speech.internal", http.DefaultClient)
 
 	for path, wantKind := range map[string]Kind{
 		"/v1/chat/completions":   KindText,
@@ -83,6 +83,7 @@ func TestRouterAllowsOnlyKnownRuntimePaths(t *testing.T) {
 		"/v1/models":             KindText,
 		"/v1/images/generations": KindImage,
 		"/v1/images/edits":       KindImage,
+		"/v1/audio/speech":       KindSpeech,
 	} {
 		target, err := router.Resolve(path)
 		if err != nil || target.Kind() != wantKind {
@@ -93,8 +94,32 @@ func TestRouterAllowsOnlyKnownRuntimePaths(t *testing.T) {
 		t.Fatalf("disallowed path error = %v", err)
 	}
 
-	withoutImages := NewRouter("http://text.internal", "", http.DefaultClient)
+	// Both upload audio as multipart/form-data, which the agent protocol's JSON request body cannot carry. They must stay rejected rather than reaching the speech runtime.
+	for _, path := range []string{"/v1/audio/transcriptions", "/v1/audio/translations"} {
+		if _, err := router.Resolve(path); !errors.Is(err, ErrPathNotAllowed) {
+			t.Fatalf("resolve %q = %v, want ErrPathNotAllowed", path, err)
+		}
+	}
+
+	withoutImages := NewRouter("http://text.internal", "", "http://speech.internal", http.DefaultClient)
 	if _, err := withoutImages.Resolve("/v1/images/edits"); !errors.Is(err, ErrRuntimeUnavailable) {
 		t.Fatalf("missing image runtime error = %v", err)
+	}
+}
+
+// A supplier who runs images but not speech must be told which runtime is missing; reporting every gap as the image runtime sent them to the wrong service.
+func TestRouterNamesTheUnavailableRuntime(t *testing.T) {
+	router := NewRouter("http://text.internal", "http://image.internal", "", http.DefaultClient)
+
+	_, err := router.Resolve("/v1/audio/speech")
+	if !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("missing speech runtime error = %v", err)
+	}
+	var unavailable *UnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Kind != KindSpeech {
+		t.Fatalf("error = %#v, want KindSpeech", err)
+	}
+	if err.Error() != "the local speech runtime is not configured" {
+		t.Fatalf("message = %q", err)
 	}
 }
