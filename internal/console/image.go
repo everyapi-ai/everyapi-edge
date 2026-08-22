@@ -86,6 +86,9 @@ func (h *handler) selectImageRuntimeModel(w http.ResponseWriter, r *http.Request
 	if runtime.Models == nil {
 		runtime.Models = []string{}
 	}
+	if h.cfg.ModelsChanged != nil {
+		h.cfg.ModelsChanged()
+	}
 	writeJSON(w, http.StatusOK, runtime)
 }
 

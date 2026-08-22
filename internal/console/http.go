@@ -63,6 +63,10 @@ func errorCode(status int) string {
 	switch status {
 	case http.StatusBadRequest:
 		return "invalid_request"
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusForbidden:
+		return "forbidden"
 	case http.StatusNotFound:
 		return "not_found"
 	case http.StatusConflict:

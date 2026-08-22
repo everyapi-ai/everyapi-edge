@@ -37,7 +37,7 @@ func TestImageRuntimeComposeProfilesMatchHostAccelerators(t *testing.T) {
 	}
 }
 
-// The speech runtime rides the same GPU as ollama and diffusers, so every accelerated bundle gets it. macOS is deliberately absent: its image runtime already runs natively on the host rather than in Compose, and no native speech installer ships yet.
+// The speech runtime rides the same accelerator as ollama and diffusers, so every accelerated bundle gets it. Apple Silicon runs it natively because Docker cannot expose MPS.
 func TestSpeechRuntimeIsWiredIntoEveryAcceleratedBundle(t *testing.T) {
 	tests := []struct {
 		file     string
@@ -45,6 +45,7 @@ func TestSpeechRuntimeIsWiredIntoEveryAcceleratedBundle(t *testing.T) {
 	}{
 		{"docker-compose.yml", []string{"speech:", "build: ./speech", "EVERYAPI_SPEECH_URL: http://speech:8189"}},
 		{"docker-compose.rocm.yml", []string{"speech:", "dockerfile: Dockerfile.rocm", "EVERYAPI_SPEECH_URL: http://speech:8189"}},
+		{"docker-compose.macos.yml", []string{"EVERYAPI_SPEECH_URL: http://host.docker.internal:8189"}},
 		{"docker-compose.windows.yml", []string{"speech:", "build: ./speech", "EVERYAPI_SPEECH_URL: http://speech:8189"}},
 	}
 	for _, test := range tests {
@@ -56,11 +57,6 @@ func TestSpeechRuntimeIsWiredIntoEveryAcceleratedBundle(t *testing.T) {
 				}
 			}
 		})
-	}
-
-	macos := readPackagingFile(t, "docker-compose.macos.yml")
-	if strings.Contains(macos, "EVERYAPI_SPEECH_URL") {
-		t.Error("macOS bundle advertises a speech runtime it does not install")
 	}
 }
 
@@ -109,6 +105,29 @@ func TestMacOSInstallerStartsNativeMPSImageRuntime(t *testing.T) {
 	helper := readPackagingFile(t, "scripts/install-macos-diffusers.sh")
 	if !strings.Contains(helper, "+ 1200") {
 		t.Fatal("macOS installer must allow the first image model download to finish")
+	}
+}
+
+func TestMacOSInstallerStartsNativeMPSSpeechRuntime(t *testing.T) {
+	installer := readPackagingFile(t, "install.sh")
+	for _, required := range []string{"ensure_macos_speech", "install-macos-speech.sh"} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("macOS installer is missing %q", required)
+		}
+	}
+	helper := readPackagingFile(t, "scripts/install-macos-speech.sh")
+	for _, required := range []string{"speech/requirements-macos.txt", "com.everyapi.edge-speech.plist.in", "127.0.0.1:8189/health", "+ 1200"} {
+		if !strings.Contains(helper, required) {
+			t.Errorf("native speech installer is missing %q", required)
+		}
+	}
+	requirements := readPackagingFile(t, "speech/requirements-macos.txt")
+	if !strings.Contains(requirements, "torch>=2.4,<3") {
+		t.Fatal("native speech requirements must install an Apple MPS-capable torch build")
+	}
+	plist := readPackagingFile(t, "scripts/com.everyapi.edge-speech.plist.in")
+	if !strings.Contains(plist, "/opt/homebrew/bin") {
+		t.Fatal("native speech launchd service must be able to resolve Homebrew espeak-ng")
 	}
 }
 

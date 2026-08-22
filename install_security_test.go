@@ -188,6 +188,7 @@ func TestMacOSInstallerPersistsHostUnifiedMemory(t *testing.T) {
 
 func TestExistingNodeUpgradeReusesIdentityWithoutRegistrationToken(t *testing.T) {
 	home := t.TempDir()
+	testConsoleToken := strings.Repeat("a1", 32)
 	installDir := filepath.Join(home, "everyapi-edge")
 	if err := os.MkdirAll(filepath.Join(installDir, ".git"), 0o755); err != nil {
 		t.Fatal(err)
@@ -201,12 +202,16 @@ func TestExistingNodeUpgradeReusesIdentityWithoutRegistrationToken(t *testing.T)
 	if err := os.WriteFile(filepath.Join(installDir, "scripts", "install-macos-diffusers.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(installDir, "scripts", "install-macos-speech.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(installDir, "data", "agent", "identity.json"), []byte(`{"private_key":"persisted"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	oldEnv := "EVERYAPI_GATEWAY=https://gateway.example.test\n" +
 		"EVERYAPI_NODE_ID=842\n" +
 		"EVERYAPI_REGISTRATION_TOKEN=edgert_stale_consumed\n" +
+		"EVERYAPI_CONSOLE_TOKEN=" + testConsoleToken + "\n" +
 		"EVERYAPI_NODE_NAME=existing-mac\n" +
 		"EVERYAPI_COUNTRY=jp\n" +
 		"EVERYAPI_WORKLOADS=chat, embedding\n" +
@@ -272,6 +277,7 @@ esac
 		"EVERYAPI_NODE_ID=842",
 		"EVERYAPI_NODE_NAME=existing-mac",
 		"EVERYAPI_REGISTRATION_TOKEN=",
+		"EVERYAPI_CONSOLE_TOKEN=" + testConsoleToken,
 		"EVERYAPI_GPU_MODEL=Apple Silicon",
 		"EVERYAPI_VRAM_GB=48",
 		"EVERYAPI_PLATFORM=darwin/arm64",
@@ -285,6 +291,19 @@ esac
 	}
 	if strings.Contains(contents, "EVERYAPI_REGISTRATION_TOKEN=edgert_") {
 		t.Fatalf("upgrade retained a consumed registration token:\n%s", contents)
+	}
+}
+
+func TestInstallerGeneratesCryptographicConsoleToken(t *testing.T) {
+	contents, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	for _, required := range []string{"generate_console_token", "/dev/urandom", "-N32", "EVERYAPI_CONSOLE_TOKEN=$CONSOLE_TOKEN"} {
+		if !strings.Contains(script, required) {
+			t.Errorf("installer is missing console token invariant %q", required)
+		}
 	}
 }
 
@@ -303,13 +322,60 @@ func TestMacOSComposeDocumentsEveryAPIModelRoot(t *testing.T) {
 }
 
 func TestComposePublishesTheControlRoomToTheTrustedLAN(t *testing.T) {
-	for _, filename := range []string{"docker-compose.yml", "docker-compose.rocm.yml", "docker-compose.macos.yml"} {
+	for _, filename := range []string{"docker-compose.yml", "docker-compose.rocm.yml", "docker-compose.macos.yml", "docker-compose.windows.yml"} {
 		contents, err := os.ReadFile(filename)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(contents), `"${EVERYAPI_CONSOLE_PORT:-8421}:8421"`) {
+		compose := string(contents)
+		if !strings.Contains(compose, `"${EVERYAPI_CONSOLE_PORT:-8421}:8421"`) {
 			t.Errorf("%s must publish the local Control Room on the configured LAN port", filename)
+		}
+		if !strings.Contains(compose, "EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:?console token required}") {
+			t.Errorf("%s must pass the required Control Room pairing token", filename)
+		}
+	}
+}
+
+func TestExampleEnvironmentDocumentsAndRendersControlRoomPairing(t *testing.T) {
+	contents, err := os.ReadFile(".env.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := string(contents)
+	for _, required := range []string{"EVERYAPI_CONSOLE_TOKEN=", "openssl rand -hex 32", "Docker Compose refuses to start"} {
+		if !strings.Contains(environment, required) {
+			t.Errorf(".env.example is missing Control Room setup guidance %q", required)
+		}
+	}
+	if strings.Contains(environment, "deliberately has no login") {
+		t.Fatal(".env.example still claims the Control Room has no login")
+	}
+
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"openssl rand -hex 32", "Security.Cryptography.RandomNumberGenerator", "EVERYAPI_CONSOLE_TOKEN", "Existing installations created before Control Room pairing"} {
+		if !strings.Contains(string(readme), required) {
+			t.Errorf("README is missing manual pairing migration guidance %q", required)
+		}
+	}
+
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker is required for Compose rendering")
+	}
+	testConsoleToken := strings.Repeat("a1", 32)
+	environment = strings.Replace(environment, "EVERYAPI_NODE_ID=", "EVERYAPI_NODE_ID=1", 1)
+	environment = strings.Replace(environment, "EVERYAPI_CONSOLE_TOKEN=", "EVERYAPI_CONSOLE_TOKEN="+testConsoleToken, 1)
+	envPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envPath, []byte(environment), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, filename := range []string{"docker-compose.yml", "docker-compose.rocm.yml", "docker-compose.macos.yml", "docker-compose.windows.yml"} {
+		cmd := exec.Command("docker", "compose", "--env-file", envPath, "-f", filename, "config", "--quiet")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("%s does not render with the documented example environment: %v\n%s", filename, err, output)
 		}
 	}
 }

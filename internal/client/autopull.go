@@ -36,6 +36,7 @@ func (c *Client) pullRecommendedModels(ctx context.Context, models []string) {
 		c.log("info", fmt.Sprintf("auto-pull: gateway asked for %d models, capping at %d", len(models), maxAutoPullModels))
 		models = models[:maxAutoPullModels]
 	}
+	changed := false
 	for _, model := range models {
 		if ctx.Err() != nil {
 			return
@@ -50,6 +51,10 @@ func (c *Client) pullRecommendedModels(ctx context.Context, models []string) {
 		}
 		c.log("info", fmt.Sprintf("auto-pull: %s ready", model))
 		c.reportModelPull(model, protocol.ModelPullReady, "")
+		changed = true
+	}
+	if changed {
+		c.RequestMetadataRefresh()
 	}
 }
 

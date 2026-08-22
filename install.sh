@@ -71,6 +71,7 @@ HOST_PLATFORM=""
 COUNTRY=""
 WORKLOADS=""
 CONSOLE_PORT=""
+CONSOLE_TOKEN=""
 EXISTING_INSTALL=0
 UPGRADE_MODE=0
 
@@ -233,6 +234,7 @@ if [ -d "$INSTALL_DIR" ]; then
   COUNTRY=$(read_existing_env_value EVERYAPI_COUNTRY)
   WORKLOADS=$(read_existing_env_value EVERYAPI_WORKLOADS)
   CONSOLE_PORT=$(read_existing_env_value EVERYAPI_CONSOLE_PORT)
+  CONSOLE_TOKEN=$(read_existing_env_value EVERYAPI_CONSOLE_TOKEN)
   if [ -s "$INSTALL_DIR/data/agent/identity.json" ]; then
     UPGRADE_MODE=1
     # A persisted identity is authoritative for reconnects. Older installs or
@@ -252,6 +254,7 @@ validate_no_newlines "registration token" "$TOKEN"
 validate_no_newlines "country" "$COUNTRY"
 validate_no_newlines "workloads" "$WORKLOADS"
 validate_no_newlines "console port" "$CONSOLE_PORT"
+validate_no_newlines "console token" "$CONSOLE_TOKEN"
 if [ -n "$COUNTRY" ] && [[ ! "$COUNTRY" =~ ^[A-Z]{2}$ ]]; then
   err "country must be an uppercase ISO 3166-1 alpha-2 code"
   exit 1
@@ -266,6 +269,10 @@ if [ -n "$CONSOLE_PORT" ]; then
     exit 1
   fi
 fi
+if [ -n "$CONSOLE_TOKEN" ] && [[ ! "$CONSOLE_TOKEN" =~ ^[A-Za-z0-9_-]{32,128}$ ]]; then
+  err "console token has an invalid format"
+  exit 1
+fi
 
 # ----- Prerequisites ---------------------------------------------------------
 
@@ -275,6 +282,14 @@ require() {
     return 1
   fi
 }
+
+generate_console_token() {
+  LC_ALL=C od -An -tx1 -N32 /dev/urandom | tr -d ' \n'
+}
+
+if [ -z "$CONSOLE_TOKEN" ]; then
+  CONSOLE_TOKEN=$(generate_console_token)
+fi
 
 ollama_api_ready() {
   curl -fsS --connect-timeout 3 --max-time 5 http://localhost:11434/api/tags >/dev/null 2>&1
@@ -338,6 +353,17 @@ ensure_macos_diffusers() {
   info "installing the native Apple MPS image runtime…"
   "$helper" "$HOME/.everyapi/edge/images" "$VRAM_GB"
   ok "native Diffusers is ready"
+}
+
+ensure_macos_speech() {
+  local helper="./scripts/install-macos-speech.sh"
+  if [ ! -x "$helper" ]; then
+    err "the verified bundle is missing $helper"
+    exit 1
+  fi
+  info "installing the native Apple MPS speech runtime…"
+  "$helper" "$HOME/.everyapi/edge/speech"
+  ok "native speech runtime is ready"
 }
 
 detect_macos_memory_gb() {
@@ -690,6 +716,7 @@ EVERYAPI_MODEL_PATH=$HOME/.everyapi/edge
 EVERYAPI_COUNTRY=$COUNTRY
 EVERYAPI_WORKLOADS=$WORKLOADS
 EVERYAPI_CONSOLE_PORT=$CONSOLE_PORT
+EVERYAPI_CONSOLE_TOKEN=$CONSOLE_TOKEN
 EOF
 chmod 600 "$TMP_ENV"
 mv "$TMP_ENV" .env
@@ -700,6 +727,7 @@ ok "wrote .env (mode 0600)"
 if [ "$GPU" = "macos" ]; then
   ensure_macos_ollama
   ensure_macos_diffusers
+  ensure_macos_speech
 fi
 
 info "pulling images…"
@@ -732,6 +760,8 @@ if [ "$UPGRADE_MODE" -eq 1 ] && [ "$MODEL_EXPLICIT" -eq 0 ]; then
   echo "    The existing node is Online with refreshed host hardware metadata"
   echo "  • Logs:"
   echo "      docker compose -f $COMPOSE_FILE logs -f agent"
+  echo "  • Edge Control Room pairing token:"
+  echo "      $CONSOLE_TOKEN"
   return 0
 fi
 
@@ -760,6 +790,8 @@ echo "      --model qwen2.5:7b"
 echo "  • Open your local Edge Control Room (models, load, requests and logs):"
 echo "      http://<this-node-LAN-IP>:8421"
 echo "    (or http://127.0.0.1:8421 on this node; use only on a trusted LAN)"
+echo "  • Pair this browser with the Edge Control Room token:"
+echo "      $CONSOLE_TOKEN"
 echo "  • Logs:"
 echo "      docker compose -f $COMPOSE_FILE logs -f agent"
 

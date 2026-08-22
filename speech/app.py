@@ -2,13 +2,14 @@
 
 The service has no public port in Compose. The local control room and the Edge request forwarder are its only callers; the agent discovers models through /health.
 
-Only text-to-speech is served. Transcription is deliberately absent: the agent protocol carries a JSON request body, so a multipart audio upload cannot reach this runtime today.
+Only text-to-speech is served. Transcription is deliberately absent because this runtime bundles synthesis models only.
 """
 
 import io
+import os
 from contextlib import asynccontextmanager
 from functools import lru_cache
-from threading import Lock
+from threading import Lock, Thread
 
 import numpy as np
 import soundfile as sf
@@ -33,25 +34,29 @@ from model_config import (
     resolve_voice,
     voice_for_language,
 )
-from runtime import select_device
+from runtime import allocated_memory_bytes, select_device
 
 MAX_INPUT_CHARACTERS = 4096
+RUNTIME_VERSION = os.getenv("EVERYAPI_SPEECH_RUNTIME_VERSION", "1.0.0")
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    preload()
+    worker = Thread(target=preload, name="speech-runtime-warmup", daemon=True)
+    worker.start()
     try:
         yield
     finally:
-        pipeline.cache_clear()
-        model.cache_clear()
+        if not worker.is_alive():
+            pipeline.cache_clear()
+            model.cache_clear()
 
 
 app = FastAPI(title="EveryAPI Edge Speech Runtime", lifespan=lifespan)
 runtime_lock = Lock()
 speech_ready = False
 speech_error = "speech model is still loading"
+speech_status = "starting"
 
 
 class SpeechRequest(BaseModel):
@@ -86,7 +91,10 @@ def preload():
 
     Kokoro downloads a voice tensor the first time that voice is requested, so a node that only warmed its default would make whichever buyer asks for another voice first pay the download — and fail outright if the host cannot reach Hugging Face at that moment, which is how the first live validation of this runtime failed. Each locale is synthesised once to build its G2P frontend, then every allow-listed voice tensor is fetched.
     """
-    global speech_error, speech_ready
+    global speech_error, speech_ready, speech_status
+    speech_ready = False
+    speech_status = "warming"
+    speech_error = "speech model is still loading"
     try:
         with runtime_lock:
             for language, phrase in sorted(WARMUP_PHRASES.items()):
@@ -96,9 +104,27 @@ def preload():
     except Exception as error:  # noqa: BLE001 — surfaced verbatim through /health
         speech_ready = False
         speech_error = str(error)
+        speech_status = "degraded"
         return
     speech_ready = True
     speech_error = ""
+    speech_status = "ready"
+
+
+def speech_capability(status="ready", reason=""):
+    capability = {
+        "id": "audio.tts",
+        "status": status,
+        "models": [DEFAULT_MODEL],
+        "paths": ["/v1/audio/speech"],
+        "limits": {
+            "max_input_characters": MAX_INPUT_CHARACTERS,
+            "formats": sorted(SUPPORTED_RESPONSE_FORMATS),
+        },
+    }
+    if reason:
+        capability["reason"] = reason
+    return capability
 
 
 def synthesize(voice: str, text: str, speed: float) -> np.ndarray:
@@ -127,13 +153,25 @@ def health():
     if not speech_ready:
         return JSONResponse(
             status_code=503,
-            content={"status": "unavailable", "models": [], "error": speech_error},
+            content={
+                "status": speech_status,
+                "version": RUNTIME_VERSION,
+                "device": device.name,
+                "backend": device.backend,
+                "vram_bytes": allocated_memory_bytes(device),
+                "models": [DEFAULT_MODEL],
+                "capabilities": [speech_capability(speech_status, speech_error)],
+                "error": speech_error,
+            },
         )
     return {
         "status": "ready",
+        "version": RUNTIME_VERSION,
         "device": device.name,
         "backend": device.backend,
+        "vram_bytes": allocated_memory_bytes(device),
         "models": [DEFAULT_MODEL],
+        "capabilities": [speech_capability()],
     }
 
 

@@ -17,17 +17,20 @@ var webAssets embed.FS
 
 // Config is local-only console configuration.
 type Config struct {
-	OllamaURL    string
-	DiffusersURL string
-	StoragePath  string
-	VRAMTotalGB  int
-	NodeName     string
-	AgentVersion string
-	GPUModel     string
-	Platform     string
-	CountryISO2  string
-	Version      string
-	Update       func(context.Context, func(UpdateStatus)) error
+	OllamaURL     string
+	DiffusersURL  string
+	SpeechURL     string
+	ConsoleToken  string
+	StoragePath   string
+	VRAMTotalGB   int
+	NodeName      string
+	AgentVersion  string
+	GPUModel      string
+	Platform      string
+	CountryISO2   string
+	Version       string
+	Update        func(context.Context, func(UpdateStatus)) error
+	ModelsChanged func()
 }
 
 type UpdateStatus struct {
@@ -181,6 +184,7 @@ type handler struct {
 	textRuntime          *edgeruntime.TextClient
 	textStreamingRuntime *edgeruntime.TextClient
 	imageRuntimeClient   *edgeruntime.ImageClient
+	speechRuntimeClient  *edgeruntime.SpeechClient
 	mu                   sync.RWMutex
 	pull                 *pullJob
 	pullQueue            []*pullJob
@@ -214,6 +218,13 @@ func (h *handler) imageClient() *edgeruntime.ImageClient {
 	return edgeruntime.NewImageClient(h.cfg.DiffusersURL, h.httpClient)
 }
 
+func (h *handler) speechClient() *edgeruntime.SpeechClient {
+	if h.speechRuntimeClient != nil {
+		return h.speechRuntimeClient
+	}
+	return edgeruntime.NewSpeechClient(h.cfg.SpeechURL, h.httpClient)
+}
+
 var validModelName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$`)
 
 func NewHandler(cfg Config, store *Store) http.Handler {
@@ -237,6 +248,7 @@ func NewHandlers(cfg Config, store *Store) Handlers {
 func newHandlers(cfg Config, store *Store, picker func() (string, error)) Handlers {
 	cfg.OllamaURL = strings.TrimRight(strings.TrimSpace(cfg.OllamaURL), "/")
 	cfg.DiffusersURL = strings.TrimRight(strings.TrimSpace(cfg.DiffusersURL), "/")
+	cfg.SpeechURL = strings.TrimRight(strings.TrimSpace(cfg.SpeechURL), "/")
 	if store == nil {
 		store = NewStore(200)
 	}
@@ -248,12 +260,15 @@ func newHandlers(cfg Config, store *Store, picker func() (string, error)) Handle
 		textRuntime:          edgeruntime.NewTextClient(cfg.OllamaURL, httpClient),
 		textStreamingRuntime: edgeruntime.NewTextClient(cfg.OllamaURL, &http.Client{}),
 		imageRuntimeClient:   edgeruntime.NewImageClient(cfg.DiffusersURL, httpClient),
+		speechRuntimeClient:  edgeruntime.NewSpeechClient(cfg.SpeechURL, httpClient),
 		pickStorage:          picker,
 		storageAvailable:     availableStorageBytes,
 	}
 	browser := http.NewServeMux()
 	browser.HandleFunc("/", h.index)
-	browser.Handle("/api/", sameOriginMutations(http.HandlerFunc(h.api)))
+	authenticator := newSessionAuthenticator(cfg.ConsoleToken)
+	browser.Handle("/api/session", sameOriginMutations(http.HandlerFunc(authenticator.session)))
+	browser.Handle("/api/", sameOriginMutations(authenticator.require(http.HandlerFunc(h.api))))
 	control := http.NewServeMux()
 	control.HandleFunc("/api/", h.api)
 	return Handlers{

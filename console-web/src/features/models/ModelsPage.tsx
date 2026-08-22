@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 
 import { useNavigate } from '@tanstack/react-router'
-import { Download, Gauge, ImageUp, Info, MessageSquareText, Trash2, ZapOff } from 'lucide-react'
+import { Download, ImageUp, MessageSquareText } from 'lucide-react'
 
 import {
   useDeleteModel,
@@ -19,8 +19,20 @@ import {
   useUnloadRuntimeModel,
 } from '@/api/queries'
 import { Button, Input, PageHeader, Panel, QueryState } from '@/components/primitives'
+import { InstalledModelsPanel } from '@/features/models/InstalledModelsPanel'
+import {
+  candidateBytes,
+  isImageEditor,
+  MODEL_CATALOG,
+  ModelCatalogPanel,
+  modelTypeFor,
+  providerFor,
+  typeKey,
+  type CatalogModel,
+  type ModelType,
+} from '@/features/models/ModelCatalogPanel'
+import { ModelResultPanels } from '@/features/models/ModelResultPanels'
 import { useTranslation } from '@/i18n/useTranslation'
-import { formatGigabytes } from '@/lib/format'
 
 /** Conservative picks sized to leave headroom for the KV cache: a model that
  *  exactly fills VRAM starts swapping the moment context grows. */
@@ -29,185 +41,6 @@ const recommendationsFor = (vramGB: number): string[] => {
   if (vramGB >= 16) return ['qwen3:14b', 'gemma3:12b']
   if (vramGB >= 8) return ['qwen3:8b', 'llama3.1:8b']
   return ['qwen2.5:3b', 'llama3.2:3b']
-}
-
-type ModelType = 'chat' | 'reasoning' | 'code' | 'vision' | 'embedding' | 'image'
-
-type CatalogModel = {
-  name: string
-  provider: string
-  type: ModelType
-  minimumGB: number
-  runtime?: 'ollama' | 'diffusers'
-}
-
-const candidateBytes = (candidate: CatalogModel) => candidate.minimumGB * 1024 ** 3
-
-const IMAGE_EDITOR_MODELS = new Set([
-  'Qwen/Qwen-Image-Edit',
-  'Qwen/Qwen-Image-Edit-2509',
-  'Qwen/Qwen-Image-Edit-2511',
-])
-
-const isImageEditor = (candidate: CatalogModel) =>
-  candidate.runtime === 'diffusers' && IMAGE_EDITOR_MODELS.has(candidate.name)
-
-// Curated from Ollama's public library. Keep explicit runnable tags here so a
-// supplier never downloads an ambiguous family alias that resolves to a huge
-// default model.
-const MODEL_CATALOG: CatalogModel[] = [
-  { name: 'qwen2.5:0.5b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 2 },
-  { name: 'qwen2.5:1.5b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 3 },
-  { name: 'qwen2.5:3b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 4 },
-  { name: 'qwen2.5:7b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 8 },
-  { name: 'qwen2.5:14b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 14 },
-  { name: 'qwen2.5:32b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 24 },
-  { name: 'qwen2.5:72b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 56 },
-  { name: 'qwen3:0.6b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 2 },
-  { name: 'qwen3:1.7b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 3 },
-  { name: 'qwen3:4b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 6 },
-  { name: 'qwen3:8b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 8 },
-  { name: 'qwen3:14b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 14 },
-  { name: 'qwen3:32b', provider: 'Alibaba / Qwen', type: 'chat', minimumGB: 24 },
-  { name: 'qwen2.5-coder:1.5b', provider: 'Alibaba / Qwen', type: 'code', minimumGB: 3 },
-  { name: 'qwen2.5-coder:7b', provider: 'Alibaba / Qwen', type: 'code', minimumGB: 8 },
-  { name: 'qwen2.5-coder:14b', provider: 'Alibaba / Qwen', type: 'code', minimumGB: 14 },
-  { name: 'qwen2.5-coder:32b', provider: 'Alibaba / Qwen', type: 'code', minimumGB: 24 },
-  { name: 'qwen3-coder:30b', provider: 'Alibaba / Qwen', type: 'code', minimumGB: 24 },
-  { name: 'qwen3-vl:4b', provider: 'Alibaba / Qwen', type: 'vision', minimumGB: 6 },
-  { name: 'qwen3-vl:8b', provider: 'Alibaba / Qwen', type: 'vision', minimumGB: 10 },
-  { name: 'qwen3-vl:32b', provider: 'Alibaba / Qwen', type: 'vision', minimumGB: 28 },
-  { name: 'qwen2.5vl:3b', provider: 'Alibaba / Qwen', type: 'vision', minimumGB: 6 },
-  { name: 'qwen2.5vl:7b', provider: 'Alibaba / Qwen', type: 'vision', minimumGB: 10 },
-  { name: 'qwen3-embedding:0.6b', provider: 'Alibaba / Qwen', type: 'embedding', minimumGB: 2 },
-  { name: 'qwen3-embedding:4b', provider: 'Alibaba / Qwen', type: 'embedding', minimumGB: 4 },
-  { name: 'qwen3-embedding:8b', provider: 'Alibaba / Qwen', type: 'embedding', minimumGB: 8 },
-  {
-    name: 'Qwen/Qwen-Image',
-    provider: 'Alibaba / Qwen',
-    type: 'image',
-    minimumGB: 48,
-    runtime: 'diffusers',
-  },
-  {
-    name: 'Qwen/Qwen-Image-2512',
-    provider: 'Alibaba / Qwen',
-    type: 'image',
-    minimumGB: 48,
-    runtime: 'diffusers',
-  },
-  {
-    name: 'Qwen/Qwen-Image-Edit',
-    provider: 'Alibaba / Qwen',
-    type: 'image',
-    minimumGB: 48,
-    runtime: 'diffusers',
-  },
-  {
-    name: 'Qwen/Qwen-Image-Edit-2509',
-    provider: 'Alibaba / Qwen',
-    type: 'image',
-    minimumGB: 48,
-    runtime: 'diffusers',
-  },
-  {
-    name: 'Qwen/Qwen-Image-Edit-2511',
-    provider: 'Alibaba / Qwen',
-    type: 'image',
-    minimumGB: 48,
-    runtime: 'diffusers',
-  },
-  {
-    name: 'Qwen/Qwen-Image-Layered',
-    provider: 'Alibaba / Qwen',
-    type: 'image',
-    minimumGB: 48,
-    runtime: 'diffusers',
-  },
-  { name: 'llama3.2:1b', provider: 'Meta', type: 'chat', minimumGB: 2 },
-  { name: 'llama3.2:3b', provider: 'Meta', type: 'chat', minimumGB: 4 },
-  { name: 'llama3.1:8b', provider: 'Meta', type: 'chat', minimumGB: 8 },
-  { name: 'llama3.1:70b', provider: 'Meta', type: 'chat', minimumGB: 56 },
-  { name: 'llama3.3:70b', provider: 'Meta', type: 'chat', minimumGB: 56 },
-  { name: 'llama3.2-vision:11b', provider: 'Meta', type: 'vision', minimumGB: 12 },
-  { name: 'llama3.2-vision:90b', provider: 'Meta', type: 'vision', minimumGB: 72 },
-  { name: 'gemma2:2b', provider: 'Google', type: 'chat', minimumGB: 3 },
-  { name: 'gemma2:9b', provider: 'Google', type: 'chat', minimumGB: 10 },
-  { name: 'gemma2:27b', provider: 'Google', type: 'chat', minimumGB: 22 },
-  { name: 'gemma3:1b', provider: 'Google', type: 'vision', minimumGB: 2 },
-  { name: 'gemma3:4b', provider: 'Google', type: 'vision', minimumGB: 6 },
-  { name: 'gemma3:12b', provider: 'Google', type: 'vision', minimumGB: 12 },
-  { name: 'gemma3:27b', provider: 'Google', type: 'vision', minimumGB: 22 },
-  { name: 'codegemma:2b', provider: 'Google', type: 'code', minimumGB: 3 },
-  { name: 'codegemma:7b', provider: 'Google', type: 'code', minimumGB: 8 },
-  { name: 'deepseek-r1:1.5b', provider: 'DeepSeek', type: 'reasoning', minimumGB: 3 },
-  { name: 'deepseek-r1:7b', provider: 'DeepSeek', type: 'reasoning', minimumGB: 8 },
-  { name: 'deepseek-r1:8b', provider: 'DeepSeek', type: 'reasoning', minimumGB: 8 },
-  { name: 'deepseek-r1:14b', provider: 'DeepSeek', type: 'reasoning', minimumGB: 14 },
-  { name: 'deepseek-r1:32b', provider: 'DeepSeek', type: 'reasoning', minimumGB: 24 },
-  { name: 'deepseek-r1:70b', provider: 'DeepSeek', type: 'reasoning', minimumGB: 56 },
-  { name: 'deepseek-coder-v2:16b', provider: 'DeepSeek', type: 'code', minimumGB: 14 },
-  { name: 'deepseek-coder-v2:236b', provider: 'DeepSeek', type: 'code', minimumGB: 160 },
-  { name: 'mistral:7b', provider: 'Mistral AI', type: 'chat', minimumGB: 8 },
-  { name: 'mistral-nemo:12b', provider: 'Mistral AI', type: 'chat', minimumGB: 12 },
-  { name: 'mistral-small:24b', provider: 'Mistral AI', type: 'chat', minimumGB: 20 },
-  { name: 'ministral-3:3b', provider: 'Mistral AI', type: 'chat', minimumGB: 4 },
-  { name: 'ministral-3:8b', provider: 'Mistral AI', type: 'chat', minimumGB: 8 },
-  { name: 'ministral-3:14b', provider: 'Mistral AI', type: 'chat', minimumGB: 14 },
-  { name: 'codestral:22b', provider: 'Mistral AI', type: 'code', minimumGB: 18 },
-  { name: 'mixtral:8x7b', provider: 'Mistral AI', type: 'chat', minimumGB: 40 },
-  { name: 'phi3:mini', provider: 'Microsoft', type: 'chat', minimumGB: 4 },
-  { name: 'phi3:medium', provider: 'Microsoft', type: 'chat', minimumGB: 14 },
-  { name: 'phi4:14b', provider: 'Microsoft', type: 'reasoning', minimumGB: 14 },
-  { name: 'phi4-mini:3.8b', provider: 'Microsoft', type: 'chat', minimumGB: 4 },
-  { name: 'gpt-oss:20b', provider: 'OpenAI', type: 'reasoning', minimumGB: 18 },
-  { name: 'gpt-oss:120b', provider: 'OpenAI', type: 'reasoning', minimumGB: 96 },
-  { name: 'nomic-embed-text', provider: 'Nomic AI', type: 'embedding', minimumGB: 2 },
-  { name: 'nomic-embed-text:v1.5', provider: 'Nomic AI', type: 'embedding', minimumGB: 2 },
-  { name: 'bge-m3', provider: 'BAAI', type: 'embedding', minimumGB: 4 },
-  { name: 'mxbai-embed-large', provider: 'Mixedbread AI', type: 'embedding', minimumGB: 2 },
-  { name: 'all-minilm', provider: 'Sentence Transformers', type: 'embedding', minimumGB: 2 },
-  { name: 'snowflake-arctic-embed2', provider: 'Snowflake', type: 'embedding', minimumGB: 2 },
-  { name: 'llava:7b', provider: 'LLaVA', type: 'vision', minimumGB: 8 },
-  { name: 'llava:13b', provider: 'LLaVA', type: 'vision', minimumGB: 14 },
-  { name: 'minicpm-v:8b', provider: 'OpenBMB', type: 'vision', minimumGB: 10 },
-  { name: 'starcoder2:7b', provider: 'Hugging Face / BigCode', type: 'code', minimumGB: 8 },
-  { name: 'starcoder2:15b', provider: 'Hugging Face / BigCode', type: 'code', minimumGB: 14 },
-  { name: 'granite3.1-dense:8b', provider: 'IBM', type: 'chat', minimumGB: 8 },
-  { name: 'granite-code:8b', provider: 'IBM', type: 'code', minimumGB: 8 },
-]
-
-const catalogModelFor = (name: string) => MODEL_CATALOG.find((candidate) => candidate.name === name)
-
-const providerFor = (name: string) => catalogModelFor(name)?.provider ?? 'Local'
-
-const modelTypeFor = (name: string): ModelType => {
-  const catalogModel = catalogModelFor(name)
-  if (catalogModel) return catalogModel.type
-
-  const normalized = name.toLowerCase()
-  if (/(embed|bge)/.test(normalized)) return 'embedding'
-  if (/(vision|vl|llava|minicpm-v)/.test(normalized)) return 'vision'
-  if (/(coder|code|codestral|starcoder)/.test(normalized)) return 'code'
-  if (/(deepseek-r1|reasoning|qwq|phi4|gpt-oss)/.test(normalized)) return 'reasoning'
-  return 'chat'
-}
-
-const typeKey: Record<
-  ModelType,
-  | 'models.typeChat'
-  | 'models.typeReasoning'
-  | 'models.typeCode'
-  | 'models.typeVision'
-  | 'models.typeEmbedding'
-  | 'models.typeImage'
-> = {
-  chat: 'models.typeChat',
-  reasoning: 'models.typeReasoning',
-  code: 'models.typeCode',
-  vision: 'models.typeVision',
-  embedding: 'models.typeEmbedding',
-  image: 'models.typeImage',
 }
 
 const formatTransferRate = (bytesPerSecond: number) => {
@@ -451,7 +284,7 @@ export const ModelsPage = () => {
     <div className='flex flex-col gap-5'>
       <PageHeader title={t('models.title')} description={t('models.description')} />
       <div className='grid gap-4 min-[1800px]:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]'>
-        <Panel title={t('models.pull')}>
+        <ModelCatalogPanel>
           {overview.isPending ? (
             <p className='text-sm text-muted'>{t('models.recommendationsLoading')}</p>
           ) : totalMemoryGB > 0 ? (
@@ -631,7 +464,7 @@ export const ModelsPage = () => {
             </p>
           ) : null}
           <PullProgress />
-        </Panel>
+        </ModelCatalogPanel>
 
         <Panel title={t('models.title')} className='min-w-0'>
           <QueryState
@@ -705,217 +538,35 @@ export const ModelsPage = () => {
             <p data-installed-model-count className='mb-3 text-xs text-faint'>
               {t('models.filterCount', { count: filteredModels.length })}
             </p>
-            <p className='mb-2 text-xs text-faint xl:hidden'>{t('models.tableScrollHint')}</p>
-            <div
-              role='region'
-              aria-label={t('models.tableLabel')}
-              tabIndex={0}
-              className='max-w-full overflow-x-auto rounded-sm focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none'
-            >
-              <table className='w-full min-w-[800px] border-collapse text-sm'>
-                <thead>
-                  <tr>
-                    {[
-                      t('models.columnProvider'),
-                      t('models.columnModel'),
-                      t('models.columnStatus'),
-                      t('models.columnType'),
-                      t('models.columnSize'),
-                      t('models.columnDetails'),
-                    ].map((heading) => (
-                      <th
-                        key={heading}
-                        scope='col'
-                        className='border-b border-line px-3 py-2.5 text-left text-xs font-medium whitespace-nowrap text-faint'
-                      >
-                        {heading}
-                      </th>
-                    ))}
-                    <th scope='col' className='border-b border-line px-3 py-2.5' />
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredModels.map((model) => (
-                    <tr key={model.name} data-installed-model={model.name}>
-                      <td
-                        data-model-provider
-                        className='border-b border-line px-3 py-3 whitespace-nowrap text-ink-2'
-                      >
-                        {providerFor(model.name)}
-                      </td>
-                      <td className='border-b border-line px-3 py-3 font-medium whitespace-nowrap text-ink'>
-                        {model.name}
-                      </td>
-                      <td className='border-b border-line px-3 py-3 whitespace-nowrap text-muted'>
-                        <span
-                          data-model-residency
-                          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${loadedModels.has(model.name) ? 'bg-accent/14 text-accent' : 'bg-surface-2 text-ink-dim'}`}
-                        >
-                          {loadedModels.has(model.name)
-                            ? t('models.loaded')
-                            : t('models.installed')}
-                        </span>
-                      </td>
-                      <td
-                        data-model-kind
-                        className='border-b border-line px-3 py-3 whitespace-nowrap text-muted'
-                      >
-                        {t(typeKey[modelTypeFor(model.name)])}
-                      </td>
-                      <td className='border-b border-line px-3 py-3 whitespace-nowrap text-ink-2'>
-                        {formatGigabytes(model.size)}
-                      </td>
-                      <td className='border-b border-line px-3 py-3 whitespace-nowrap text-muted'>
-                        {model.details?.parameter_size ?? t('common.unknown')} /{' '}
-                        {model.details?.quantization_level ?? t('common.unknown')}
-                      </td>
-                      <td className='border-b border-line px-3 py-3 text-right'>
-                        <div className='flex justify-end gap-2'>
-                          <Button
-                            type='button'
-                            variant='ghost'
-                            aria-label={t('models.inspectCapabilities')}
-                            title={t('models.inspectCapabilities')}
-                            onClick={() => setInspectedModel(model.name)}
-                            className='inline-flex size-9 items-center justify-center p-0'
-                          >
-                            <Info className='size-3.5' aria-hidden='true' />
-                          </Button>
-                          <Button
-                            type='button'
-                            variant='ghost'
-                            aria-label={t('models.openPlayground')}
-                            title={t('models.openPlayground')}
-                            onClick={() => openPlayground(model.name)}
-                            className='inline-flex size-9 items-center justify-center p-0'
-                          >
-                            <MessageSquareText className='size-3.5' aria-hidden='true' />
-                          </Button>
-                          {modelTypeFor(model.name) !== 'image' ? (
-                            <Button
-                              type='button'
-                              variant='ghost'
-                              aria-label={t('models.benchmark')}
-                              title={
-                                (overview.data?.active_requests ?? 0) > 0
-                                  ? t('models.benchmarkBusy')
-                                  : t('models.benchmark')
-                              }
-                              disabled={
-                                benchmarkModel.isPending ||
-                                (overview.data?.active_requests ?? 0) > 0
-                              }
-                              onClick={() => benchmark(model.name)}
-                              className='inline-flex size-9 items-center justify-center p-0'
-                            >
-                              <Gauge className='size-3.5' aria-hidden='true' />
-                            </Button>
-                          ) : null}
-                          {loadedModels.has(model.name) ? (
-                            <Button
-                              type='button'
-                              variant='ghost'
-                              aria-label={t('runtime.unload')}
-                              title={t('runtime.unload')}
-                              disabled={unloadRuntimeModel.isPending}
-                              onClick={() => unload(model.name)}
-                              className='inline-flex size-9 items-center justify-center p-0'
-                            >
-                              <ZapOff className='size-3.5' aria-hidden='true' />
-                            </Button>
-                          ) : null}
-                          <Button
-                            type='button'
-                            variant='danger'
-                            aria-label={t('models.remove')}
-                            title={
-                              loadedModels.has(model.name)
-                                ? t('models.unloadBeforeRemove')
-                                : t('models.remove')
-                            }
-                            disabled={deleteModel.isPending || loadedModels.has(model.name)}
-                            onClick={() => remove(model.name)}
-                            className='inline-flex size-9 items-center justify-center p-0'
-                          >
-                            <Trash2 className='size-3.5' aria-hidden='true' />
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <InstalledModelsPanel
+              models={filteredModels}
+              loadedModels={loadedModels}
+              activeRequests={overview.data?.active_requests ?? 0}
+              benchmarkPending={benchmarkModel.isPending}
+              unloadPending={unloadRuntimeModel.isPending}
+              deletePending={deleteModel.isPending}
+              providerFor={providerFor}
+              typeFor={(name) => t(typeKey[modelTypeFor(name)])}
+              isImage={(name) => modelTypeFor(name) === 'image'}
+              onInspect={setInspectedModel}
+              onOpen={openPlayground}
+              onBenchmark={benchmark}
+              onUnload={unload}
+              onRemove={remove}
+            />
             {filteredModels.length === 0 ? (
               <p data-installed-model-empty className='py-5 text-sm text-muted'>
                 {t('models.noFilterMatches')}
               </p>
             ) : null}
-            {benchmarkModel.data ? (
-              <section
-                data-model-benchmark
-                className='mt-4 rounded-md border border-good/25 bg-good/8 p-3'
-              >
-                <h3 className='text-sm font-medium text-good'>{t('models.benchmarkTitle')}</h3>
-                <dl className='mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-xs sm:grid-cols-4'>
-                  <div>
-                    <dt className='text-faint'>{t('models.columnModel')}</dt>
-                    <dd className='mt-1 font-mono text-ink'>{benchmarkModel.data.model}</dd>
-                  </div>
-                  <div>
-                    <dt className='text-faint'>{t('models.benchmarkRate')}</dt>
-                    <dd className='mt-1 font-medium text-good'>
-                      {benchmarkModel.data.tokens_per_second.toFixed(1)}{' '}
-                      {t('models.benchmarkRateUnit')}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className='text-faint'>{t('models.benchmarkTokens')}</dt>
-                    <dd className='mt-1 font-medium text-ink'>{benchmarkModel.data.eval_count}</dd>
-                  </div>
-                  <div>
-                    <dt className='text-faint'>{t('models.benchmarkDuration')}</dt>
-                    <dd className='mt-1 font-medium text-ink'>
-                      {(benchmarkModel.data.total_duration_ns / 1e9).toFixed(1)} s
-                    </dd>
-                  </div>
-                </dl>
-                <p className='mt-3 text-xs leading-5 text-muted'>{t('models.benchmarkHint')}</p>
-              </section>
-            ) : null}
-            {inspectedModel ? (
-              <section
-                data-model-capabilities
-                className='mt-4 rounded-md border border-line bg-surface-1 p-3'
-              >
-                <h3 className='text-sm font-medium text-ink'>{t('models.capabilitiesTitle')}</h3>
-                <p className='mt-1 font-mono text-xs text-muted'>{inspectedModel}</p>
-                {inspectedCapabilities.isPending ? (
-                  <p className='mt-3 text-sm text-muted'>{t('models.capabilitiesLoading')}</p>
-                ) : null}
-                {inspectedCapabilities.isError ? (
-                  <p role='alert' className='mt-3 text-sm text-danger'>
-                    {inspectedCapabilities.error.message}
-                  </p>
-                ) : null}
-                {inspectedCapabilities.data ? (
-                  inspectedCapabilities.data.capabilities.length ? (
-                    <div className='mt-3 flex flex-wrap gap-2'>
-                      {inspectedCapabilities.data.capabilities.map((capability) => (
-                        <span
-                          key={capability}
-                          className='rounded-full bg-accent/14 px-2.5 py-1 text-xs font-medium text-accent'
-                        >
-                          {capabilityLabel(capability)}
-                        </span>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className='mt-3 text-sm text-muted'>{t('models.capabilitiesEmpty')}</p>
-                  )
-                ) : null}
-              </section>
-            ) : null}
+            <ModelResultPanels
+              benchmark={benchmarkModel.data}
+              inspectedModel={inspectedModel}
+              capabilities={inspectedCapabilities.data}
+              capabilitiesPending={inspectedCapabilities.isPending}
+              capabilitiesError={inspectedCapabilities.error?.message}
+              capabilityLabel={capabilityLabel}
+            />
           </QueryState>
         </Panel>
       </div>

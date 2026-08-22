@@ -39,6 +39,7 @@ export const overviewSchema = z.object({
   gateway_last_error: z.string().optional().default(''),
   gateway_reconnect_attempt: z.number().int().nonnegative().optional().default(0),
   gateway_next_reconnect_at: timestamp,
+  gateway_round_trip_ms: z.number().int().nonnegative().optional().default(0),
 })
 
 export const nodeProfileSchema = z.object({
@@ -48,6 +49,11 @@ export const nodeProfileSchema = z.object({
   platform: z.string().optional().default(''),
   country_iso2: z.string().optional().default(''),
   vram_total_gb: z.number().int().nonnegative().optional().default(0),
+})
+
+export const sessionSchema = z.object({
+  authenticated: z.boolean(),
+  pairing_required: z.boolean(),
 })
 
 export const modelSchema = z.object({
@@ -110,6 +116,49 @@ export const imageRuntimeSchema = z.object({
   error: z.string().optional().default(''),
 })
 
+export const capabilitySchema = z.object({
+  id: z.enum([
+    'text.chat',
+    'text.completion',
+    'text.responses',
+    'text.embedding',
+    'text.vision',
+    'image.generate',
+    'image.edit',
+    'audio.tts',
+  ]),
+  runtime: z.enum(['text', 'image', 'speech']),
+  status: z.enum(['ready', 'warming', 'degraded', 'unavailable', 'unsupported']),
+  models: z
+    .array(z.string())
+    .nullish()
+    .transform((models) => models ?? []),
+  paths: z
+    .array(z.string())
+    .nullish()
+    .transform((paths) => paths ?? []),
+  version: z.string().optional().default(''),
+  reason: z.string().optional().default(''),
+  limits: z
+    .object({
+      max_input_bytes: z.number().optional().default(0),
+      max_input_characters: z.number().optional().default(0),
+      formats: z
+        .array(z.string())
+        .nullish()
+        .transform((formats) => formats ?? []),
+    })
+    .optional()
+    .default({ max_input_bytes: 0, max_input_characters: 0, formats: [] }),
+})
+
+export const capabilityListSchema = z.object({
+  capabilities: z
+    .array(capabilitySchema)
+    .nullish()
+    .transform((items) => items ?? []),
+})
+
 export const storageSchema = z.object({
   path: z.string(),
   accessible: z.boolean(),
@@ -168,6 +217,7 @@ export const requestSchema = z.object({
   id: z.string(),
   model: z.string(),
   path: z.string(),
+  capability: z.string().optional().default(''),
   consumer: z.string(),
   started_at: timestamp,
   completed_at: timestamp,
@@ -232,7 +282,9 @@ export const errorEnvelopeSchema = z.object({
 
 export type Overview = z.infer<typeof overviewSchema>
 export type NodeProfile = z.infer<typeof nodeProfileSchema>
+export type Session = z.infer<typeof sessionSchema>
 export type ImageRuntime = z.infer<typeof imageRuntimeSchema>
+export type Capability = z.infer<typeof capabilitySchema>
 export type Model = z.infer<typeof modelSchema>
 export type ModelCapabilities = z.infer<typeof modelCapabilitiesSchema>
 export type ModelBenchmark = z.infer<typeof modelBenchmarkSchema>

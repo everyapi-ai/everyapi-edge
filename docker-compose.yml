@@ -123,9 +123,9 @@ services:
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
       EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
       EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
+      EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:?console token required}
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
     ports:
-      # Local-network management surface. It has no login because it is for
-      # the supplier's trusted LAN; never expose this port to the Internet.
+      # Local-network management surface. Pairing protects browser access, but plain HTTP still requires a trusted LAN and must never be exposed to the Internet.
       - "${EVERYAPI_CONSOLE_PORT:-8421}:8421"

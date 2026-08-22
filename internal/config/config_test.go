@@ -81,6 +81,48 @@ func TestValidateRejectsInvalidConsoleAddress(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsLoopbackConsoleWithoutToken(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:8421", "[::1]:8421", "localhost:8421"} {
+		cfg := validBase()
+		cfg.ConsoleAddr = address
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("loopback console %q should not require a pairing token: %v", address, err)
+		}
+	}
+}
+
+func TestValidateRequiresTokenForLANConsole(t *testing.T) {
+	for _, address := range []string{"0.0.0.0:8421", ":8421", "192.168.1.8:8421", "edge-box.local:8421"} {
+		cfg := validBase()
+		cfg.ConsoleAddr = address
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "EVERYAPI_CONSOLE_TOKEN") {
+			t.Fatalf("LAN console %q should require a pairing token, got %v", address, err)
+		}
+	}
+}
+
+func TestValidateRejectsShortLANConsoleToken(t *testing.T) {
+	cfg := validBase()
+	cfg.ConsoleAddr = "0.0.0.0:8421"
+	cfg.ConsoleToken = "too-short"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "at least 32 characters") {
+		t.Fatalf("short pairing token should fail validation, got %v", err)
+	}
+}
+
+func TestFromEnvReadsConsoleTokenWithoutLoggingIt(t *testing.T) {
+	token := strings.Repeat("a1", 32)
+	t.Setenv("EVERYAPI_CONSOLE_TOKEN", token)
+	cfg := FromEnv()
+	if cfg.ConsoleToken != token {
+		t.Fatalf("ConsoleToken = %q", cfg.ConsoleToken)
+	}
+	if strings.Contains(cfg.String(), token) {
+		t.Fatal("Config.String exposed the console pairing token")
+	}
+}
+
 func TestValidateRejectsNegativeVRAM(t *testing.T) {
 	cfg := validBase()
 	cfg.VRAMTotalGB = -1

@@ -107,11 +107,14 @@ func main() {
 	defer cancel()
 
 	store := console.NewStore(200)
+	metadataRefresh := newMetadataRefresh()
 	logSink.store.Store(store)
 	defer logSink.store.Store(nil)
 	consoleHandlers := console.NewHandlers(console.Config{
 		OllamaURL:    cfg.OllamaURL,
 		DiffusersURL: cfg.DiffusersURL,
+		SpeechURL:    cfg.SpeechURL,
+		ConsoleToken: cfg.ConsoleToken,
 		StoragePath:  cfg.OllamaStoragePath,
 		VRAMTotalGB:  consoleMemoryGB,
 		NodeName:     cfg.NodeName,
@@ -124,6 +127,9 @@ func main() {
 			return updateManager.RunLatest(updateCtx, func(status edgeupdate.Status) {
 				report(console.UpdateStatus{State: status.State, Version: status.Version, Error: status.Error})
 			})
+		},
+		ModelsChanged: func() {
+			metadataRefresh.Notify()
 		},
 	}, store)
 	consoleServer, err := startConsole(ctx, cfg.ConsoleAddr, consoleHandlers.Browser)
@@ -144,7 +150,7 @@ func main() {
 	var requests sync.Map
 	fwd.Observer = forward.ObserverFuncs{
 		StartedFunc: func(event forward.RequestEvent) {
-			requests.Store(event.ID, store.Start(console.RequestStart{ID: event.ID, Consumer: event.Consumer, Model: event.Model, Path: event.Path, StartedAt: event.StartedAt}))
+			requests.Store(event.ID, store.Start(console.RequestStart{ID: event.ID, Consumer: event.Consumer, Model: event.Model, Path: event.Path, Capability: string(event.Capability), StartedAt: event.StartedAt}))
 		},
 		FinishedFunc: func(event forward.RequestEvent) {
 			if handle, ok := requests.LoadAndDelete(event.ID); ok {
@@ -164,7 +170,7 @@ func main() {
 		Location: protocol.Location{CountryISO2: cfg.CountryISO2},
 	}
 
-	if err := runWithReconnect(ctx, cfg, id, meta, fwd, updateManager, consoleHandlers.Control, store, logSink); err != nil && !errors.Is(err, context.Canceled) {
+	if err := runWithReconnect(ctx, cfg, id, meta, fwd, updateManager, consoleHandlers.Control, store, logSink, metadataRefresh); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("fatal: %v", err)
 	}
 	log.Print("shutting down cleanly")
@@ -297,7 +303,7 @@ func isAllowedRemoteControl(method, rawPath string) bool {
 	switch method {
 	case http.MethodGet:
 		switch parsed.Path {
-		case "/api/overview", "/api/models", "/api/models/capabilities", "/api/runtime", "/api/image-runtime", "/api/storage", "/api/storage/migrate", "/api/models/pull":
+		case "/api/overview", "/api/models", "/api/models/capabilities", "/api/capabilities", "/api/runtime", "/api/image-runtime", "/api/storage", "/api/storage/migrate", "/api/models/pull":
 			return true
 		}
 	case http.MethodPost:
@@ -315,6 +321,71 @@ func isAllowedRemoteControl(method, rawPath string) bool {
 func discoverOllamaModels(ctx context.Context, ollamaURL string) ([]string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	return edgeruntime.NewTextClient(ollamaURL, client).Models(ctx)
+}
+
+func discoverTextCapabilities(ctx context.Context, ollamaURL string, models []string) ([]protocol.Capability, error) {
+	capabilities, _, err := discoverTextRuntimeState(ctx, ollamaURL, models)
+	return capabilities, err
+}
+
+func discoverTextRuntimeState(ctx context.Context, ollamaURL string, models []string) ([]protocol.Capability, bool, error) {
+	client := edgeruntime.NewTextClient(ollamaURL, &http.Client{Timeout: 10 * time.Second})
+	modelsByCapability := map[protocol.CapabilityID][]string{}
+	var discoveryErrors []error
+	responsesSupported, responsesErr := client.SupportsResponses(ctx)
+	if responsesErr != nil {
+		discoveryErrors = append(discoveryErrors, fmt.Errorf("inspect Ollama version: %w", responsesErr))
+	}
+	for _, model := range models {
+		capabilities, err := client.ModelCapabilities(ctx, model)
+		if err != nil {
+			discoveryErrors = append(discoveryErrors, fmt.Errorf("inspect %s: %w", model, err))
+			continue
+		}
+		for _, capability := range capabilities {
+			switch capability {
+			case "completion":
+				modelsByCapability[protocol.CapabilityTextChat] = append(modelsByCapability[protocol.CapabilityTextChat], model)
+				modelsByCapability[protocol.CapabilityTextCompletion] = append(modelsByCapability[protocol.CapabilityTextCompletion], model)
+				if responsesSupported {
+					modelsByCapability[protocol.CapabilityTextResponses] = append(modelsByCapability[protocol.CapabilityTextResponses], model)
+				}
+			case "embedding":
+				modelsByCapability[protocol.CapabilityTextEmbedding] = append(modelsByCapability[protocol.CapabilityTextEmbedding], model)
+			case "vision":
+				modelsByCapability[protocol.CapabilityTextVision] = append(modelsByCapability[protocol.CapabilityTextVision], model)
+			}
+		}
+	}
+	definitions := []struct {
+		id   protocol.CapabilityID
+		path string
+	}{
+		{id: protocol.CapabilityTextChat, path: "/v1/chat/completions"},
+		{id: protocol.CapabilityTextCompletion, path: "/v1/completions"},
+	}
+	if responsesSupported {
+		definitions = append(definitions, struct {
+			id   protocol.CapabilityID
+			path string
+		}{id: protocol.CapabilityTextResponses, path: "/v1/responses"})
+	}
+	definitions = append(definitions, struct {
+		id   protocol.CapabilityID
+		path string
+	}{id: protocol.CapabilityTextEmbedding, path: "/v1/embeddings"}, struct {
+		id   protocol.CapabilityID
+		path string
+	}{id: protocol.CapabilityTextVision, path: "/v1/chat/completions"})
+	result := make([]protocol.Capability, 0, len(definitions))
+	for _, definition := range definitions {
+		models := mergeModels(modelsByCapability[definition.id])
+		if len(models) == 0 {
+			continue
+		}
+		result = append(result, protocol.Capability{ID: definition.id, Runtime: protocol.RuntimeText, Status: protocol.CapabilityReady, Models: models, Paths: []string{definition.path}})
+	}
+	return result, responsesSupported, errors.Join(discoveryErrors...)
 }
 
 func discoverDiffusersModels(ctx context.Context, diffusersURL string) ([]string, error) {
@@ -341,6 +412,59 @@ func discoverSpeechModels(ctx context.Context, speechURL string) ([]string, erro
 	return health.Models, nil
 }
 
+func protocolCapabilities(runtimeKind protocol.RuntimeKind, health edgeruntime.RuntimeHealth) []protocol.Capability {
+	result := make([]protocol.Capability, 0, len(health.Capabilities))
+	for _, capability := range health.Capabilities {
+		id := protocol.CapabilityID(capability.ID)
+		if !capabilityBelongsToRuntime(id, runtimeKind) {
+			continue
+		}
+		status := protocol.CapabilityStatus(capability.Status)
+		switch status {
+		case protocol.CapabilityReady, protocol.CapabilityWarming, protocol.CapabilityDegraded, protocol.CapabilityUnavailable, protocol.CapabilityUnsupported:
+		case protocol.CapabilityStatus(edgeruntime.StatusStarting):
+			status = protocol.CapabilityWarming
+		default:
+			status = protocol.CapabilityUnavailable
+		}
+		reason := strings.TrimSpace(capability.Reason)
+		if reason == "" && status != protocol.CapabilityReady {
+			reason = strings.TrimSpace(health.Error)
+		}
+		result = append(result, protocol.Capability{
+			ID: id, Runtime: runtimeKind, Status: status, Models: mergeModels(capability.Models), Paths: mergeModels(capability.Paths), Version: strings.TrimSpace(health.Version), Reason: reason,
+			Limits: protocol.CapabilityLimits{MaxInputBytes: capability.Limits.MaxInputBytes, MaxInputCharacters: capability.Limits.MaxInputCharacters, Formats: mergeModels(capability.Limits.Formats)},
+		})
+	}
+	return result
+}
+
+func readyRuntimeModels(health edgeruntime.RuntimeHealth) []string {
+	var models []string
+	for _, capability := range health.Capabilities {
+		if capability.Status == edgeruntime.StatusReady {
+			models = append(models, capability.Models...)
+		}
+	}
+	if len(models) == 0 && health.Status == edgeruntime.StatusReady {
+		models = health.Models
+	}
+	return mergeModels(models)
+}
+
+func capabilityBelongsToRuntime(id protocol.CapabilityID, runtimeKind protocol.RuntimeKind) bool {
+	switch runtimeKind {
+	case protocol.RuntimeText:
+		return id == protocol.CapabilityTextChat || id == protocol.CapabilityTextCompletion || id == protocol.CapabilityTextEmbedding || id == protocol.CapabilityTextVision
+	case protocol.RuntimeImage:
+		return id == protocol.CapabilityImageGenerate || id == protocol.CapabilityImageEdit
+	case protocol.RuntimeSpeech:
+		return id == protocol.CapabilityAudioTTS
+	default:
+		return false
+	}
+}
+
 func mergeModels(groups ...[]string) []string {
 	seen := make(map[string]struct{})
 	for _, group := range groups {
@@ -356,6 +480,9 @@ func mergeModels(groups ...[]string) []string {
 		models = append(models, model)
 	}
 	sort.Strings(models)
+	if len(models) == 0 {
+		return nil
+	}
 	return models
 }
 
@@ -372,8 +499,9 @@ func runWithReconnect(
 	controlHandler http.Handler,
 	store *console.Store,
 	logSink *logTee,
+	metadataRefresh *metadataRefresh,
 ) error {
-	return runGatewayLifecycle(ctx, cfg, id, meta, fwd, updateManager, controlHandler, store, logSink)
+	return runGatewayLifecycle(ctx, cfg, id, meta, fwd, updateManager, controlHandler, store, logSink, metadataRefresh)
 }
 
 // revokedSentinelPath sits next to the identity file so it shares the same volume mount in docker-compose and survives container restarts. Named `.revoked` so a `ls -l` next to identity.json makes the failure mode obvious without grepping logs.

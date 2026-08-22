@@ -52,6 +52,16 @@ func (h *handler) overview(w http.ResponseWriter, r *http.Request) {
 			overview.LoadedVRAMBytes += model.SizeVRAM
 		}
 	}
+	if h.cfg.DiffusersURL != "" {
+		if health, err := h.imageClient().Health(r.Context()); err == nil && health.VRAMBytes > 0 {
+			overview.LoadedVRAMBytes += health.VRAMBytes
+		}
+	}
+	if h.cfg.SpeechURL != "" {
+		if health, err := h.speechClient().Health(r.Context()); err == nil && health.VRAMBytes > 0 {
+			overview.LoadedVRAMBytes += health.VRAMBytes
+		}
+	}
 	overview.ReservedVRAMBytes = memoryReserveBytes(overview.VRAMTotalGB)
 	overview.AvailableVRAMBytes = availableMemoryBytes(overview.VRAMTotalGB, overview.LoadedVRAMBytes, overview.ReservedVRAMBytes)
 	writeJSON(w, http.StatusOK, overview)

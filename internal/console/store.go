@@ -19,11 +19,12 @@ func sanitizeRuntimeBrand(message string) string {
 
 // RequestStart contains the only request metadata the local UI is allowed to retain. In particular, it deliberately has no request body or headers.
 type RequestStart struct {
-	ID        string
-	Model     string
-	Path      string
-	Consumer  string
-	StartedAt time.Time
+	ID         string
+	Model      string
+	Path       string
+	Capability string
+	Consumer   string
+	StartedAt  time.Time
 }
 
 // RequestFinish records the terminal usage supplied by Ollama.
@@ -40,6 +41,7 @@ type Request struct {
 	ID               string    `json:"id"`
 	Model            string    `json:"model"`
 	Path             string    `json:"path"`
+	Capability       string    `json:"capability,omitempty"`
 	Consumer         string    `json:"consumer"`
 	StartedAt        time.Time `json:"started_at"`
 	CompletedAt      time.Time `json:"completed_at,omitempty"`
@@ -78,6 +80,7 @@ type Overview struct {
 	GatewayLastError         string    `json:"gateway_last_error,omitempty"`
 	GatewayReconnectAttempt  int       `json:"gateway_reconnect_attempt"`
 	GatewayNextReconnectAt   time.Time `json:"gateway_next_reconnect_at,omitempty"`
+	GatewayRoundTripMs       int64     `json:"gateway_round_trip_ms,omitempty"`
 }
 
 // Settlement is a gateway-committed, node-specific seller receipt. Amount is USD micros so the control room never has to infer a currency conversion.
@@ -173,6 +176,15 @@ func (s *Store) ScheduleGatewayReconnect(next time.Time, attempt int) {
 	s.overview.GatewayNextReconnectAt = next.UTC()
 }
 
+func (s *Store) SetGatewayRoundTrip(duration time.Duration) {
+	if duration < 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.overview.GatewayRoundTripMs = duration.Milliseconds()
+}
+
 // Settle stores one final receipt. It is deliberately idempotent because the gateway replays recent committed receipts after an agent reconnects.
 func (s *Store) Settle(receipt Settlement) {
 	if receipt.RequestID == "" || receipt.SettledAt.IsZero() {
@@ -210,7 +222,7 @@ func (s *Store) Start(start RequestStart) RequestHandle {
 	if start.Consumer == "" {
 		start.Consumer = "gateway customer"
 	}
-	r := &Request{ID: start.ID, Model: start.Model, Path: start.Path, Consumer: start.Consumer, StartedAt: start.StartedAt}
+	r := &Request{ID: start.ID, Model: start.Model, Path: start.Path, Capability: start.Capability, Consumer: start.Consumer, StartedAt: start.StartedAt}
 	s.mu.Lock()
 	s.active[start.ID] = r
 	s.overview.ActiveRequests = len(s.active)

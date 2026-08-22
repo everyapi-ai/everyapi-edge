@@ -23,6 +23,8 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		h.listModels(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/models/capabilities":
 		h.modelCapabilities(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/capabilities":
+		h.capabilities(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/runtime":
 		h.runtime(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/image-runtime":
@@ -47,6 +49,12 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		h.storagePicker(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/playground/chat":
 		h.playgroundChat(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/playground/embedding":
+		h.playgroundEmbedding(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/playground/image":
+		h.playgroundImage(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/playground/speech":
+		h.playgroundSpeech(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/models/pull":
 		h.startPull(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/models/benchmark":

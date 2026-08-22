@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,271 @@ import (
 
 func testFrame() protocol.Frame {
 	return protocol.Frame{Type: protocol.FrameLog, Body: []byte(`{"msg":"x"}`)}
+}
+
+func TestMetadataRefreshEndsAnAuthenticatedSession(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	connected := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		welcome, _ := json.Marshal(protocol.Frame{Type: protocol.FrameWelcome, Body: []byte(`{"session_id":"refresh","protocol_version":"1.1"}`)})
+		if err := conn.WriteMessage(websocket.TextMessage, welcome); err != nil {
+			return
+		}
+		connected <- struct{}{}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Config{GatewayURL: srv.URL, NodeID: 1, RegistrationToken: "tok", Identity: identity.Decoded{Public: pub, Private: priv}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(context.Background()) }()
+	select {
+	case <-connected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("session did not authenticate")
+	}
+	c.RequestMetadataRefresh()
+	select {
+	case err := <-runErr:
+		if !errors.Is(err, ErrMetadataChanged) {
+			t.Fatalf("Run error = %v, want ErrMetadataChanged", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("metadata refresh did not end the session")
+	}
+}
+
+func TestMetadataRefreshSignalSurvivesBetweenClientInstances(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := make(chan struct{}, 1)
+	first, err := New(Config{GatewayURL: "http://gateway.example", NodeID: 1, Identity: identity.Decoded{Public: pub}, MetadataChanged: shared})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := New(Config{GatewayURL: "http://gateway.example", NodeID: 1, Identity: identity.Decoded{Public: pub}, MetadataChanged: shared})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first.RequestMetadataRefresh()
+	select {
+	case <-second.metadataChanged:
+	default:
+		t.Fatal("metadata refresh signal was not retained for the next client instance")
+	}
+}
+
+func TestRunAssemblesChunkedMultipartRequest(t *testing.T) {
+	multipartBody := []byte("--edge-boundary\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it blue\r\n--edge-boundary--\r\n")
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		welcome, _ := json.Marshal(protocol.Frame{Type: protocol.FrameWelcome, Body: []byte(`{"session_id":"test","protocol_version":"1.1"}`)})
+		if err := conn.WriteMessage(websocket.TextMessage, welcome); err != nil {
+			return
+		}
+		frames := []protocol.Frame{
+			{
+				Type: protocol.FrameType("request_start"),
+				ID:   "image-edit",
+				Body: []byte(fmt.Sprintf(`{"method":"POST","path":"/v1/images/edits","headers":{"Content-Type":"multipart/form-data; boundary=edge-boundary"},"body_size":%d}`, len(multipartBody))),
+			},
+			{
+				Type: protocol.FrameType("request_body"),
+				ID:   "image-edit",
+				Body: []byte(fmt.Sprintf(`{"bytes":%q}`, base64.StdEncoding.EncodeToString(multipartBody))),
+			},
+			{Type: protocol.FrameType("request_end"), ID: "image-edit", Body: []byte(`{}`)},
+		}
+		for _, frame := range frames {
+			payload, _ := json.Marshal(frame)
+			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+				return
+			}
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	received := make(chan protocol.RequestBody, 1)
+	client, err := New(Config{
+		GatewayURL:        srv.URL,
+		NodeID:            1,
+		RegistrationToken: "tok",
+		Identity:          identity.Decoded{Public: pub, Private: priv},
+		Handler: func(_ context.Context, request protocol.RequestBody, _ func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
+			received <- request
+			return protocol.DoneBody{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- client.Run(ctx) }()
+
+	select {
+	case request := <-received:
+		if request.Method != http.MethodPost || request.Path != "/v1/images/edits" {
+			t.Fatalf("request = %+v", request)
+		}
+		if string(request.Body) != string(multipartBody) {
+			t.Fatalf("request body = %q, want %q", request.Body, multipartBody)
+		}
+		if request.Headers["Content-Type"] != "multipart/form-data; boundary=edge-boundary" {
+			t.Fatalf("content type = %q", request.Headers["Content-Type"])
+		}
+		cancel()
+	case err := <-runErr:
+		t.Fatalf("Run returned before request assembly: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("chunked multipart request was not assembled")
+	}
+}
+
+func TestExpiredRequestBodiesDoNotExhaustUploadSlots(t *testing.T) {
+	c := newTestClient(t)
+	now := time.Unix(1_700_000_000, 0)
+	c.now = func() time.Time { return now }
+	for i := 0; i < protocol.MaxPendingRequestBodies; i++ {
+		c.startRequestBody(protocol.Frame{Type: protocol.FrameRequestStart, ID: fmt.Sprintf("stale-%d", i), Body: []byte(`{"method":"POST","path":"/v1/images/edits","body_size":1}`)})
+	}
+	if got := len(c.requestBodies); got != protocol.MaxPendingRequestBodies {
+		t.Fatalf("request bodies = %d", got)
+	}
+
+	now = now.Add(requestBodyAssemblyTimeout + time.Second)
+	c.startRequestBody(protocol.Frame{Type: protocol.FrameRequestStart, ID: "fresh", Body: []byte(`{"method":"POST","path":"/v1/images/edits","body_size":1}`)})
+	if len(c.requestBodies) != 1 || c.requestBodies["fresh"] == nil {
+		t.Fatalf("expired uploads were not reclaimed: %#v", c.requestBodies)
+	}
+}
+
+func TestRequestBodyAssemblyRejectsAggregateBufferOverflow(t *testing.T) {
+	c := newTestClient(t)
+	c.startRequestBody(protocol.Frame{Type: protocol.FrameRequestStart, ID: "overflow", Body: []byte(fmt.Sprintf(`{"method":"POST","path":"/v1/images/edits","body_size":%d}`, protocol.MaxRequestBodyBytes))})
+	c.requestBodyBytes = maxBufferedRequestBodyBytes - 1
+	chunk, _ := json.Marshal(protocol.RequestBodyChunk{Bytes: base64.StdEncoding.EncodeToString([]byte("xx"))})
+	c.appendRequestBody(protocol.Frame{Type: protocol.FrameRequestBody, ID: "overflow", Body: chunk})
+	if c.requestBodies["overflow"] != nil {
+		t.Fatal("aggregate buffer overflow did not discard the upload")
+	}
+}
+
+func TestRunCancelsOnlyTheRequestedInference(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	handlerStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	serverDone := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(serverDone)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		welcome, _ := json.Marshal(protocol.Frame{Type: protocol.FrameWelcome, Body: []byte(`{"session_id":"cancel","protocol_version":"1.1"}`)})
+		if err := conn.WriteMessage(websocket.TextMessage, welcome); err != nil {
+			return
+		}
+		request, _ := json.Marshal(protocol.Frame{Type: protocol.FrameRequest, ID: "cancel-me", Body: []byte(`{"method":"POST","path":"/v1/chat/completions"}`)})
+		if err := conn.WriteMessage(websocket.TextMessage, request); err != nil {
+			return
+		}
+		select {
+		case <-handlerStarted:
+		case <-r.Context().Done():
+			return
+		}
+		cancelFrame, _ := json.Marshal(protocol.Frame{Type: protocol.FrameType("request_cancel"), ID: "cancel-me"})
+		if err := conn.WriteMessage(websocket.TextMessage, cancelFrame); err != nil {
+			return
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Config{
+		GatewayURL: srv.URL, NodeID: 1, RegistrationToken: "tok", Identity: identity.Decoded{Public: pub, Private: priv},
+		Handler: func(ctx context.Context, _ protocol.RequestBody, _ func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
+			close(handlerStarted)
+			<-ctx.Done()
+			close(requestCanceled)
+			return protocol.DoneBody{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(ctx) }()
+	select {
+	case <-requestCanceled:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("request_cancel did not cancel the inference context")
+	}
+	cancel()
+	select {
+	case <-runErr:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not stop")
+	}
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("gateway server did not stop")
+	}
 }
 
 func TestFetchChallengeRejectsOversizedSuccessResponse(t *testing.T) {
@@ -99,6 +365,153 @@ func TestHeartbeatTelemetryReportsResidentModelMemory(t *testing.T) {
 	}
 	if got.VRAMUsedGB != 3 {
 		t.Fatalf("VRAM used = %v, want 3", got.VRAMUsedGB)
+	}
+}
+
+func TestHeartbeatTelemetrySumsAllManagedRuntimeMemory(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"models":[{"size_vram":2147483648}]}`)
+	}))
+	defer ollama.Close()
+	image := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ready","vram_bytes":1073741824}`)
+	}))
+	defer image.Close()
+	speech := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ready","vram_bytes":536870912}`)
+	}))
+	defer speech.Close()
+
+	c := &Client{cfg: Config{OllamaURL: ollama.URL, DiffusersURL: image.URL, SpeechURL: speech.URL, VRAMTotalGB: 24, HTTPClient: ollama.Client()}}
+	got := c.heartbeatTelemetry(context.Background())
+	if got.VRAMUsedGB != 3.5 {
+		t.Fatalf("VRAM used = %v, want 3.5", got.VRAMUsedGB)
+	}
+}
+
+func TestRuntimeMonitorRefreshesMetadataAfterStableStateChange(t *testing.T) {
+	image := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ready","version":"1.0.0","vram_bytes":0,"capabilities":[{"id":"image.generate","status":"ready","models":["sana"],"paths":["/v1/images/generations"]}]}`)
+	}))
+	defer image.Close()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := make(chan struct{}, 1)
+	c, err := New(Config{
+		GatewayURL: "https://localhost", NodeID: 1, Identity: identity.Decoded{Public: pub, Private: priv}, HTTPClient: image.Client(), DiffusersURL: image.URL, MetadataChanged: changes,
+		Meta: protocol.NodeMeta{Capabilities: []protocol.Capability{{ID: protocol.CapabilityImageGenerate, Runtime: protocol.RuntimeImage, Status: protocol.CapabilityWarming, Models: []string{"sana"}, Paths: []string{"/v1/images/generations"}, Version: "1.0.0"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.monitorRuntimeState(context.Background())
+	select {
+	case <-changes:
+		t.Fatal("one mismatching probe should be debounced")
+	default:
+	}
+	c.monitorRuntimeState(context.Background())
+	select {
+	case <-changes:
+	case <-time.After(time.Second):
+		t.Fatal("stable capability change did not request metadata refresh")
+	}
+	c.monitorRuntimeState(context.Background())
+	select {
+	case <-changes:
+		t.Fatal("one client instance requested the same metadata refresh more than once")
+	default:
+	}
+}
+
+func TestRuntimeMonitorDetectsOutOfBandTextModelChange(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			_, _ = io.WriteString(w, `{"models":[]}`)
+		case "/api/tags":
+			_, _ = io.WriteString(w, `{"models":[{"name":"new-model"}]}`)
+		case "/api/version":
+			_, _ = io.WriteString(w, `{"version":"0.13.3"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ollama.Close()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := make(chan struct{}, 1)
+	c, err := New(Config{GatewayURL: "https://localhost", NodeID: 1, Identity: identity.Decoded{Public: pub, Private: priv}, HTTPClient: ollama.Client(), OllamaURL: ollama.URL, TextModels: []string{"old-model"}, TextResponsesSupported: true, MetadataChanged: changes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.monitorRuntimeState(context.Background())
+	c.monitorRuntimeState(context.Background())
+	select {
+	case <-changes:
+	case <-time.After(time.Second):
+		t.Fatal("out-of-band Ollama model change did not request metadata refresh")
+	}
+}
+
+func TestRuntimeMonitorUsesDiscoverySizedBudgetForSlowHealthyRuntime(t *testing.T) {
+	image := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(2100 * time.Millisecond)
+		_, _ = io.WriteString(w, `{"status":"ready","version":"1.0.0","vram_bytes":0,"capabilities":[{"id":"image.generate","status":"ready","models":["sana"],"paths":["/v1/images/generations"]}]}`)
+	}))
+	defer image.Close()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := make(chan struct{}, 1)
+	c, err := New(Config{
+		GatewayURL: "https://localhost", NodeID: 1, Identity: identity.Decoded{Public: pub, Private: priv}, HTTPClient: image.Client(), DiffusersURL: image.URL, MetadataChanged: changes,
+		Meta: protocol.NodeMeta{Capabilities: []protocol.Capability{{ID: protocol.CapabilityImageGenerate, Runtime: protocol.RuntimeImage, Status: protocol.CapabilityReady, Models: []string{"sana"}, Paths: []string{"/v1/images/generations"}, Version: "1.0.0"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.monitorRuntimeState(context.Background())
+	c.monitorRuntimeState(context.Background())
+	select {
+	case <-changes:
+		t.Fatal("slow healthy runtime triggered a metadata refresh loop")
+	default:
+	}
+}
+
+func TestRuntimeMonitorRequiresTheSameCandidateTwice(t *testing.T) {
+	c := newTestClient(t)
+	c.runtimeFingerprints[protocol.RuntimeImage] = "baseline"
+	c.observeRuntimeFingerprint(protocol.RuntimeImage, "candidate-a")
+	c.observeRuntimeFingerprint(protocol.RuntimeImage, "candidate-b")
+	select {
+	case <-c.metadataChanged:
+		t.Fatal("two different transient fingerprints triggered refresh")
+	default:
+	}
+}
+
+func TestHeartbeatAckReportsGatewayRoundTrip(t *testing.T) {
+	var got time.Duration
+	c := &Client{cfg: Config{GatewayRoundTrip: func(duration time.Duration) { got = duration }}}
+	body, err := json.Marshal(protocol.HeartbeatBody{NowUnixMs: time.Now().Add(-25 * time.Millisecond).UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.handleHeartbeatAck(body)
+	if got < 20*time.Millisecond || got > time.Second {
+		t.Fatalf("round trip = %v", got)
+	}
+	c.handleHeartbeatAck(json.RawMessage(`{"now_unix_ms":-1}`))
+	if got < 20*time.Millisecond {
+		t.Fatalf("malformed ACK changed round trip to %v", got)
 	}
 }
 
@@ -318,7 +731,7 @@ func TestDispatchBoundsConcurrency(t *testing.T) {
 
 	ctx := context.Background()
 	for i := 0; i < cap+2; i++ {
-		if dErr := c.dispatch(ctx, protocol.Frame{Type: protocol.FrameRequest, ID: "req", Body: []byte("{}")}); dErr != nil {
+		if dErr := c.dispatch(ctx, protocol.Frame{Type: protocol.FrameRequest, ID: fmt.Sprintf("req-%d", i), Body: []byte("{}")}); dErr != nil {
 			t.Fatalf("dispatch: %v", dErr)
 		}
 	}

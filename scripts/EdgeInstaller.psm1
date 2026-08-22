@@ -12,4 +12,15 @@ function Invoke-CheckedNative {
     return $output
 }
 
-Export-ModuleMember -Function Invoke-CheckedNative
+function New-EdgeConsoleToken {
+    $bytes = New-Object byte[] 32
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    } finally {
+        $generator.Dispose()
+    }
+    return -join ($bytes | ForEach-Object { $_.ToString("x2") })
+}
+
+Export-ModuleMember -Function Invoke-CheckedNative, New-EdgeConsoleToken

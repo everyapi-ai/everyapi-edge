@@ -118,11 +118,11 @@ func NewRouter(textURL, imageURL, speechURL string, client HTTPDoer) *Router {
 
 func (r *Router) Resolve(path string) (*Target, error) {
 	switch path {
-	case "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/models":
+	case "/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/models":
 		return configured(r.text)
 	case "/v1/images/generations", "/v1/images/edits":
 		return configured(r.image)
-	// Transcription and translation are absent on purpose: both upload audio as multipart/form-data, and the agent protocol carries a JSON request body, so the gateway cannot deliver such a request here.
+	// Transcription and translation are absent on purpose: the bundled speech runtime includes synthesis models only.
 	case "/v1/audio/speech":
 		return configured(r.speech)
 	default:

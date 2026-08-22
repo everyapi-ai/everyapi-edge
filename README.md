@@ -45,13 +45,7 @@ needed — your machine just needs outbound HTTPS to api.everyapi.ai.
    model list automatically. Do not restart it merely to publish a
    model: the installer already handles the authenticated reconnect.
 
-6. **Open Edge Control Room.** Visit `http://<node-LAN-IP>:8421`
-   from any device on the same trusted LAN (or `http://127.0.0.1:8421`
-   on the node itself). From there you can download and remove further
-   models, watch active load, inspect recent redacted traffic, and read
-   the local agent log — no container commands required. It reuses the
-   same memory budget the installer probed, so its one-click model choices
-   fit the machine.
+6. **Open Edge Control Room.** Visit `http://<node-LAN-IP>:8421` from any device on the same trusted LAN (or `http://127.0.0.1:8421` on the node itself), then enter the pairing token printed by the installer. From there you can download and remove further models, watch active load, inspect recent redacted traffic, and read the local agent log — no container commands required. It reuses the same memory budget the installer probed, so its one-click model choices fit the machine.
 
    The income card is deliberately receipt-based: it shows only earnings the
    gateway has already settled for this node (the latest 200 receipts are
@@ -64,11 +58,25 @@ The default `docker-compose.yml` ships an NVIDIA configuration
 (needs a recent driver + `nvidia-container-toolkit` on the host).
 Two GPU variants are provided alongside it:
 
+Before running a Compose file without the installer, copy `.env.example` to `.env` and generate a 32-byte pairing token. On macOS or Linux:
+
+```bash
+openssl rand -hex 32
+```
+
+On Windows PowerShell, use the platform CSPRNG:
+
+```powershell
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create(); $bytes = New-Object byte[] 32; $rng.GetBytes($bytes); $rng.Dispose(); -join ($bytes | ForEach-Object { $_.ToString('x2') })
+```
+
+Paste the output after `EVERYAPI_CONSOLE_TOKEN=`. Compose intentionally refuses to start with an empty pairing token. Keep this value private; it grants browser access to the local Control Room.
+
 | File                          | When to use                         |
 |-------------------------------|-------------------------------------|
 | `docker-compose.yml`          | NVIDIA — most common case           |
 | `docker-compose.rocm.yml`     | AMD Radeon Instinct / RX 7000/6000 with ROCm 5.7+ installed |
-| `docker-compose.macos.yml`    | Apple Silicon (M1/M2/M3/M4) — native Ollama + Diffusers MPS |
+| `docker-compose.macos.yml`    | Apple Silicon (M1/M2/M3/M4) — native Ollama + Diffusers + Kokoro MPS |
 | `docker-compose.windows.yml`  | Windows 10/11, Docker Desktop WSL2, NVIDIA GPU |
 
 Pick by filename:
@@ -79,10 +87,7 @@ docker compose -f docker-compose.macos.yml up -d    # macOS
 docker compose -f docker-compose.windows.yml up -d  # Windows NVIDIA
 ```
 
-The macOS variant runs the agent in Docker but runs Ollama and Diffusers
-natively because Metal/MPS is not available through a Linux container. The
-installer creates an arm64 Python environment, registers Diffusers with
-launchd, and verifies both local runtimes before reporting success.
+The macOS variant runs the agent in Docker but runs Ollama, Diffusers, and Kokoro natively because Metal/MPS is not available through a Linux container. The installer creates isolated arm64 Python environments, registers the image and speech runtimes with launchd, and verifies all three local runtimes before reporting success.
 
 The agent's `OLLAMA_URL` resolves to `host.docker.internal:11434`
 in that file, which Docker Desktop / OrbStack / Colima all expose
@@ -123,15 +128,19 @@ several minutes, and the node does not advertise Sana until loading succeeds.
 ComfyUI is not bundled. Edge uses Diffusers directly so the gateway sees one
 stable API and model-discovery contract on every supported OS.
 
+## Text APIs
+
+Completion-capable Ollama models are exposed through `POST /v1/chat/completions`, `POST /v1/completions`, and the stateless `POST /v1/responses` surface supported by current Ollama releases. Stateful Responses features such as `previous_response_id` and the non-standard `/v1/responses/compact` endpoint are not advertised by Edge.
+
 ## Speech
 
 The speech runtime advertises `hexgrad/Kokoro-82M` and serves the OpenAI-compatible `POST /v1/audio/speech` endpoint. Weights and voices are about 330 MB and download into `$HOME/.everyapi/edge/speech` at startup; the node does not advertise the model until every voice it offers is warm, so no buyer request ever waits on a download. Peak VRAM stays under 1 GB, so the speech container shares the card with Ollama and Diffusers rather than needing one of its own.
 
 Buyers can request `mp3`, `wav`, `flac`, or raw `pcm`, and the six stock OpenAI voice names map onto Kokoro voices. English (`af_*`, `am_*`, `bf_*`, `bm_*`) and Mandarin (`zf_*`, `zm_*`) voices are advertised; Kokoro's other locales need grapheme-to-phoneme dependencies that are not in the image yet.
 
-Speech ships in the NVIDIA, ROCm, and Windows bundles. It is not in the macOS bundle: that variant runs its accelerated runtimes natively on the host, and no native speech installer exists yet.
+Speech ships in the NVIDIA, ROCm, Windows, and Apple Silicon bundles. On macOS the installer runs Kokoro in a dedicated arm64 Python environment under launchd and the Dockerized agent reaches it through `host.docker.internal:8189`.
 
-Transcription (`/v1/audio/transcriptions`) is not served. Audio upload is `multipart/form-data` and the agent protocol carries a JSON request body, so those bytes have no way to reach a node — the gateway rejects the request rather than dispatching it.
+Transcription (`/v1/audio/transcriptions`) is not served because the bundled speech runtime includes synthesis models only. The gateway rejects the request rather than dispatching a path the node does not advertise.
 
 ## Security model
 
@@ -145,12 +154,7 @@ Transcription (`/v1/audio/transcriptions`) is not served. Audio upload is `multi
   use a fresh server-issued challenge that you sign with the
   identity from step 1.
 
-- Inference traffic is an outbound WebSocket to api.everyapi.ai.
-  The Control Room is published on the node's LAN interface as
-  `:8421` and intentionally has no login. It can download, unload,
-  and remove local models, so put the node only on a trusted LAN and
-  never expose port 8421 to the Internet. Set `EVERYAPI_CONSOLE_PORT`
-  to use another host port.
+- Inference traffic is an outbound WebSocket to api.everyapi.ai. The Control Room is published on the node's LAN interface as `:8421` and requires the installer-generated pairing token from remote browsers. Pairing prevents unauthorized browser actions, but the connection still uses plain HTTP: put the node only on a trusted LAN and never expose port 8421 to the Internet. Set `EVERYAPI_CONSOLE_PORT` to use another host port.
 
 - Traffic history keeps only model, endpoint, timing, token counts,
   and a node-scoped opaque customer label. Prompts, responses, API
@@ -206,12 +210,12 @@ identity loss as equivalent to "machine was compromised.")
   release's SHA-256 checksum file, and restarts itself. The gateway cannot send
   an arbitrary URL, version, shell command, or downgrade request.
 
-  Existing installations need one final manual
-  `docker compose pull && docker compose up -d` to gain remote-update support.
+  Existing installations created before Control Room pairing must first generate a token with the platform command above and add it as `EVERYAPI_CONSOLE_TOKEN=<generated token>` in `.env`; then run `docker compose pull && docker compose up -d` once to gain remote-update support.
   After that, the verified binary is stored beside the persistent agent
   identity, so it survives container restarts. A candidate is promoted only
   after it reconnects to the gateway; if it exits before that first successful
   connection, the image's bundled agent rolls it back on the next restart.
+  This action updates the Edge Agent only. Model runtimes remain pinned to the Compose images selected by the operator and are upgraded with the normal `docker compose pull && docker compose up -d` workflow; the Control Room never receives access to the host Docker socket.
 
 - It does not run arbitrary code. The path whitelist above is
   enforced inside the agent binary, not inside ollama.

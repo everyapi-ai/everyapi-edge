@@ -33,6 +33,7 @@ services:
       EVERYAPI_REGISTRATION_TOKEN: ${EVERYAPI_REGISTRATION_TOKEN:-}
       OLLAMA_URL: http://host.docker.internal:11434
       EVERYAPI_DIFFUSERS_URL: http://host.docker.internal:8188
+      EVERYAPI_SPEECH_URL: http://host.docker.internal:8189
       EVERYAPI_OLLAMA_STORAGE_PATH: /models
       EVERYAPI_IDENTITY_PATH: /var/lib/everyapi-edge/identity.json
       EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}
@@ -42,6 +43,7 @@ services:
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
       EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
       EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
+      EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:?console token required}
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
       - ${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}:/models

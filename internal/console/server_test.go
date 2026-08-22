@@ -14,6 +14,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
+	edgeruntime "github.com/everyapi-ai/everyapi-edge/internal/runtime"
 )
 
 func TestHandlerListsModelsWithoutLocalToken(t *testing.T) {
@@ -35,6 +38,13 @@ func TestHandlerListsModelsWithoutLocalToken(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "qwen3:8b") {
 		t.Fatalf("models response omitted model: %s", response.Body.String())
+	}
+}
+
+func TestRuntimeCapabilitiesExposeStartingAsWarming(t *testing.T) {
+	capabilities := runtimeCapabilities(protocol.RuntimeImage, edgeruntime.RuntimeHealth{Capabilities: []edgeruntime.RuntimeCapability{{ID: string(protocol.CapabilityImageGenerate), Status: edgeruntime.StatusStarting}}})
+	if len(capabilities) != 1 || capabilities[0].Status != protocol.CapabilityWarming {
+		t.Fatalf("starting capabilities = %+v", capabilities)
 	}
 }
 
@@ -201,6 +211,42 @@ func TestHandlerReportsLocalModelCapabilities(t *testing.T) {
 	}
 }
 
+func TestHandlerReportsExactNodeCapabilities(t *testing.T) {
+	textRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_, _ = io.WriteString(w, `{"version":"0.13.3"}`)
+		case "/api/tags":
+			_, _ = io.WriteString(w, `{"models":[{"name":"qwen3:8b"}]}`)
+		case "/api/show":
+			_, _ = io.WriteString(w, `{"capabilities":["completion"]}`)
+		default:
+			t.Fatalf("unexpected text path %s", r.URL.Path)
+		}
+	}))
+	defer textRuntime.Close()
+	imageRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ready","version":"image-1","capabilities":[{"id":"image.generate","status":"ready","models":["sana"],"paths":["/v1/images/generations"]}]}`)
+	}))
+	defer imageRuntime.Close()
+	speechRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"warming","version":"speech-1","capabilities":[{"id":"audio.tts","status":"warming","models":["kokoro"],"paths":["/v1/audio/speech"],"reason":"loading"}]}`)
+	}))
+	defer speechRuntime.Close()
+
+	h := NewHandler(Config{OllamaURL: textRuntime.URL, DiffusersURL: imageRuntime.URL, SpeechURL: speechRuntime.URL}, NewStore(16))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("capabilities = %d %s", response.Code, response.Body.String())
+	}
+	for _, want := range []string{`"id":"text.chat"`, `"id":"text.completion"`, `"id":"text.responses"`, `"id":"image.generate"`, `"version":"image-1"`, `"id":"audio.tts"`, `"status":"warming"`} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("capabilities missing %s: %s", want, response.Body.String())
+		}
+	}
+}
+
 // The console UI is a compiled bundle (console-web, built by `make console`), so this asserts on the shape the Go side owns rather than on UI copy: the mount point React renders into, and the fact that everything is inlined. It deliberately does NOT match translated strings — those live in the bundle's i18n dictionary and get minified, and pinning them here would make every copy edit a Go test failure.
 func TestEmbeddedControlRoomServesSelfContainedDocument(t *testing.T) {
 	h := NewHandler(Config{OllamaURL: "http://ollama:11434"}, NewStore(16))
@@ -253,6 +299,28 @@ func TestOverviewIncludesLoadedVRAMFromOllama(t *testing.T) {
 	wantAvailable := int64(24*gib) - int64(3*gib) - wantReserve
 	if overview.ReservedVRAMBytes != wantReserve || overview.AvailableVRAMBytes != wantAvailable {
 		t.Fatalf("memory budget = reserve %d available %d, want reserve %d available %d", overview.ReservedVRAMBytes, overview.AvailableVRAMBytes, wantReserve, wantAvailable)
+	}
+}
+
+func TestOverviewIncludesAllManagedRuntimeMemory(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"models":[{"size_vram":2147483648}]}`)
+	}))
+	defer ollama.Close()
+	image := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ready","vram_bytes":1073741824}`)
+	}))
+	defer image.Close()
+	speech := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ready","vram_bytes":536870912}`)
+	}))
+	defer speech.Close()
+
+	h := NewHandler(Config{OllamaURL: ollama.URL, DiffusersURL: image.URL, SpeechURL: speech.URL, VRAMTotalGB: 24}, NewStore(16))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"loaded_vram_bytes":3758096384`) {
+		t.Fatalf("overview = %d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -327,6 +395,7 @@ func TestImageRuntimePreservesTheSafeGPUReadinessReason(t *testing.T) {
 }
 
 func TestHandlerSelectsTheActiveImageEditingModel(t *testing.T) {
+	modelsChanged := make(chan struct{}, 1)
 	diffusers := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/models/select" {
 			t.Fatalf("unexpected image runtime request %s %s", r.Method, r.URL.Path)
@@ -344,11 +413,16 @@ func TestHandlerSelectsTheActiveImageEditingModel(t *testing.T) {
 	}))
 	defer diffusers.Close()
 
-	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", DiffusersURL: diffusers.URL}, NewStore(16)).Control
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", DiffusersURL: diffusers.URL, ModelsChanged: func() { modelsChanged <- struct{}{} }}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/image-runtime/model", strings.NewReader(`{"model":"Qwen/Qwen-Image-Edit-2509"}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `Qwen/Qwen-Image-Edit-2509`) {
 		t.Fatalf("select image model = %d %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-modelsChanged:
+	case <-time.After(time.Second):
+		t.Fatal("successful image model selection did not report a capability change")
 	}
 }
 
@@ -390,6 +464,64 @@ func TestHandlerProxiesImageEditsToDiffusers(t *testing.T) {
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"b64_json":"abc"`) {
 		t.Fatalf("image edit = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandlerRunsImageSpeechAndEmbeddingPlaygrounds(t *testing.T) {
+	textRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/embeddings" {
+			t.Fatalf("unexpected text runtime request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"model":"nomic-embed","data":[{"embedding":[0.25,-0.5]}],"usage":{"prompt_tokens":2,"total_tokens":2}}`)
+	}))
+	defer textRuntime.Close()
+	imageRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/images/generations" {
+			t.Fatalf("unexpected image runtime request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"created":1,"data":[{"b64_json":"cG5n"}]}`)
+	}))
+	defer imageRuntime.Close()
+	speechRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/audio/speech" {
+			t.Fatalf("unexpected speech runtime request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write([]byte("wave-bytes"))
+	}))
+	defer speechRuntime.Close()
+
+	h := NewHandlers(Config{OllamaURL: textRuntime.URL, DiffusersURL: imageRuntime.URL, SpeechURL: speechRuntime.URL}, NewStore(16)).Control
+	for _, test := range []struct {
+		path, body, contains, contentType string
+	}{
+		{path: "/api/playground/embedding", body: `{"model":"nomic-embed","input":"hello"}`, contains: `"embedding":[0.25,-0.5]`, contentType: "application/json"},
+		{path: "/api/playground/image", body: `{"model":"sana","prompt":"a lighthouse","size":"512x512"}`, contains: `"b64_json":"cG5n"`, contentType: "application/json"},
+		{path: "/api/playground/speech", body: `{"model":"kokoro","input":"hello","voice":"af_heart","response_format":"wav"}`, contains: "wave-bytes", contentType: "audio/wav"},
+	} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body)))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), test.contains) || !strings.HasPrefix(response.Header().Get("Content-Type"), test.contentType) {
+			t.Fatalf("%s = %d %s (%s)", test.path, response.Code, response.Body.String(), response.Header().Get("Content-Type"))
+		}
+	}
+}
+
+func TestCopyBoundedPlaygroundResponseRejectsOversizedArtifactBeforeWriting(t *testing.T) {
+	response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"audio/wav"}}, Body: io.NopCloser(strings.NewReader("oversized"))}
+	recorder := httptest.NewRecorder()
+	err := copyBoundedPlaygroundResponse(recorder, response, 4)
+	if err == nil || recorder.Code != http.StatusOK || recorder.Body.Len() != 0 {
+		t.Fatalf("copy result = code %d, bytes %d, err %v", recorder.Code, recorder.Body.Len(), err)
+	}
+}
+
+func TestHandlerRejectsTrailingPlaygroundJSON(t *testing.T) {
+	h := NewHandlers(Config{OllamaURL: "http://127.0.0.1:1"}, NewStore(16)).Control
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/embedding", strings.NewReader(`{"model":"nomic-embed","input":"hello"} {}`)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("trailing JSON status = %d, body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -1006,7 +1138,7 @@ func TestPickedStorageDirectoryTrimsPickerOutputAndRejectsCancellation(t *testin
 
 func TestStoreRecordsRequestWithoutPersistingPrompt(t *testing.T) {
 	store := NewStore(16)
-	request := store.Start(RequestStart{ID: "req-1", Model: "qwen3:8b", Path: "/v1/chat/completions"})
+	request := store.Start(RequestStart{ID: "req-1", Model: "qwen3:8b", Path: "/v1/chat/completions", Capability: "text.chat"})
 	store.Finish(request, RequestFinish{
 		CompletedAt:      time.Unix(1_700_000_005, 0),
 		PromptTokens:     12,
@@ -1019,7 +1151,7 @@ func TestStoreRecordsRequestWithoutPersistingPrompt(t *testing.T) {
 		t.Fatalf("overview = %+v", overview)
 	}
 	requests := store.Requests()
-	if len(requests) != 1 || requests[0].Model != "qwen3:8b" || requests[0].Path != "/v1/chat/completions" {
+	if len(requests) != 1 || requests[0].Model != "qwen3:8b" || requests[0].Path != "/v1/chat/completions" || requests[0].Capability != "text.chat" {
 		t.Fatalf("requests = %+v", requests)
 	}
 
@@ -1139,6 +1271,7 @@ func waitFor(ctx context.Context, condition func() bool) error {
 
 func TestHandlerStartsModelPullAndExposesProgress(t *testing.T) {
 	pullStarted := make(chan struct{}, 1)
+	modelsChanged := make(chan struct{}, 1)
 	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
 			_, _ = w.Write([]byte(`{"models":[]}`))
@@ -1161,7 +1294,7 @@ func TestHandlerStartsModelPullAndExposesProgress(t *testing.T) {
 	}))
 	defer ollama.Close()
 
-	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
+	h := NewHandlers(Config{OllamaURL: ollama.URL, ModelsChanged: func() { modelsChanged <- struct{}{} }}, NewStore(16)).Control
 	req := httptest.NewRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`))
 	req.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -1173,6 +1306,11 @@ func TestHandlerStartsModelPullAndExposesProgress(t *testing.T) {
 	case <-pullStarted:
 	case <-time.After(time.Second):
 		t.Fatal("pull did not start")
+	}
+	select {
+	case <-modelsChanged:
+	case <-time.After(time.Second):
+		t.Fatal("successful model pull did not report a capability change")
 	}
 }
 

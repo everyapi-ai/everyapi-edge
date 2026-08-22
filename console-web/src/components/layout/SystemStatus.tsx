@@ -88,7 +88,7 @@ export const MobileSystemStatus = () => {
   const label = gatewayLabel(state, overview.isError, overview.isPending, t)
 
   return (
-    <div data-mobile-system-status className='flex items-center gap-2 md:hidden'>
+    <div data-mobile-system-status className='flex items-center gap-2 xl:hidden'>
       <span className={`size-1.5 rounded-full ${stateTone(state, overview.isError)}`} />
       <span className='font-mono text-[10px] uppercase tracking-[0.08em] text-ink-dim'>
         {label}

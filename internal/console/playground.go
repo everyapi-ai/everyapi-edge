@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 )
 
 func (h *handler) playgroundChat(w http.ResponseWriter, r *http.Request) {
@@ -72,12 +74,14 @@ func (h *handler) playgroundChat(w http.ResponseWriter, r *http.Request) {
 	if containsImages {
 		playgroundPath = "/api/chat"
 	}
+	capability, _ := protocol.CapabilityForRequest(playgroundPath)
 	handle := h.store.Start(RequestStart{
-		ID:        fmt.Sprintf("playground-%d", startedAt.UnixNano()),
-		Model:     input.Model,
-		Path:      playgroundPath,
-		Consumer:  "local playground",
-		StartedAt: startedAt,
+		ID:         fmt.Sprintf("playground-%d", startedAt.UnixNano()),
+		Model:      input.Model,
+		Path:       playgroundPath,
+		Capability: string(capability),
+		Consumer:   "local playground",
+		StartedAt:  startedAt,
 	})
 	finished := false
 	finish := func(usage PlaygroundUsage, problem string) {

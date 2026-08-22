@@ -14,14 +14,38 @@ type Status string
 
 const (
 	StatusReady       Status = "ready"
+	StatusStarting    Status = "starting"
+	StatusWarming     Status = "warming"
+	StatusDegraded    Status = "degraded"
 	StatusUnavailable Status = "unavailable"
+	StatusUnsupported Status = "unsupported"
 )
+
+type RuntimeLimits struct {
+	MaxInputBytes      int64    `json:"max_input_bytes,omitempty"`
+	MaxInputCharacters int      `json:"max_input_characters,omitempty"`
+	Formats            []string `json:"formats,omitempty"`
+}
+
+type RuntimeCapability struct {
+	ID     string        `json:"id"`
+	Status Status        `json:"status"`
+	Models []string      `json:"models,omitempty"`
+	Paths  []string      `json:"paths,omitempty"`
+	Reason string        `json:"reason,omitempty"`
+	Limits RuntimeLimits `json:"limits,omitempty"`
+}
 
 // RuntimeHealth is the discovery contract every local runtime serves on /health. The agent reports the union of the ready model lists to the gateway before each handshake.
 type RuntimeHealth struct {
-	Status Status
-	Models []string
-	Error  string
+	Status       Status
+	Models       []string
+	Error        string
+	Version      string
+	Backend      string
+	Device       string
+	VRAMBytes    int64
+	Capabilities []RuntimeCapability
 }
 
 // ImageHealth is the image runtime's name for that shared contract, kept so the console and discovery call sites read in terms of the runtime they query.
@@ -49,31 +73,56 @@ func fetchHealth(ctx context.Context, target *Target) (RuntimeHealth, error) {
 		return RuntimeHealth{}, err
 	}
 	defer response.Body.Close()
-	if err := checkResponse(response); err != nil {
-		return RuntimeHealth{}, err
+	if response.StatusCode != http.StatusServiceUnavailable {
+		if err := checkResponse(response); err != nil {
+			return RuntimeHealth{}, err
+		}
 	}
 
 	var payload struct {
-		Status Status   `json:"status"`
-		Models []string `json:"models"`
-		Error  string   `json:"error"`
+		Status       Status              `json:"status"`
+		Models       []string            `json:"models"`
+		Error        string              `json:"error"`
+		Version      string              `json:"version"`
+		Backend      string              `json:"backend"`
+		Device       string              `json:"device"`
+		VRAMBytes    int64               `json:"vram_bytes"`
+		Capabilities []RuntimeCapability `json:"capabilities"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxDiscoveryResponseBytes)).Decode(&payload); err != nil {
 		return RuntimeHealth{}, fmt.Errorf("decode local %s runtime health: %w", target.kind, err)
 	}
-	seen := make(map[string]struct{}, len(payload.Models))
-	models := make([]string, 0, len(payload.Models))
-	for _, model := range payload.Models {
-		name := strings.TrimSpace(model)
-		if name == "" {
-			continue
-		}
-		if _, exists := seen[name]; exists {
-			continue
-		}
-		seen[name] = struct{}{}
-		models = append(models, name)
+	if payload.Status == "" {
+		payload.Status = StatusUnavailable
 	}
-	sort.Strings(models)
-	return RuntimeHealth{Status: payload.Status, Models: models, Error: payload.Error}, nil
+	if response.StatusCode == http.StatusServiceUnavailable && payload.Status == StatusReady {
+		payload.Status = StatusUnavailable
+	}
+	models := normalizedStrings(payload.Models)
+	for i := range payload.Capabilities {
+		payload.Capabilities[i].Models = normalizedStrings(payload.Capabilities[i].Models)
+		payload.Capabilities[i].Paths = normalizedStrings(payload.Capabilities[i].Paths)
+	}
+	return RuntimeHealth{
+		Status: payload.Status, Models: models, Error: payload.Error, Version: payload.Version,
+		Backend: payload.Backend, Device: payload.Device, VRAMBytes: payload.VRAMBytes, Capabilities: payload.Capabilities,
+	}, nil
+}
+
+func normalizedStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }

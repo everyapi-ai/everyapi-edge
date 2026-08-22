@@ -10,10 +10,12 @@ import {
   modelListSchema,
   nodeProfileSchema,
   imageRuntimeSchema,
+  capabilityListSchema,
   overviewSchema,
   pullQueueSchema,
   requestListSchema,
   runtimeSchema,
+  sessionSchema,
   settlementListSchema,
   storageSchema,
   storageMigrationSchema,
@@ -23,9 +25,11 @@ import {
   type ModelCapabilities,
   type NodeProfile,
   type ImageRuntime,
+  type Capability,
   type Overview,
   type PullQueue,
   type Runtime,
+  type Session,
   type Settlement,
   type Storage,
   type StorageMigration,
@@ -41,6 +45,7 @@ const PULL_REFETCH_MS = 1_500
 const IDLE_REFETCH_MS = 15_000
 
 export const queryKeys = {
+  session: ['session'] as const,
   overview: ['overview'] as const,
   nodeProfile: ['node-profile'] as const,
   models: ['models'] as const,
@@ -51,8 +56,42 @@ export const queryKeys = {
   pull: ['models', 'pull'] as const,
   runtime: ['runtime'] as const,
   imageRuntime: ['image-runtime'] as const,
+  capabilities: ['capabilities'] as const,
   storage: ['storage'] as const,
   storageMigration: ['storage', 'migration'] as const,
+}
+
+export const useSession = (): UseQueryResult<Session> =>
+  useQuery({
+    queryKey: queryKeys.session,
+    queryFn: () => getJSON('/api/session', sessionSchema),
+    staleTime: Number.POSITIVE_INFINITY,
+  })
+
+export const usePairSession = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (token: string) => postJSONResponse('/api/session', { token }, sessionSchema),
+    onSuccess: (session) => {
+      queryClient.setQueryData(queryKeys.session, session)
+    },
+  })
+}
+
+export const useLogout = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => del('/api/session'),
+    onSuccess: () => {
+      queryClient.removeQueries({
+        predicate: (query) => query.queryKey[0] !== queryKeys.session[0],
+      })
+      queryClient.setQueryData(queryKeys.session, {
+        authenticated: false,
+        pairing_required: true,
+      } satisfies Session)
+    },
+  })
 }
 
 export const useOverview = (): UseQueryResult<Overview> =>
@@ -102,11 +141,19 @@ export const useRuntime = (): UseQueryResult<Runtime> =>
     refetchInterval: LIVE_REFETCH_MS,
   })
 
-export const useImageRuntime = (): UseQueryResult<ImageRuntime> =>
+export const useImageRuntime = (enabled = true): UseQueryResult<ImageRuntime> =>
   useQuery({
     queryKey: queryKeys.imageRuntime,
     queryFn: () => getJSON('/api/image-runtime', imageRuntimeSchema),
+    enabled,
     refetchInterval: LIVE_REFETCH_MS,
+  })
+
+export const useCapabilities = (): UseQueryResult<Capability[]> =>
+  useQuery({
+    queryKey: queryKeys.capabilities,
+    queryFn: async () => (await getJSON('/api/capabilities', capabilityListSchema)).capabilities,
+    refetchInterval: IDLE_REFETCH_MS,
   })
 
 export const useSetImageRuntimeModel = () => {

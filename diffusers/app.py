@@ -12,7 +12,7 @@ import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -23,30 +23,55 @@ from model_config import (
     DEFAULT_GENERATION_MODEL,
     DEFAULT_MODEL,
     SUPPORTED_GENERATION_MODELS,
+    SUPPORTED_IMAGE_EDITORS,
     active_model,
     select_model,
 )
-from runtime import DeviceUnavailableError, select_device
+from runtime import DeviceUnavailableError, allocated_memory_bytes, select_device
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    preload_generation_model()
+    global editor_error, editor_ready, editor_status
+    global resident_editor_model, resident_editor_pipeline
+    worker = Thread(
+        target=preload_generation_model,
+        name="image-runtime-warmup",
+        daemon=True,
+    )
+    worker.start()
     try:
         yield
     finally:
-        generation_pipeline.cache_clear()
-        edit_pipeline.cache_clear()
+        if not worker.is_alive():
+            with runtime_lock:
+                generation_pipeline.cache_clear()
+                edit_pipeline.cache_clear()
+                with editor_state_lock:
+                    resident_editor_model = None
+                    resident_editor_pipeline = None
+                    editor_ready = False
+                    editor_status = "stopped"
+                    editor_error = "editor runtime is stopped"
 
 
 app = FastAPI(title="EveryAPI Edge Diffusers Runtime", lifespan=lifespan)
 CONFIG_PATH = Path(os.getenv("EVERYAPI_DIFFUSERS_CONFIG_PATH", "/models/cache/everyapi-image-runtime.json"))
 STARTUP_MODEL = os.getenv("EVERYAPI_DIFFUSERS_MODEL", DEFAULT_MODEL)
 runtime_lock = Lock()
+editor_state_lock = Lock()
 generation_ready = False
 generation_error = "generation model is still loading"
+generation_status = "starting"
+editor_ready = False
+editor_error = "editor model is still loading"
+editor_status = "starting"
+resident_editor_model = None
+resident_editor_pipeline = None
 SUPPORTED_SIZES = {"512x512": (512, 512), "1024x1024": (1024, 1024)}
 MINIMUM_EDITOR_MEMORY_GB = 48
+MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
+RUNTIME_VERSION = os.getenv("EVERYAPI_IMAGE_RUNTIME_VERSION", "1.0.0")
 
 
 class ModelSelection(BaseModel):
@@ -72,11 +97,73 @@ def editing_enabled() -> bool:
         return False
 
 
-def available_models():
-    models = [DEFAULT_GENERATION_MODEL]
-    if editing_enabled():
-        models.append(selected_model())
+def editor_runtime_snapshot():
+    with editor_state_lock:
+        ready = editor_ready and resident_editor_model is not None and resident_editor_pipeline is not None
+        if ready:
+            return {
+                "ready": True,
+                "status": "ready",
+                "error": "",
+                "model": resident_editor_model,
+            }
+        status = editor_status
+        error = editor_error
+        if editor_ready:
+            status = "degraded"
+            error = "the active image editor is not resident"
+        return {"ready": False, "status": status, "error": error, "model": None}
+
+
+def available_models(editor_snapshot=None):
+    snapshot = editor_snapshot or editor_runtime_snapshot()
+    models = []
+    if generation_ready:
+        models.append(DEFAULT_GENERATION_MODEL)
+    if editing_enabled() and snapshot["ready"]:
+        models.append(snapshot["model"])
     return sorted(models)
+
+
+def runtime_capabilities(status=None, reason="", editor_snapshot=None):
+    snapshot = editor_snapshot or editor_runtime_snapshot()
+    current_generation_status = status or ("ready" if generation_ready else generation_status)
+    current_generation_reason = reason or generation_error
+    generation = {
+        "id": "image.generate",
+        "status": current_generation_status,
+        "models": [DEFAULT_GENERATION_MODEL],
+        "paths": ["/v1/images/generations"],
+        "limits": {"max_input_bytes": MAX_REQUEST_BODY_BYTES},
+    }
+    if current_generation_status != "ready" and current_generation_reason:
+        generation["reason"] = current_generation_reason
+    capabilities = [generation]
+    if editing_enabled():
+        current_editor_status = status or snapshot["status"]
+        current_editor_reason = reason or snapshot["error"]
+        editing = {
+            "id": "image.edit",
+            "status": current_editor_status,
+            "models": [snapshot["model"]] if snapshot["ready"] else [],
+            "paths": ["/v1/images/edits"],
+            "limits": {"max_input_bytes": MAX_REQUEST_BODY_BYTES},
+        }
+        if current_editor_status != "ready" and current_editor_reason:
+            editing["reason"] = current_editor_reason
+        capabilities.append(editing)
+    else:
+        capabilities.append(
+            {
+                "id": "image.edit",
+                "status": "unsupported",
+                "models": [],
+                "paths": ["/v1/images/edits"],
+                "reason": f"image editing requires at least {MINIMUM_EDITOR_MEMORY_GB} GiB",
+                "limits": {"max_input_bytes": MAX_REQUEST_BODY_BYTES},
+            }
+        )
+    return capabilities
 
 
 @lru_cache(maxsize=1)
@@ -112,15 +199,52 @@ def edit_pipeline(model_id: str):
 
 
 def preload_generation_model():
-    global generation_error, generation_ready
+    global editor_error, editor_ready, editor_status
+    global generation_error, generation_ready, generation_status
+    global resident_editor_model, resident_editor_pipeline
+    generation_ready = False
+    generation_status = "warming"
+    generation_error = "generation model is still loading"
     try:
         generation_pipeline(DEFAULT_GENERATION_MODEL)
     except Exception as error:
         generation_ready = False
         generation_error = str(error)
+        generation_status = "degraded"
+    else:
+        generation_ready = True
+        generation_error = ""
+        generation_status = "ready"
+    if not editing_enabled():
+        with runtime_lock:
+            with editor_state_lock:
+                resident_editor_model = None
+                resident_editor_pipeline = None
+                editor_ready = False
+                editor_error = f"image editing requires at least {MINIMUM_EDITOR_MEMORY_GB} GiB"
+                editor_status = "unsupported"
         return
-    generation_ready = True
-    generation_error = ""
+    with runtime_lock:
+        with editor_state_lock:
+            resident_editor_model = None
+            resident_editor_pipeline = None
+            editor_ready = False
+            editor_status = "warming"
+            editor_error = "editor model is still loading"
+        try:
+            model = selected_model()
+            pipeline = edit_pipeline(model)
+        except Exception as error:
+            with editor_state_lock:
+                editor_error = str(error)
+                editor_status = "degraded"
+            return
+        with editor_state_lock:
+            resident_editor_model = model
+            resident_editor_pipeline = pipeline
+            editor_ready = True
+            editor_error = ""
+            editor_status = "ready"
 
 
 def _png_base64(image: Image.Image) -> str:
@@ -134,36 +258,98 @@ def health():
     try:
         device = select_device()
     except DeviceUnavailableError as error:
+        editor_snapshot = editor_runtime_snapshot()
         return JSONResponse(
             status_code=503,
-            content={"status": "unavailable", "models": [], "error": str(error)},
+            content={
+                "status": "unavailable",
+                "version": RUNTIME_VERSION,
+                "vram_bytes": 0,
+                "models": [],
+                "capabilities": runtime_capabilities("unavailable", str(error), editor_snapshot),
+                "error": str(error),
+            },
         )
+    editor_snapshot = editor_runtime_snapshot()
     if not generation_ready:
         return JSONResponse(
             status_code=503,
-            content={"status": "unavailable", "models": [], "error": generation_error},
+            content={
+                "status": generation_status,
+                "version": RUNTIME_VERSION,
+                "device": device.name,
+                "backend": device.backend,
+                "vram_bytes": allocated_memory_bytes(device),
+                "models": available_models(editor_snapshot),
+                "capabilities": runtime_capabilities(editor_snapshot=editor_snapshot),
+                "error": generation_error,
+            },
         )
-    return {
-        "status": "ready",
+    runtime_status = "ready"
+    runtime_error = ""
+    if editing_enabled() and not editor_snapshot["ready"]:
+        runtime_status = editor_snapshot["status"]
+        runtime_error = editor_snapshot["error"]
+    payload = {
+        "status": runtime_status,
+        "version": RUNTIME_VERSION,
         "device": device.name,
         "backend": device.backend,
-        "models": available_models(),
+        "vram_bytes": allocated_memory_bytes(device),
+        "models": available_models(editor_snapshot),
+        "capabilities": runtime_capabilities(editor_snapshot=editor_snapshot),
     }
+    if runtime_error:
+        payload["error"] = runtime_error
+    return payload
 
 
 @app.post("/v1/models/select")
 def select_image_editor(selection: ModelSelection):
+    global editor_error, editor_ready, editor_status
+    global resident_editor_model, resident_editor_pipeline
     if not editing_enabled():
         raise HTTPException(
             status_code=503,
             detail=f"image editing requires at least {MINIMUM_EDITOR_MEMORY_GB} GiB",
         )
-    try:
-        with runtime_lock:
+    if selection.model not in SUPPORTED_IMAGE_EDITORS:
+        raise HTTPException(
+            status_code=422,
+            detail="that image editor is not supported by this runtime",
+        )
+    with runtime_lock:
+        previous_model = resident_editor_model
+        previous_pipeline = resident_editor_pipeline
+        previous_ready = editor_ready and previous_model is not None and previous_pipeline is not None
+        try:
+            candidate_pipeline = edit_pipeline(selection.model)
+        except (DeviceUnavailableError, RuntimeError, OSError, ValueError) as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        try:
             model = select_model(CONFIG_PATH, selection.model)
+        except (OSError, ValueError) as error:
             edit_pipeline.cache_clear()
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
+            with editor_state_lock:
+                if previous_ready:
+                    resident_editor_pipeline = previous_pipeline
+                    resident_editor_model = previous_model
+                    editor_ready = True
+                    editor_status = "ready"
+                    editor_error = ""
+                else:
+                    resident_editor_pipeline = None
+                    resident_editor_model = None
+                    editor_ready = False
+                    editor_status = "degraded"
+                    editor_error = str(error)
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        with editor_state_lock:
+            resident_editor_pipeline = candidate_pipeline
+            resident_editor_model = model
+            editor_ready = True
+            editor_error = ""
+            editor_status = "ready"
     return {"status": "ready", "models": [model]}
 
 
@@ -205,13 +391,17 @@ async def edit_image(
             status_code=503,
             detail=f"image editing requires at least {MINIMUM_EDITOR_MEMORY_GB} GiB",
         )
-    active = selected_model()
-    if model != active:
-        raise HTTPException(status_code=404, detail="model is not the active image editor")
     try:
         source = Image.open(io.BytesIO(await image.read())).convert("RGB")
         with runtime_lock:
-            output = edit_pipeline(active)(image=[source], prompt=prompt).images[0]
+            if not editor_ready:
+                raise HTTPException(status_code=503, detail=editor_error)
+            active = resident_editor_model
+            if active is None or resident_editor_pipeline is None:
+                raise HTTPException(status_code=503, detail="the active image editor is not resident")
+            if model != active:
+                raise HTTPException(status_code=404, detail="model is not the active image editor")
+            output = resident_editor_pipeline(image=[source], prompt=prompt).images[0]
     except (DeviceUnavailableError, RuntimeError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     encoded = _png_base64(output)

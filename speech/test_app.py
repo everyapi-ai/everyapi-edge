@@ -1,5 +1,6 @@
 import io
 import unittest
+from threading import Event
 from unittest.mock import patch
 
 import numpy as np
@@ -29,13 +30,31 @@ class SpeechRuntimeAPITests(unittest.TestCase):
 
     def test_runtime_preloads_through_lifespan(self):
         self.assertEqual(app.app.router.on_startup, [])
-        with patch("app.preload") as preload:
+        started = Event()
+        with patch("app.preload", side_effect=started.set) as preload:
             with TestClient(app.app):
-                pass
+                self.assertTrue(started.wait(timeout=1), "speech warmup did not start")
         preload.assert_called_once_with()
 
+    def test_lifespan_does_not_clear_pipeline_while_warmup_is_running(self):
+        started = Event()
+        release = Event()
+
+        def blocked_preload():
+            started.set()
+            release.wait(timeout=1)
+
+        try:
+            with patch("app.preload", side_effect=blocked_preload):
+                with patch.object(app.pipeline, "cache_clear") as clear_pipeline:
+                    with TestClient(app.app):
+                        self.assertTrue(started.wait(timeout=1), "speech warmup did not start")
+                    clear_pipeline.assert_not_called()
+        finally:
+            release.set()
+
     def test_preload_only_marks_ready_after_a_successful_synthesis(self):
-        previous_ready, previous_error = app.speech_ready, app.speech_error
+        previous_ready, previous_error, previous_status = app.speech_ready, app.speech_error, app.speech_status
         try:
             app.speech_ready = False
             with patch("app.pipeline"):
@@ -49,7 +68,7 @@ class SpeechRuntimeAPITests(unittest.TestCase):
             self.assertTrue(app.speech_ready)
             self.assertEqual(app.speech_error, "")
         finally:
-            app.speech_ready, app.speech_error = previous_ready, previous_error
+            app.speech_ready, app.speech_error, app.speech_status = previous_ready, previous_error, previous_status
 
     # Kokoro fetches a voice tensor the first time that voice is asked for. Warming only the default would hand the download latency, and any network failure, to whichever buyer requests another advertised voice first.
     def test_preload_warms_every_advertised_language_and_voice(self):
@@ -96,15 +115,34 @@ class SpeechRuntimeAPITests(unittest.TestCase):
         self.assertEqual(payload["status"], "ready")
         self.assertEqual(payload["device"], "cuda")
         self.assertEqual(payload["models"], [DEFAULT_MODEL])
+        self.assertEqual(payload["version"], app.RUNTIME_VERSION)
+        self.assertIsInstance(payload["vram_bytes"], int)
+        self.assertEqual(
+            payload["capabilities"],
+            [
+                {
+                    "id": "audio.tts",
+                    "status": "ready",
+                    "models": [DEFAULT_MODEL],
+                    "paths": ["/v1/audio/speech"],
+                    "limits": {
+                        "max_input_characters": app.MAX_INPUT_CHARACTERS,
+                        "formats": sorted(app.SUPPORTED_RESPONSE_FORMATS),
+                    },
+                }
+            ],
+        )
 
     @patch("app.select_device", return_value=Device(name="cpu", backend="cpu"))
     @patch("app.speech_ready", False)
     @patch("app.speech_error", "voice download failed")
+    @patch("app.speech_status", "degraded")
     def test_health_is_non_success_until_the_voice_is_warm(self, _select):
         response = self.client.get("/health")
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["models"], [])
+        self.assertEqual(response.json()["status"], "degraded")
+        self.assertEqual(response.json()["models"], [DEFAULT_MODEL])
         self.assertIn("voice download failed", response.json()["error"])
 
     @patch("app.speech_ready", True)
@@ -211,7 +249,7 @@ class SpeechRuntimeAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn("still loading", response.json()["detail"])
 
-    # Transcription is not merely unimplemented — the agent protocol cannot carry a multipart upload, so the route must not exist.
+    # This runtime bundles synthesis models only, so transcription must not be advertised accidentally.
     def test_transcription_route_is_absent(self):
         for path in ("/v1/audio/transcriptions", "/v1/audio/translations"):
             self.assertEqual(self.client.post(path).status_code, 404)

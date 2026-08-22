@@ -1,8 +1,9 @@
 import { Outlet, useRouterState } from '@tanstack/react-router'
-import { Menu, X } from 'lucide-react'
+import { LogOut, Menu, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
 import { NAVIGATION_ITEMS } from '@/app/navigation'
+import { useLogout, useSession } from '@/api/queries'
 import { LanguageSwitch } from '@/components/LanguageSwitch'
 import { useTranslation } from '@/i18n/useTranslation'
 
@@ -11,6 +12,8 @@ import { MobileSystemStatus } from './SystemStatus'
 
 export const AppShell = () => {
   const { t } = useTranslation()
+  const session = useSession()
+  const logout = useLogout()
   const [mobileNav, setMobileNav] = useState(false)
   const mobileDialogRef = useRef<HTMLDivElement>(null)
   const mobileTriggerRef = useRef<HTMLButtonElement>(null)
@@ -58,8 +61,8 @@ export const AppShell = () => {
   }, [mobileNav])
 
   return (
-    <div className='grid min-h-svh grid-cols-1 md:grid-cols-[252px_1fr]'>
-      <div className='hidden md:block'>
+    <div className='grid min-h-svh grid-cols-1 xl:grid-cols-[252px_1fr]'>
+      <div className='hidden xl:block'>
         <NavigationRail />
       </div>
       {mobileNav ? (
@@ -67,14 +70,14 @@ export const AppShell = () => {
           <div
             aria-hidden='true'
             onClick={() => setMobileNav(false)}
-            className='fixed inset-0 z-[55] bg-black/70 backdrop-blur-[2px] md:hidden'
+            className='fixed inset-0 z-[55] bg-black/70 backdrop-blur-[2px] xl:hidden'
           />
           <div
             ref={mobileDialogRef}
             role='dialog'
             aria-modal='true'
             aria-label={t('header.eyebrow')}
-            className='fixed left-0 top-0 z-[60] h-svh w-[280px] shadow-[0_30px_60px_rgba(0,0,0,0.65)] md:hidden'
+            className='fixed left-0 top-0 z-[60] h-svh w-[280px] shadow-[0_30px_60px_rgba(0,0,0,0.65)] xl:hidden'
           >
             <button
               data-mobile-nav-close
@@ -100,22 +103,34 @@ export const AppShell = () => {
             type='button'
             aria-label={t('nav.open')}
             onClick={() => setMobileNav(true)}
-            className='grid size-7 shrink-0 place-items-center text-ink-2 hover:text-ink md:hidden'
+            className='grid size-7 shrink-0 place-items-center text-ink-2 hover:text-ink xl:hidden'
           >
             <Menu className='size-4' aria-hidden='true' />
           </button>
-          <div className='flex min-w-0 flex-1 items-center gap-3 md:hidden'>
+          <div className='flex min-w-0 flex-1 items-center gap-3 xl:hidden'>
             <span className='truncate text-sm font-semibold'>{t(activePage)}</span>
             <span className='h-3 w-px bg-line' />
             <MobileSystemStatus />
           </div>
-          <div className='hidden min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.13em] text-ink-faint md:flex'>
+          <div className='hidden min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.13em] text-ink-faint xl:flex'>
             <span>Edge / Local node</span>
             <span className='text-accent'>●</span>
             <span className='truncate text-ink-dim'>{t(activePage)}</span>
           </div>
-          <span className='hidden flex-1 md:block' />
+          <span className='hidden flex-1 xl:block' />
           <LanguageSwitch />
+          {session.data?.pairing_required ? (
+            <button
+              type='button'
+              aria-label={t('session.logout')}
+              title={t('session.logout')}
+              disabled={logout.isPending}
+              onClick={() => logout.mutate()}
+              className='grid size-7 shrink-0 place-items-center text-ink-2 hover:text-ink disabled:opacity-50'
+            >
+              <LogOut className='size-4' aria-hidden='true' />
+            </button>
+          ) : null}
         </header>
         <main className='min-w-0 flex-1'>
           <div className='mx-auto w-full max-w-[1680px] px-3 pb-24 pt-6 md:px-7 md:pt-10'>

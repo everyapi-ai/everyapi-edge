@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
+	edgeruntime "github.com/everyapi-ai/everyapi-edge/internal/runtime"
 )
 
 func TestDiscoverOllamaModelsUsesTagNamesAndDeduplicates(t *testing.T) {
@@ -38,6 +40,48 @@ func TestDiscoverOllamaModelsUsesTagNamesAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestDiscoverTextCapabilitiesUsesExactModelContracts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/version" {
+			_, _ = io.WriteString(w, `{"version":"0.13.3"}`)
+			return
+		}
+		if r.URL.Path != "/api/show" {
+			t.Fatalf("path = %q, want /api/show", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case bytes.Contains(body, []byte(`"qwen3:8b"`)):
+			_, _ = io.WriteString(w, `{"capabilities":["completion"]}`)
+		case bytes.Contains(body, []byte(`"nomic-embed"`)):
+			_, _ = io.WriteString(w, `{"capabilities":["embedding"]}`)
+		case bytes.Contains(body, []byte(`"gemma3:4b"`)):
+			_, _ = io.WriteString(w, `{"capabilities":["vision","completion"]}`)
+		default:
+			http.Error(w, "unknown model", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	got, err := discoverTextCapabilities(context.Background(), srv.URL, []string{"qwen3:8b", "nomic-embed", "gemma3:4b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []protocol.Capability{
+		{ID: protocol.CapabilityTextChat, Runtime: protocol.RuntimeText, Status: protocol.CapabilityReady, Models: []string{"gemma3:4b", "qwen3:8b"}, Paths: []string{"/v1/chat/completions"}},
+		{ID: protocol.CapabilityTextCompletion, Runtime: protocol.RuntimeText, Status: protocol.CapabilityReady, Models: []string{"gemma3:4b", "qwen3:8b"}, Paths: []string{"/v1/completions"}},
+		{ID: protocol.CapabilityTextResponses, Runtime: protocol.RuntimeText, Status: protocol.CapabilityReady, Models: []string{"gemma3:4b", "qwen3:8b"}, Paths: []string{"/v1/responses"}},
+		{ID: protocol.CapabilityTextEmbedding, Runtime: protocol.RuntimeText, Status: protocol.CapabilityReady, Models: []string{"nomic-embed"}, Paths: []string{"/v1/embeddings"}},
+		{ID: protocol.CapabilityTextVision, Runtime: protocol.RuntimeText, Status: protocol.CapabilityReady, Models: []string{"gemma3:4b"}, Paths: []string{"/v1/chat/completions"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("capabilities = %#v, want %#v", got, want)
+	}
+}
+
 func TestDiscoverDiffusersModelsRequiresReadyHealthAndDeduplicates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {
@@ -54,6 +98,37 @@ func TestDiscoverDiffusersModelsRequiresReadyHealthAndDeduplicates(t *testing.T)
 	want := []string{"qwen-edit", "sana-600m"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("models = %v, want %v", got, want)
+	}
+}
+
+func TestProtocolCapabilitiesPreserveRuntimeLifecycleAndLimits(t *testing.T) {
+	health := edgeruntime.RuntimeHealth{
+		Version: "image-runtime-2",
+		Capabilities: []edgeruntime.RuntimeCapability{{
+			ID: "image.edit", Status: edgeruntime.StatusWarming, Models: []string{"qwen-edit"}, Paths: []string{"/v1/images/edits"}, Reason: "weights loading",
+			Limits: edgeruntime.RuntimeLimits{MaxInputBytes: 32 << 20},
+		}},
+	}
+	want := []protocol.Capability{{
+		ID: protocol.CapabilityImageEdit, Runtime: protocol.RuntimeImage, Status: protocol.CapabilityWarming, Models: []string{"qwen-edit"}, Paths: []string{"/v1/images/edits"}, Version: "image-runtime-2", Reason: "weights loading",
+		Limits: protocol.CapabilityLimits{MaxInputBytes: 32 << 20},
+	}}
+	if got := protocolCapabilities(protocol.RuntimeImage, health); !reflect.DeepEqual(got, want) {
+		t.Fatalf("capabilities = %#v, want %#v", got, want)
+	}
+	health.Capabilities[0].Status = edgeruntime.StatusStarting
+	if got := protocolCapabilities(protocol.RuntimeImage, health); len(got) != 1 || got[0].Status != protocol.CapabilityWarming {
+		t.Fatalf("starting capability = %#v, want warming", got)
+	}
+}
+
+func TestReadyRuntimeModelsKeepsReadyCapabilityDuringPartialWarmup(t *testing.T) {
+	health := edgeruntime.RuntimeHealth{Status: edgeruntime.StatusWarming, Models: []string{"sana", "qwen-edit"}, Capabilities: []edgeruntime.RuntimeCapability{
+		{ID: "image.generate", Status: edgeruntime.StatusReady, Models: []string{"sana"}},
+		{ID: "image.edit", Status: edgeruntime.StatusWarming, Models: []string{"qwen-edit"}},
+	}}
+	if got := readyRuntimeModels(health); !reflect.DeepEqual(got, []string{"sana"}) {
+		t.Fatalf("ready runtime models = %#v", got)
 	}
 }
 
@@ -152,6 +227,17 @@ func TestRemoteControlHandlerAllowsImageRuntimeSelectionButNotImageGeneration(t 
 	}
 	if isAllowedRemoteControl(http.MethodPost, "/api/image/edit") {
 		t.Fatal("remote model management must not proxy arbitrary image edits")
+	}
+}
+
+func TestRemoteControlHandlerAllowsCapabilityReadButNotPlaygroundExecution(t *testing.T) {
+	if !isAllowedRemoteControl(http.MethodGet, "/api/capabilities") {
+		t.Fatal("capability health should be visible to constrained remote management")
+	}
+	for _, path := range []string{"/api/playground/chat", "/api/playground/image", "/api/playground/speech", "/api/playground/embedding"} {
+		if isAllowedRemoteControl(http.MethodPost, path) {
+			t.Fatalf("remote management must not execute %s", path)
+		}
 	}
 }
 
@@ -325,5 +411,26 @@ func TestRevokedSentinelTruncatesOnRuneBoundary(t *testing.T) {
 				t.Fatalf("sentinel exceeded maxSentinelBytes=%d; got %d", maxSentinelBytes, len(b))
 			}
 		})
+	}
+}
+
+func TestRediscoverMetadataWhenModelChangesDuringDiscovery(t *testing.T) {
+	refresh := newMetadataRefresh()
+	discoveryCalls := 0
+
+	meta := rediscoverUntilStable(refresh, func() protocol.NodeMeta {
+		discoveryCalls++
+		if discoveryCalls == 1 {
+			refresh.Notify()
+			return protocol.NodeMeta{Models: []string{"stale-model"}}
+		}
+		return protocol.NodeMeta{Models: []string{"fresh-model"}}
+	})
+
+	if discoveryCalls != 2 {
+		t.Fatalf("discovery calls = %d, want 2", discoveryCalls)
+	}
+	if !reflect.DeepEqual(meta.Models, []string{"fresh-model"}) {
+		t.Fatalf("models = %v, want fresh snapshot", meta.Models)
 	}
 }

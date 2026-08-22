@@ -26,4 +26,13 @@ if (-not $failed) {
     throw "checked native helper did not stop on exit code 7"
 }
 
+$firstToken = New-EdgeConsoleToken
+$secondToken = New-EdgeConsoleToken
+if ($firstToken -notmatch '^[a-f0-9]{64}$' -or $secondToken -notmatch '^[a-f0-9]{64}$') {
+    throw "console token helper did not return 32 random bytes as lowercase hexadecimal"
+}
+if ($firstToken -eq $secondToken) {
+    throw "console token helper returned the same value twice"
+}
+
 Write-Output "PowerShell native command checks passed"

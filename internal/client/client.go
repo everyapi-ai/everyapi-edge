@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,6 +39,10 @@ type Config struct {
 	Identity identity.Decoded
 	// Meta is the snapshot the agent reports on every connect — hardware, location, currently-installed models, agent version.
 	Meta protocol.NodeMeta
+	// TextModels is the Ollama-only model snapshot. Meta.Models also contains image and speech models, so it cannot safely detect out-of-band text model changes by itself.
+	TextModels []string
+	// TextResponsesSupported records the Ollama version feature gate independently of whether an installed completion model currently advertises that capability.
+	TextResponsesSupported bool
 	// Handler is invoked for every inbound Request frame. The returned io.Reader streams response chunks; closing it signals the agent that the request is done. A nil Handler drops Request frames on the floor (test-only).
 	Handler RequestHandler
 	// OnConnected runs immediately after the gateway accepts the Auth frame and sends Welcome. Callers must return promptly; it is used by the agent entrypoint to make a successful first registration observable to its installer.
@@ -48,8 +53,15 @@ type Config struct {
 	MaxConcurrentRequests int
 	// Log receives agent diagnostics that would otherwise only go to stderr. main routes this into both docker logs and the supplier-local console. OllamaURL is the local model runtime, used only by the auto-pull path: the gateway's Welcome frame names models this node is missing from its owner's declared target set, and the agent pulls them here. Empty disables auto-pull.
 	OllamaURL string
+	// DiffusersURL and SpeechURL are queried only for their bounded /health resource snapshots so heartbeat scheduling accounts for every GPU runtime managed by this node.
+	DiffusersURL string
+	SpeechURL    string
 	// VRAMTotalGB is the scheduler budget discovered at agent startup. It is sent with every heartbeat so the gateway can preserve a runtime safety reserve when it balances requests across nodes.
 	VRAMTotalGB int
+	// GatewayRoundTrip receives the measured heartbeat ACK latency over the authenticated WebSocket.
+	GatewayRoundTrip func(time.Duration)
+	// MetadataChanged is a process-lifetime coalesced signal shared by successive Client instances. Sharing it prevents a model mutation that completes between sessions from being lost before the next Auth snapshot is built. New creates a private channel when omitted.
+	MetadataChanged chan struct{}
 
 	Log func(level, message string)
 	// Settlement receives gateway-committed seller receipts. It must be idempotent because reconnect replay can deliver a receipt twice.
@@ -91,6 +103,8 @@ type TerminalDisconnectError struct {
 	Reason string
 }
 
+var ErrMetadataChanged = errors.New("local runtime metadata changed")
+
 func (e *TerminalDisconnectError) Error() string {
 	return "gateway disconnect (terminal): " + e.Code + ": " + e.Reason
 }
@@ -114,7 +128,29 @@ type Client struct {
 	inflight atomic.Int64
 
 	// welcomeReceived flips true after the gateway accepts the Auth frame and we successfully parse a Welcome back. The reconnect loop in main.go reads this via WelcomeReceived() to decide whether the in-process RegistrationToken has been consumed server-side — without that gate, an Auth rejection (token already used, wrong node id, signature failure) would still burn the token in main's outer loop and brick the agent.
-	welcomeReceived atomic.Bool
+	welcomeReceived      atomic.Bool
+	requestMu            sync.Mutex
+	requestBodies        map[string]*requestBodyAssembly
+	requestBodyBytes     int64
+	activeRequests       map[string]*activeRequest
+	metadataChanged      chan struct{}
+	now                  func() time.Time
+	runtimeStateMu       sync.Mutex
+	runtimeFingerprints  map[protocol.RuntimeKind]string
+	runtimeMismatches    map[protocol.RuntimeKind]int
+	runtimeCandidates    map[protocol.RuntimeKind]string
+	runtimeRefreshQueued bool
+	monitoredRuntimes    map[protocol.RuntimeKind]bool
+}
+
+type requestBodyAssembly struct {
+	start     protocol.RequestStartBody
+	body      []byte
+	updatedAt time.Time
+}
+
+type activeRequest struct {
+	cancel context.CancelFunc
 }
 
 // WelcomeReceived reports whether this Client successfully completed the WS handshake. False until the gateway's Welcome frame is read; stays false if the connection terminated during/before Auth.
@@ -139,11 +175,31 @@ func New(cfg Config) (*Client, error) {
 	if cfg.MaxConcurrentRequests <= 0 {
 		cfg.MaxConcurrentRequests = defaultMaxConcurrentRequests
 	}
+	metadataChanged := cfg.MetadataChanged
+	if metadataChanged == nil {
+		metadataChanged = make(chan struct{}, 1)
+	}
 	return &Client{
-		cfg:   cfg,
-		sendQ: make(chan protocol.Frame, 32),
-		done:  make(chan struct{}),
-		sem:   make(chan struct{}, cfg.MaxConcurrentRequests),
+		cfg:             cfg,
+		sendQ:           make(chan protocol.Frame, 32),
+		done:            make(chan struct{}),
+		sem:             make(chan struct{}, cfg.MaxConcurrentRequests),
+		requestBodies:   make(map[string]*requestBodyAssembly),
+		activeRequests:  make(map[string]*activeRequest),
+		metadataChanged: metadataChanged,
+		now:             time.Now,
+		runtimeFingerprints: map[protocol.RuntimeKind]string{
+			protocol.RuntimeText:   textRuntimeFingerprint(cfg.TextModels, cfg.TextResponsesSupported),
+			protocol.RuntimeImage:  capabilityFingerprint(protocol.RuntimeImage, cfg.Meta.Capabilities),
+			protocol.RuntimeSpeech: capabilityFingerprint(protocol.RuntimeSpeech, cfg.Meta.Capabilities),
+		},
+		runtimeMismatches: make(map[protocol.RuntimeKind]int),
+		runtimeCandidates: make(map[protocol.RuntimeKind]string),
+		monitoredRuntimes: map[protocol.RuntimeKind]bool{
+			protocol.RuntimeText:   cfg.OllamaURL != "" && cfg.TextModels != nil,
+			protocol.RuntimeImage:  cfg.DiffusersURL != "",
+			protocol.RuntimeSpeech: cfg.SpeechURL != "",
+		},
 	}, nil
 }
 
@@ -157,8 +213,10 @@ func (c *Client) Run(ctx context.Context) error {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	// readerDone closes only after readerLoop has fully returned. Shutdown MUST wait on it before wg.Wait(): every wg.Add happens on the reader goroutine (inside dispatch), so starting wg.Wait while the reader is still running races Add against Wait — either a "sync: WaitGroup misuse" panic or a Wait that returns while a freshly-spawned handler is still in flight.
 	readerDone := make(chan struct{})
+	monitorDone := make(chan struct{})
 	// Defers run LIFO: closeConn first (close done + conn → unblock a parked ReadMessage and any parked sender), then wait for the reader to exit (after which no further wg.Add can happen), then cancel (abort in-flight upstream calls), then wg.Wait (drain handlers) so Run never returns while goroutines it spawned are still touching the connection.
 	defer c.wg.Wait()
+	defer func() { <-monitorDone }()
 	defer cancel()
 	defer func() { <-readerDone }()
 	defer c.closeConn()
@@ -172,14 +230,31 @@ func (c *Client) Run(ctx context.Context) error {
 		readErr <- c.readerLoop(sessionCtx)
 	}()
 	go func() { writeErr <- c.writerLoop(sessionCtx) }()
+	go func() {
+		defer close(monitorDone)
+		c.runtimeMonitorLoop(sessionCtx)
+	}()
 
 	select {
 	case err := <-readErr:
 		return err
 	case err := <-writeErr:
 		return err
+	case <-c.metadataChanged:
+		return ErrMetadataChanged
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// RequestMetadataRefresh ends the current authenticated session so the reconnect path can rediscover installed models and runtime capabilities before sending the next Auth frame. The signal is coalesced because multiple successful model mutations before reconnect need only one fresh snapshot.
+func (c *Client) RequestMetadataRefresh() {
+	if c == nil || c.metadataChanged == nil {
+		return
+	}
+	select {
+	case c.metadataChanged <- struct{}{}:
+	default:
 	}
 }
 
@@ -224,6 +299,7 @@ func (c *Client) connectAndAuth(ctx context.Context) error {
 		}
 		return fmt.Errorf("ws dial %s%s: %w", wsURL.Host, hint, err)
 	}
+	conn.SetReadLimit(protocol.MaxFrameBytes)
 
 	bodyJSON, err := json.Marshal(authBody)
 	if err != nil {
@@ -337,9 +413,13 @@ func (c *Client) readerLoop(ctx context.Context) error {
 			c.log("warn", "malformed inbound frame from gateway")
 			continue
 		}
+		c.expireRequestBodies(c.currentTime())
 		switch frame.Type {
 		case protocol.FrameHeartbeat:
 			// Liveness only — read deadline already reset above.
+			continue
+		case protocol.FrameHeartbeatAck:
+			c.handleHeartbeatAck(frame.Body)
 			continue
 		case protocol.FrameRequest, protocol.FrameControlRequest:
 			if err := c.dispatch(ctx, frame); err != nil {
@@ -348,6 +428,19 @@ func (c *Client) readerLoop(ctx context.Context) error {
 				}
 				return err
 			}
+		case protocol.FrameRequestStart:
+			c.startRequestBody(frame)
+		case protocol.FrameRequestBody:
+			c.appendRequestBody(frame)
+		case protocol.FrameRequestEnd:
+			if err := c.finishRequestBody(ctx, frame); err != nil {
+				if errors.Is(err, errReaderClosed) {
+					return nil
+				}
+				return err
+			}
+		case protocol.FrameRequestCancel:
+			c.cancelRequest(frame.ID)
 		case protocol.FrameDisconnect:
 			var body protocol.DisconnectBody
 			if uErr := json.Unmarshal(frame.Body, &body); uErr != nil {
@@ -368,6 +461,21 @@ func (c *Client) readerLoop(ctx context.Context) error {
 			c.log("warn", "unexpected gateway frame type")
 		}
 	}
+}
+
+func (c *Client) handleHeartbeatAck(raw json.RawMessage) {
+	if c.cfg.GatewayRoundTrip == nil {
+		return
+	}
+	var heartbeat protocol.HeartbeatBody
+	if json.Unmarshal(raw, &heartbeat) != nil || heartbeat.NowUnixMs <= 0 {
+		return
+	}
+	roundTrip := time.Since(time.UnixMilli(heartbeat.NowUnixMs))
+	if roundTrip < 0 || roundTrip > protocol.HeartbeatTimeout {
+		return
+	}
+	c.cfg.GatewayRoundTrip(roundTrip)
 }
 
 func (c *Client) handleUpdate(ctx context.Context, frame protocol.Frame) {
@@ -413,8 +521,21 @@ var errReaderClosed = errors.New("reader closed")
 // errCodeNodeBusy is the Error-frame code dispatch emits when the concurrency pool is full. Gateway-side this surfaces as a pre-chunk FrameError: waitForFirstChunk (relay/channel/edge/adaptor.go) fails the DoRequest before any byte reaches the buyer, the relay wraps it as a retryable 500 (ErrorCodeDoRequestFailed), and shouldRetry reroutes the request to another channel/node.
 const errCodeNodeBusy = "node_busy"
 
+const (
+	requestBodyAssemblyTimeout  = 30 * time.Second
+	maxBufferedRequestBodyBytes = 64 << 20
+)
+
 // dispatch try-acquires a concurrency slot and starts a handler goroutine for an inbound Request frame. It MUST NOT block on a full pool: the WS read deadline (HeartbeatTimeout, 30s) is only refreshed by successful reads, while forwarded requests run for minutes — a reader parked here would let the deadline expire, so the next ReadMessage after a slot freed would fail with an i/o timeout and tear the whole session down (aborting every in-flight handler). Parking would also stall Disconnect-frame handling (incl. node_revoked) for the duration of the saturation. Instead, a full pool rejects the request immediately with a node_busy Error frame and the reader keeps draining; the gateway retries the buyer request on another node (see errCodeNodeBusy). Returns ctx.Err() if the session context was cancelled, errReaderClosed if closeConn fired, or nil once the frame was either handed to a handler or rejected.
 func (c *Client) dispatch(ctx context.Context, frame protocol.Frame) error {
+	return c.startHandler(ctx, frame.ID, func(requestCtx context.Context) { c.handleRequest(requestCtx, frame) })
+}
+
+func (c *Client) dispatchRequest(ctx context.Context, id string, request protocol.RequestBody) error {
+	return c.startHandler(ctx, id, func(requestCtx context.Context) { c.handleRequestBody(requestCtx, id, request) })
+}
+
+func (c *Client) startHandler(ctx context.Context, id string, run func(context.Context)) error {
 	select {
 	case c.sem <- struct{}{}:
 		// Slot acquired — but if done/ctx became ready at the same time, select picks an arm at random and can land here mid-shutdown. Re-check before wg.Add so no handler spawns once the session is closing (Run's reader-exit barrier makes a late Add safe for wg.Wait, but the handler would only burn an upstream call against a dead session).
@@ -433,19 +554,54 @@ func (c *Client) dispatch(ctx context.Context, frame protocol.Frame) error {
 		return errReaderClosed
 	default:
 		// Pool full. Reject without blocking the reader: emitError → sendFrame would park up to 5s if sendQ is saturated, and a parked reader stops refreshing the WS read deadline — the very stall this reject path exists to avoid. Drop the reject if the queue is full; the gateway's first-chunk wait still times out and reroutes, so it degrades gracefully.
-		c.trySendError(frame.ID, errCodeNodeBusy,
+		c.trySendError(id, errCodeNodeBusy,
 			fmt.Sprintf("node at max concurrent requests (%d)", c.cfg.MaxConcurrentRequests))
 		return nil
 	}
+	requestCtx, requestCancel := context.WithCancel(ctx)
+	active := &activeRequest{cancel: requestCancel}
+	c.requestMu.Lock()
+	if _, exists := c.activeRequests[id]; exists {
+		c.requestMu.Unlock()
+		requestCancel()
+		<-c.sem
+		c.trySendError(id, "malformed_request", "duplicate active request id")
+		return nil
+	}
+	c.activeRequests[id] = active
+	c.requestMu.Unlock()
 	c.wg.Add(1)
 	c.inflight.Add(1)
 	go func() {
 		defer c.wg.Done()
 		defer c.inflight.Add(-1)
 		defer func() { <-c.sem }()
-		c.handleRequest(ctx, frame)
+		defer requestCancel()
+		defer c.finishActiveRequest(id, active)
+		run(requestCtx)
 	}()
 	return nil
+}
+
+func (c *Client) finishActiveRequest(id string, active *activeRequest) {
+	c.requestMu.Lock()
+	if c.activeRequests[id] == active {
+		delete(c.activeRequests, id)
+	}
+	c.requestMu.Unlock()
+}
+
+func (c *Client) cancelRequest(id string) {
+	if id == "" {
+		return
+	}
+	c.requestMu.Lock()
+	c.dropRequestBodyLocked(id)
+	active := c.activeRequests[id]
+	c.requestMu.Unlock()
+	if active != nil {
+		active.cancel()
+	}
 }
 
 // handleRequest is the per-request goroutine: parse, hand to the installed Handler, emit Chunk frames as the handler streams, and terminate with Done/Error.
@@ -464,20 +620,147 @@ func (c *Client) handleRequest(ctx context.Context, frame protocol.Frame) {
 		c.emitError(frame.ID, "malformed_request", err.Error())
 		return
 	}
+	c.handleRequestBody(ctx, frame.ID, body)
+}
+
+func (c *Client) handleRequestBody(ctx context.Context, id string, body protocol.RequestBody) {
+	if c.cfg.Handler == nil {
+		c.emitError(id, "no_handler", "agent has no request handler installed")
+		return
+	}
 	send := func(chunk protocol.ChunkBody) error {
 		chunkJSON, err := json.Marshal(chunk)
 		if err != nil {
 			return err
 		}
-		return c.sendFrame(protocol.Frame{Type: protocol.FrameChunk, ID: frame.ID, Body: chunkJSON})
+		return c.sendFrame(protocol.Frame{Type: protocol.FrameChunk, ID: id, Body: chunkJSON})
 	}
 	done, errBody := c.cfg.Handler(ctx, body, send)
+	if ctx.Err() != nil {
+		return
+	}
 	if errBody != nil {
-		c.emitError(frame.ID, errBody.Code, errBody.Message)
+		c.emitError(id, errBody.Code, errBody.Message)
 		return
 	}
 	doneJSON, _ := json.Marshal(done)
-	_ = c.sendFrame(protocol.Frame{Type: protocol.FrameDone, ID: frame.ID, Body: doneJSON})
+	_ = c.sendFrame(protocol.Frame{Type: protocol.FrameDone, ID: id, Body: doneJSON})
+}
+
+func (c *Client) startRequestBody(frame protocol.Frame) {
+	if frame.ID == "" {
+		return
+	}
+	var start protocol.RequestStartBody
+	if err := json.Unmarshal(frame.Body, &start); err != nil || start.BodySize < 0 || start.BodySize > protocol.MaxRequestBodyBytes {
+		c.trySendError(frame.ID, "malformed_request", "invalid request start")
+		return
+	}
+	capacity := int(start.BodySize)
+	if capacity > protocol.RequestBodyChunkBytes {
+		capacity = protocol.RequestBodyChunkBytes
+	}
+	now := c.currentTime()
+	c.requestMu.Lock()
+	c.expireRequestBodiesLocked(now)
+	if c.requestBodies == nil {
+		c.requestBodies = make(map[string]*requestBodyAssembly)
+	}
+	if _, exists := c.requestBodies[frame.ID]; exists {
+		c.dropRequestBodyLocked(frame.ID)
+		c.requestMu.Unlock()
+		c.trySendError(frame.ID, "malformed_request", "duplicate request start")
+		return
+	}
+	if len(c.requestBodies) >= protocol.MaxPendingRequestBodies {
+		c.requestMu.Unlock()
+		c.trySendError(frame.ID, errCodeNodeBusy, "too many request bodies are uploading")
+		return
+	}
+	c.requestBodies[frame.ID] = &requestBodyAssembly{start: start, body: make([]byte, 0, capacity), updatedAt: now}
+	c.requestMu.Unlock()
+}
+
+func (c *Client) appendRequestBody(frame protocol.Frame) {
+	var chunk protocol.RequestBodyChunk
+	if err := json.Unmarshal(frame.Body, &chunk); err != nil {
+		c.requestMu.Lock()
+		c.dropRequestBodyLocked(frame.ID)
+		c.requestMu.Unlock()
+		c.trySendError(frame.ID, "malformed_request", "invalid request body chunk")
+		return
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(chunk.Bytes)
+	c.requestMu.Lock()
+	assembly, ok := c.requestBodies[frame.ID]
+	if !ok {
+		c.requestMu.Unlock()
+		c.trySendError(frame.ID, "malformed_request", "request body chunk arrived before start")
+		return
+	}
+	if err != nil || len(decoded) > protocol.RequestBodyChunkBytes || int64(len(assembly.body)+len(decoded)) > assembly.start.BodySize || c.requestBodyBytes+int64(len(decoded)) > maxBufferedRequestBodyBytes {
+		c.dropRequestBodyLocked(frame.ID)
+		c.requestMu.Unlock()
+		c.trySendError(frame.ID, "malformed_request", "request body chunk exceeds declared limits")
+		return
+	}
+	assembly.body = append(assembly.body, decoded...)
+	assembly.updatedAt = c.currentTime()
+	c.requestBodyBytes += int64(len(decoded))
+	c.requestMu.Unlock()
+}
+
+func (c *Client) finishRequestBody(ctx context.Context, frame protocol.Frame) error {
+	c.requestMu.Lock()
+	assembly, ok := c.requestBodies[frame.ID]
+	if !ok {
+		c.requestMu.Unlock()
+		c.trySendError(frame.ID, "malformed_request", "request end arrived before start")
+		return nil
+	}
+	c.dropRequestBodyLocked(frame.ID)
+	c.requestMu.Unlock()
+	if int64(len(assembly.body)) != assembly.start.BodySize {
+		c.trySendError(frame.ID, "malformed_request", "request body size does not match declaration")
+		return nil
+	}
+	return c.dispatchRequest(ctx, frame.ID, protocol.RequestBody{
+		Method: assembly.start.Method, Path: assembly.start.Path, Headers: assembly.start.Headers,
+		Body: assembly.body, Stream: assembly.start.Stream, ConsumerRef: assembly.start.ConsumerRef,
+	})
+}
+
+func (c *Client) currentTime() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func (c *Client) expireRequestBodies(now time.Time) {
+	c.requestMu.Lock()
+	c.expireRequestBodiesLocked(now)
+	c.requestMu.Unlock()
+}
+
+func (c *Client) expireRequestBodiesLocked(now time.Time) {
+	for id, assembly := range c.requestBodies {
+		if now.Sub(assembly.updatedAt) > requestBodyAssemblyTimeout {
+			c.dropRequestBodyLocked(id)
+		}
+	}
+}
+
+func (c *Client) dropRequestBodyLocked(id string) {
+	assembly := c.requestBodies[id]
+	if assembly == nil {
+		return
+	}
+	c.requestBodyBytes -= int64(len(assembly.body))
+	if c.requestBodyBytes < 0 {
+		c.requestBodyBytes = 0
+	}
+	delete(c.requestBodies, id)
 }
 
 func (c *Client) handleControl(ctx context.Context, frame protocol.Frame) {
@@ -494,6 +777,9 @@ func (c *Client) handleControl(ctx context.Context, frame protocol.Frame) {
 		return
 	}
 	chunk, errBody := c.cfg.ControlHandler(ctx, body)
+	if ctx.Err() != nil {
+		return
+	}
 	if errBody != nil {
 		c.emitError(frame.ID, errBody.Code, errBody.Message)
 		return
@@ -595,20 +881,33 @@ func (c *Client) heartbeatTelemetry(ctx context.Context) protocol.HeartbeatBody 
 		VRAMTotalGB: c.cfg.VRAMTotalGB,
 		ActiveReqs:  int(c.inflight.Load()),
 	}
-	if c.cfg.OllamaURL == "" || c.cfg.HTTPClient == nil {
+	if c.cfg.HTTPClient == nil {
 		return telemetry
+	}
+	usedBytes := c.ollamaVRAMBytes(ctx)
+	imageBytes, _ := c.runtimeSnapshot(ctx, c.cfg.DiffusersURL, protocol.RuntimeImage)
+	usedBytes = addVRAMBytes(usedBytes, imageBytes)
+	speechBytes, _ := c.runtimeSnapshot(ctx, c.cfg.SpeechURL, protocol.RuntimeSpeech)
+	usedBytes = addVRAMBytes(usedBytes, speechBytes)
+	telemetry.VRAMUsedGB = float64(usedBytes) / float64(1<<30)
+	return telemetry
+}
+
+func (c *Client) ollamaVRAMBytes(ctx context.Context) int64 {
+	if c.cfg.OllamaURL == "" {
+		return 0
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.OllamaURL, "/")+"/api/ps", nil)
 	if err != nil {
-		return telemetry
+		return 0
 	}
 	response, err := c.cfg.HTTPClient.Do(req)
 	if err != nil {
-		return telemetry
+		return 0
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return telemetry
+		return 0
 	}
 	var payload struct {
 		Models []struct {
@@ -616,16 +915,231 @@ func (c *Client) heartbeatTelemetry(ctx context.Context) protocol.HeartbeatBody 
 		} `json:"models"`
 	}
 	if json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&payload) != nil {
-		return telemetry
+		return 0
 	}
 	var usedBytes int64
 	for _, model := range payload.Models {
-		if model.SizeVRAM > 0 && usedBytes <= math.MaxInt64-model.SizeVRAM {
-			usedBytes += model.SizeVRAM
+		usedBytes = addVRAMBytes(usedBytes, model.SizeVRAM)
+	}
+	return usedBytes
+}
+
+func (c *Client) runtimeSnapshot(ctx context.Context, baseURL string, kind protocol.RuntimeKind) (int64, string) {
+	if strings.TrimSpace(baseURL) == "" {
+		return 0, "unavailable"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/health", nil)
+	if err != nil {
+		return 0, "unavailable"
+	}
+	response, err := c.cfg.HTTPClient.Do(req)
+	if err != nil {
+		return 0, "unavailable"
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable {
+		return 0, "unavailable"
+	}
+	var payload struct {
+		Version      string                `json:"version"`
+		VRAMBytes    int64                 `json:"vram_bytes"`
+		Capabilities []protocol.Capability `json:"capabilities"`
+	}
+	if json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&payload) != nil || payload.VRAMBytes < 0 {
+		return 0, "unavailable"
+	}
+	for index := range payload.Capabilities {
+		payload.Capabilities[index].Runtime = kind
+		payload.Capabilities[index].Version = payload.Version
+	}
+	return payload.VRAMBytes, capabilityFingerprint(kind, payload.Capabilities)
+}
+
+func (c *Client) probeTextRuntimeFingerprint(ctx context.Context) string {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.OllamaURL, "/")+"/api/tags", nil)
+	if err != nil {
+		return "unavailable"
+	}
+	response, err := c.cfg.HTTPClient.Do(request)
+	if err != nil {
+		return "unavailable"
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "unavailable"
+	}
+	var tags struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&tags) != nil {
+		return "unavailable"
+	}
+	models := make([]string, 0, len(tags.Models))
+	for _, model := range tags.Models {
+		models = append(models, model.Name)
+	}
+	if len(normalizedFingerprintStrings(models)) == 0 {
+		return "unavailable"
+	}
+	versionRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.OllamaURL, "/")+"/api/version", nil)
+	if err != nil {
+		return "unavailable"
+	}
+	versionResponse, err := c.cfg.HTTPClient.Do(versionRequest)
+	if err != nil {
+		return "unavailable"
+	}
+	defer versionResponse.Body.Close()
+	if versionResponse.StatusCode != http.StatusOK {
+		return "unavailable"
+	}
+	var version struct {
+		Version string `json:"version"`
+	}
+	if json.NewDecoder(io.LimitReader(versionResponse.Body, 2<<20)).Decode(&version) != nil {
+		return "unavailable"
+	}
+	var major, minor, patch int
+	_, parseErr := fmt.Sscanf(strings.TrimSpace(version.Version), "%d.%d.%d", &major, &minor, &patch)
+	responses := parseErr == nil && (major > 0 || minor > 13 || minor == 13 && patch >= 3)
+	return textRuntimeFingerprint(models, responses)
+}
+
+const runtimeStateProbeTimeout = 10 * time.Second
+
+type runtimeFingerprintResult struct {
+	kind        protocol.RuntimeKind
+	fingerprint string
+}
+
+func (c *Client) runtimeMonitorLoop(ctx context.Context) {
+	ticker := time.NewTicker(protocol.HeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.monitorRuntimeState(ctx)
 		}
 	}
-	telemetry.VRAMUsedGB = float64(usedBytes) / float64(1<<30)
-	return telemetry
+}
+
+func (c *Client) monitorRuntimeState(ctx context.Context) {
+	results := make(chan runtimeFingerprintResult, len(c.monitoredRuntimes))
+	pending := 0
+	probe := func(kind protocol.RuntimeKind, discover func(context.Context) string) {
+		if !c.monitoredRuntimes[kind] {
+			return
+		}
+		pending++
+		go func() {
+			probeCtx, cancel := context.WithTimeout(ctx, runtimeStateProbeTimeout)
+			defer cancel()
+			results <- runtimeFingerprintResult{kind: kind, fingerprint: discover(probeCtx)}
+		}()
+	}
+	probe(protocol.RuntimeText, c.probeTextRuntimeFingerprint)
+	probe(protocol.RuntimeImage, func(probeCtx context.Context) string {
+		_, fingerprint := c.runtimeSnapshot(probeCtx, c.cfg.DiffusersURL, protocol.RuntimeImage)
+		return fingerprint
+	})
+	probe(protocol.RuntimeSpeech, func(probeCtx context.Context) string {
+		_, fingerprint := c.runtimeSnapshot(probeCtx, c.cfg.SpeechURL, protocol.RuntimeSpeech)
+		return fingerprint
+	})
+	for range pending {
+		select {
+		case <-ctx.Done():
+			return
+		case result := <-results:
+			c.observeRuntimeFingerprint(result.kind, result.fingerprint)
+		}
+	}
+}
+
+func (c *Client) observeRuntimeFingerprint(kind protocol.RuntimeKind, fingerprint string) {
+	c.runtimeStateMu.Lock()
+	if c.runtimeFingerprints == nil {
+		c.runtimeStateMu.Unlock()
+		return
+	}
+	if c.runtimeRefreshQueued {
+		c.runtimeStateMu.Unlock()
+		return
+	}
+	if fingerprint == c.runtimeFingerprints[kind] {
+		c.runtimeMismatches[kind] = 0
+		delete(c.runtimeCandidates, kind)
+		c.runtimeStateMu.Unlock()
+		return
+	}
+	if c.runtimeCandidates[kind] != fingerprint {
+		c.runtimeCandidates[kind] = fingerprint
+		c.runtimeMismatches[kind] = 1
+	} else {
+		c.runtimeMismatches[kind]++
+	}
+	if c.runtimeMismatches[kind] < 2 {
+		c.runtimeStateMu.Unlock()
+		return
+	}
+	c.runtimeRefreshQueued = true
+	c.runtimeStateMu.Unlock()
+	c.RequestMetadataRefresh()
+}
+
+func textRuntimeFingerprint(models []string, responses bool) string {
+	normalized := normalizedFingerprintStrings(models)
+	if len(normalized) == 0 {
+		return "unavailable"
+	}
+	return fmt.Sprintf("models=%s;responses=%t", strings.Join(normalized, ","), responses)
+}
+
+func capabilityFingerprint(kind protocol.RuntimeKind, capabilities []protocol.Capability) string {
+	parts := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		if capability.Runtime != kind {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s|%s|%s|%s|%s|%d|%d|%s", capability.ID, capability.Status, strings.Join(normalizedFingerprintStrings(capability.Models), ","), strings.Join(normalizedFingerprintStrings(capability.Paths), ","), strings.TrimSpace(capability.Version), capability.Limits.MaxInputBytes, capability.Limits.MaxInputCharacters, strings.Join(normalizedFingerprintStrings(capability.Limits.Formats), ",")))
+	}
+	if len(parts) == 0 {
+		return "unavailable"
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ";")
+}
+
+func normalizedFingerprintStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func addVRAMBytes(total, value int64) int64 {
+	if value <= 0 {
+		return total
+	}
+	if total > math.MaxInt64-value {
+		return math.MaxInt64
+	}
+	return total + value
 }
 
 func (c *Client) writeFrame(frame protocol.Frame) error {

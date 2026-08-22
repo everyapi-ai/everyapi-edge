@@ -19,6 +19,8 @@ func TestWindowsInstallerSelectsWSL2NVIDIAProfileAndPersistsHostPlatform(t *test
 		"EVERYAPI_DIFFUSERS_URL",
 		"Move-Item -LiteralPath $temporaryEnv",
 		"Invoke-CheckedNative",
+		"New-EdgeConsoleToken",
+		"EVERYAPI_CONSOLE_TOKEN=$consoleToken",
 		"connected to gateway",
 	} {
 		if !strings.Contains(script, required) {

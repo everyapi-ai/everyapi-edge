@@ -45,3 +45,17 @@ def select_device(
     if mps_available():
         return Device(name="mps", backend="mps")
     raise DeviceUnavailableError(ACCELERATOR_REQUIRED_MESSAGE)
+
+
+def allocated_memory_bytes(device: Device) -> int:
+    """Return this runtime process' current accelerator allocation."""
+    try:
+        import torch
+
+        if device.name == "cuda":
+            return int(torch.cuda.memory_reserved())
+        if device.name == "mps":
+            return int(torch.mps.current_allocated_memory())
+    except (ImportError, AttributeError, RuntimeError):
+        return 0
+    return 0

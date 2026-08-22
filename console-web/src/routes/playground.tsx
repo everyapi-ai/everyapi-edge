@@ -1,12 +1,12 @@
 import { createRoute } from '@tanstack/react-router'
 
-import { PlaygroundPage } from '@/features/playground/PlaygroundPage'
+import { MultimodalPlayground } from '@/features/playground/MultimodalPlayground'
 
 import { rootRoute } from './root'
 
 const PlaygroundRoutePage = () => {
   const search = playgroundRoute.useSearch()
-  return <PlaygroundPage initialModel={search.model} />
+  return <MultimodalPlayground initialModel={search.model} />
 }
 
 export const playgroundRoute = createRoute({

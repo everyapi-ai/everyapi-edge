@@ -9,27 +9,35 @@ import (
 )
 
 const (
-	ProtocolVersion = "1.0"
+	ProtocolVersion = "1.2"
 
 	HeartbeatInterval = 10 * time.Second
 	HeartbeatTimeout  = 30 * time.Second
 
-	MaxFrameBytes = 1 << 20 // 1 MiB
+	MaxFrameBytes           = 1 << 20  // 1 MiB
+	MaxRequestBodyBytes     = 32 << 20 // 32 MiB
+	RequestBodyChunkBytes   = 64 << 10 // 64 KiB decoded
+	MaxPendingRequestBodies = 4
 )
 
 type FrameType string
 
 const (
-	FrameAuth       FrameType = "auth"
-	FrameWelcome    FrameType = "welcome"
-	FrameHeartbeat  FrameType = "heartbeat"
-	FrameRequest    FrameType = "request"
-	FrameChunk      FrameType = "chunk"
-	FrameDone       FrameType = "done"
-	FrameError      FrameType = "error"
-	FrameSettlement FrameType = "settlement"
-	FrameDisconnect FrameType = "disconnect"
-	FrameLog        FrameType = "log"
+	FrameAuth          FrameType = "auth"
+	FrameWelcome       FrameType = "welcome"
+	FrameHeartbeat     FrameType = "heartbeat"
+	FrameHeartbeatAck  FrameType = "heartbeat_ack"
+	FrameRequest       FrameType = "request"
+	FrameRequestStart  FrameType = "request_start"
+	FrameRequestBody   FrameType = "request_body"
+	FrameRequestEnd    FrameType = "request_end"
+	FrameRequestCancel FrameType = "request_cancel"
+	FrameChunk         FrameType = "chunk"
+	FrameDone          FrameType = "done"
+	FrameError         FrameType = "error"
+	FrameSettlement    FrameType = "settlement"
+	FrameDisconnect    FrameType = "disconnect"
+	FrameLog           FrameType = "log"
 
 	// FrameModelPull is agent → gateway, fire-and-forget: one per model the agent was asked to pull, reporting how that pull ended. Mirrors the gateway's backend/pkg/edge definition.
 	FrameModelPull      FrameType = "model_pull"
@@ -73,10 +81,23 @@ type RequestBody struct {
 	Method  string            `json:"method"`
 	Path    string            `json:"path"`
 	Headers map[string]string `json:"headers,omitempty"`
-	Body    json.RawMessage   `json:"body,omitempty"`
+	Body    json.RawMessage   `json:"body,omitempty"` // Inline JSON request body; arbitrary or large bodies use RequestStart/Body/End frames.
 	Stream  bool              `json:"stream,omitempty"`
 	// ConsumerRef is a gateway-generated, node-scoped opaque customer label. It lets the supplier recognise repeated traffic without exposing a buyer's account ID, email, token, or any other credential.
 	ConsumerRef string `json:"consumer_ref,omitempty"`
+}
+
+type RequestStartBody struct {
+	Method      string            `json:"method"`
+	Path        string            `json:"path"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Stream      bool              `json:"stream,omitempty"`
+	ConsumerRef string            `json:"consumer_ref,omitempty"`
+	BodySize    int64             `json:"body_size"`
+}
+
+type RequestBodyChunk struct {
+	Bytes string `json:"bytes"`
 }
 
 type ChunkBody struct {

@@ -2,15 +2,21 @@ import type * as z from 'zod'
 
 import { parseErrorResponse } from './errors'
 
-const request = async (path: string, init: RequestInit = {}): Promise<Response> => {
+export const SESSION_UNAUTHORIZED_EVENT = 'everyapi:session-unauthorized'
+
+export const apiFetch = async (path: string, init: RequestInit = {}): Promise<Response> => {
+  const hasFormData = typeof FormData !== 'undefined' && init.body instanceof FormData
   const response = await fetch(path, {
     ...init,
     headers: {
-      ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(init.body === undefined || hasFormData ? {} : { 'Content-Type': 'application/json' }),
       ...init.headers,
     },
   })
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event(SESSION_UNAUTHORIZED_EVENT))
+    }
     throw await parseErrorResponse(response)
   }
   return response
@@ -22,12 +28,12 @@ export const getJSON = async <T extends z.ZodTypeAny>(
   path: string,
   schema: T,
 ): Promise<z.infer<T>> => {
-  const response = await request(path)
+  const response = await apiFetch(path)
   return schema.parse(await response.json()) as z.infer<T>
 }
 
 export const postJSON = async (path: string, body: unknown): Promise<void> => {
-  await request(path, { method: 'POST', body: JSON.stringify(body) })
+  await apiFetch(path, { method: 'POST', body: JSON.stringify(body) })
 }
 
 export const postJSONResponse = async <T extends z.ZodTypeAny>(
@@ -35,7 +41,7 @@ export const postJSONResponse = async <T extends z.ZodTypeAny>(
   body: unknown,
   schema: T,
 ): Promise<z.infer<T>> => {
-  const response = await request(path, { method: 'POST', body: JSON.stringify(body) })
+  const response = await apiFetch(path, { method: 'POST', body: JSON.stringify(body) })
   return schema.parse(await response.json()) as z.infer<T>
 }
 
@@ -49,7 +55,7 @@ export const postJSONStream = async <T extends z.ZodTypeAny>(
   onEvent: (event: z.infer<T>) => void,
   signal?: AbortSignal,
 ): Promise<void> => {
-  const response = await request(path, { method: 'POST', body: JSON.stringify(body), signal })
+  const response = await apiFetch(path, { method: 'POST', body: JSON.stringify(body), signal })
   if (!response.body) throw new Error('the agent returned an empty chat stream')
 
   const reader = response.body.getReader()
@@ -82,5 +88,5 @@ export const postJSONStream = async <T extends z.ZodTypeAny>(
 }
 
 export const del = async (path: string): Promise<void> => {
-  await request(path, { method: 'DELETE' })
+  await apiFetch(path, { method: 'DELETE' })
 }

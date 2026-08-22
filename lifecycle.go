@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	edgeapp "github.com/everyapi-ai/everyapi-edge/internal/app"
@@ -15,8 +16,52 @@ import (
 	"github.com/everyapi-ai/everyapi-edge/internal/forward"
 	"github.com/everyapi-ai/everyapi-edge/internal/identity"
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
+	edgeruntime "github.com/everyapi-ai/everyapi-edge/internal/runtime"
 	edgeupdate "github.com/everyapi-ai/everyapi-edge/internal/update"
 )
+
+type metadataRefresh struct {
+	generation atomic.Uint64
+	changes    chan struct{}
+}
+
+func newMetadataRefresh() *metadataRefresh {
+	return &metadataRefresh{changes: make(chan struct{}, 1)}
+}
+
+func (r *metadataRefresh) Notify() {
+	if r == nil {
+		return
+	}
+	r.generation.Add(1)
+	select {
+	case r.changes <- struct{}{}:
+	default:
+	}
+}
+
+func (r *metadataRefresh) beginDiscovery() uint64 {
+	generation := r.generation.Load()
+	select {
+	case <-r.changes:
+	default:
+	}
+	return generation
+}
+
+func rediscoverUntilStable(r *metadataRefresh, discover func() protocol.NodeMeta) protocol.NodeMeta {
+	if r == nil {
+		return discover()
+	}
+	for {
+		generation := r.beginDiscovery()
+		meta := discover()
+		if r.generation.Load() == generation {
+			return meta
+		}
+		log.Print("local runtime metadata changed during discovery; rebuilding Auth snapshot")
+	}
+}
 
 func runGatewayLifecycle(
 	ctx context.Context,
@@ -28,7 +73,11 @@ func runGatewayLifecycle(
 	controlHandler http.Handler,
 	store *console.Store,
 	logSink *logTee,
+	metadataRefresh *metadataRefresh,
 ) error {
+	if metadataRefresh == nil {
+		metadataRefresh = newMetadataRefresh()
+	}
 	reconnector := edgeapp.Reconnector{
 		Hooks: edgeapp.Hooks{
 			Connecting: func() { store.SetGatewayState("connecting", "") },
@@ -63,41 +112,62 @@ func runGatewayLifecycle(
 	}
 
 	return reconnector.Run(ctx, cfg.RegistrationToken, func(ctx context.Context, registrationToken string) (edgeapp.Session, error) {
-		sessionMeta := meta
-		models, modelErr := discoverOllamaModels(ctx, cfg.OllamaURL)
-		if modelErr != nil {
-			log.Printf("warning: could not discover Ollama models: %v", modelErr)
-		} else {
-			sessionMeta.Models = mergeModels(sessionMeta.Models, models)
-			log.Printf("discovered %d Ollama models", len(models))
-		}
-		if cfg.DiffusersURL != "" {
-			imageModels, imageModelErr := discoverDiffusersModels(ctx, cfg.DiffusersURL)
-			if imageModelErr != nil {
-				log.Printf("warning: could not discover Diffusers models: %v", imageModelErr)
+		var textModels []string
+		var textResponsesSupported bool
+		sessionMeta := rediscoverUntilStable(metadataRefresh, func() protocol.NodeMeta {
+			sessionMeta := meta
+			models, modelErr := discoverOllamaModels(ctx, cfg.OllamaURL)
+			if modelErr != nil {
+				textModels = nil
+				log.Printf("warning: could not discover Ollama models: %v", modelErr)
 			} else {
-				sessionMeta.Models = mergeModels(sessionMeta.Models, imageModels)
-				log.Printf("discovered %d Diffusers models", len(imageModels))
+				textModels = append([]string{}, models...)
+				sessionMeta.Models = mergeModels(sessionMeta.Models, models)
+				textCapabilities, responsesSupported, capabilityErr := discoverTextRuntimeState(ctx, cfg.OllamaURL, models)
+				textResponsesSupported = responsesSupported
+				sessionMeta.Capabilities = append(sessionMeta.Capabilities, textCapabilities...)
+				if capabilityErr != nil {
+					log.Printf("warning: some Ollama model capabilities could not be discovered: %v", capabilityErr)
+				}
+				log.Printf("discovered %d Ollama models", len(models))
 			}
-		}
-		if cfg.SpeechURL != "" {
-			speechModels, speechModelErr := discoverSpeechModels(ctx, cfg.SpeechURL)
-			if speechModelErr != nil {
-				log.Printf("warning: could not discover speech models: %v", speechModelErr)
-			} else {
-				sessionMeta.Models = mergeModels(sessionMeta.Models, speechModels)
-				log.Printf("discovered %d speech models", len(speechModels))
+			if cfg.DiffusersURL != "" {
+				health, healthErr := edgeruntime.NewImageClient(cfg.DiffusersURL, &http.Client{Timeout: 10 * time.Second}).Health(ctx)
+				if healthErr != nil {
+					log.Printf("warning: could not discover image runtime capabilities: %v", healthErr)
+				} else {
+					sessionMeta.Capabilities = append(sessionMeta.Capabilities, protocolCapabilities(protocol.RuntimeImage, health)...)
+					sessionMeta.Models = mergeModels(sessionMeta.Models, readyRuntimeModels(health))
+					log.Printf("image runtime is %s with %d models", health.Status, len(health.Models))
+				}
 			}
-		}
+			if cfg.SpeechURL != "" {
+				health, healthErr := edgeruntime.NewSpeechClient(cfg.SpeechURL, &http.Client{Timeout: 10 * time.Second}).Health(ctx)
+				if healthErr != nil {
+					log.Printf("warning: could not discover speech runtime capabilities: %v", healthErr)
+				} else {
+					sessionMeta.Capabilities = append(sessionMeta.Capabilities, protocolCapabilities(protocol.RuntimeSpeech, health)...)
+					sessionMeta.Models = mergeModels(sessionMeta.Models, readyRuntimeModels(health))
+					log.Printf("speech runtime is %s with %d models", health.Status, len(health.Models))
+				}
+			}
+			return sessionMeta
+		})
 
 		cli, err := client.New(client.Config{
-			GatewayURL:        cfg.GatewayURL,
-			OllamaURL:         cfg.OllamaURL,
-			VRAMTotalGB:       sessionMeta.Hardware.VRAMTotalGB,
-			NodeID:            cfg.NodeID,
-			RegistrationToken: registrationToken,
-			Identity:          id,
-			Meta:              sessionMeta,
+			GatewayURL:             cfg.GatewayURL,
+			OllamaURL:              cfg.OllamaURL,
+			DiffusersURL:           cfg.DiffusersURL,
+			SpeechURL:              cfg.SpeechURL,
+			VRAMTotalGB:            sessionMeta.Hardware.VRAMTotalGB,
+			GatewayRoundTrip:       store.SetGatewayRoundTrip,
+			MetadataChanged:        metadataRefresh.changes,
+			NodeID:                 cfg.NodeID,
+			RegistrationToken:      registrationToken,
+			Identity:               id,
+			Meta:                   sessionMeta,
+			TextModels:             textModels,
+			TextResponsesSupported: textResponsesSupported,
 			OnConnected: func() {
 				if updateManager != nil {
 					if err := updateManager.Promote(); err != nil {

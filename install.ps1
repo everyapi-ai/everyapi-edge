@@ -108,6 +108,21 @@ $imageModelRoot = (Join-Path $modelRoot "images").Replace('\', '/')
 $speechModelRoot = (Join-Path $modelRoot "speech").Replace('\', '/')
 New-Item -ItemType Directory -Force -Path $modelRoot, $imageModelRoot, $speechModelRoot | Out-Null
 $envPath = Join-Path $InstallDir ".env"
+$consoleToken = ""
+if (Test-Path -LiteralPath $envPath) {
+    foreach ($line in Get-Content -LiteralPath $envPath) {
+        if ($line.StartsWith("EVERYAPI_CONSOLE_TOKEN=")) {
+            $consoleToken = $line.Substring("EVERYAPI_CONSOLE_TOKEN=".Length)
+            break
+        }
+    }
+}
+if ($consoleToken -and $consoleToken -notmatch '^[A-Za-z0-9_-]{32,128}$') {
+    throw "console token has an invalid format"
+}
+if (-not $consoleToken) {
+    $consoleToken = New-EdgeConsoleToken
+}
 $temporaryEnv = Join-Path $InstallDir (".env." + [guid]::NewGuid().ToString("N") + ".tmp")
 $envLines = @(
     "EVERYAPI_GATEWAY=$Gateway",
@@ -122,6 +137,7 @@ $envLines = @(
     "EVERYAPI_SPEECH_MODEL_PATH=$speechModelRoot",
     "EVERYAPI_DIFFUSERS_URL=http://diffusers:8188",
     "EVERYAPI_SPEECH_URL=http://speech:8189"
+    "EVERYAPI_CONSOLE_TOKEN=$consoleToken"
 )
 [IO.File]::WriteAllLines($temporaryEnv, $envLines, [Text.UTF8Encoding]::new($false))
 Move-Item -LiteralPath $temporaryEnv -Destination $envPath -Force
@@ -149,3 +165,4 @@ try {
 }
 
 Write-Host "EveryAPI Edge is online on Windows with $gpuModel and image model support."
+Write-Host "Edge Control Room pairing token: $consoleToken"

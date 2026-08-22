@@ -1,5 +1,5 @@
 import { useNavigate } from '@tanstack/react-router'
-import { Boxes, HardDrive, MessageSquareText, RefreshCw, ShieldCheck } from 'lucide-react'
+import { Boxes, HardDrive, MessageSquareText } from 'lucide-react'
 
 import {
   useModels,
@@ -12,14 +12,9 @@ import {
 } from '@/api/queries'
 import { Button, PageHeader, Panel, QueryState, StatCard } from '@/components/primitives'
 import { CapacityRail } from '@/components/ui/CapacityRail'
+import { NodeDetails } from '@/features/overview/NodeDetails'
 import { useTranslation } from '@/i18n/useTranslation'
-import {
-  formatCount,
-  formatGigabytes,
-  formatTime,
-  formatUSDMicros,
-  formatVRAMGigabytes,
-} from '@/lib/format'
+import { formatCount, formatGigabytes, formatTime, formatUSDMicros } from '@/lib/format'
 
 export const OverviewPage = () => {
   const { t, locale } = useTranslation()
@@ -132,16 +127,11 @@ export const OverviewPage = () => {
         isError={overview.isError}
         onRetry={() => void overview.refetch()}
       >
-        <section className='grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5'>
+        <section className='grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4'>
           <StatCard
             label={t('stat.active')}
             value={stats ? formatCount(stats.active_requests, locale) : placeholder}
             hint={t('stat.activeHint')}
-          />
-          <StatCard
-            label={t('stat.vram')}
-            value={stats ? formatVRAMGigabytes(stats.loaded_vram_bytes) : placeholder}
-            hint={t('stat.vramHint')}
           />
           <StatCard
             label={t('stat.completed')}
@@ -165,7 +155,7 @@ export const OverviewPage = () => {
         </section>
       </QueryState>
 
-      <div className='grid grid-cols-1 gap-4 xl:grid-cols-2'>
+      <div className='grid grid-cols-1 items-start gap-4 xl:grid-cols-2'>
         <Panel title={t('gateway.title')}>
           <p
             className={`text-sm font-medium ${stats?.gateway_state === 'online' ? 'text-good' : stats?.gateway_state === 'offline' ? 'text-danger' : stats?.gateway_state === 'preview' ? 'text-accent' : 'text-warn'}`}
@@ -177,6 +167,12 @@ export const OverviewPage = () => {
             <dd className='text-ink'>
               {stats?.gateway_last_connected_at
                 ? formatTime(stats.gateway_last_connected_at, locale)
+                : t('common.unknown')}
+            </dd>
+            <dt className='text-muted'>{t('gateway.roundTrip')}</dt>
+            <dd className='text-ink'>
+              {stats?.gateway_round_trip_ms
+                ? `${stats.gateway_round_trip_ms} ms`
                 : t('common.unknown')}
             </dd>
             {scheduledReconnect ? (
@@ -205,120 +201,53 @@ export const OverviewPage = () => {
               </div>
             ))}
           </dl>
-        </Panel>
-        <Panel title={t('nodeProfile.title')}>
-          <dl data-node-profile className='grid grid-cols-[auto_1fr] gap-x-5 gap-y-3 text-sm'>
-            <dt className='text-muted'>{t('nodeProfile.name')}</dt>
-            <dd className='font-medium text-ink'>{profile?.name || t('common.unknown')}</dd>
-            <dt className='text-muted'>{t('nodeProfile.hardware')}</dt>
-            <dd className='text-ink'>{profileHardware}</dd>
-            <dt className='text-muted'>{t('nodeProfile.platform')}</dt>
-            <dd className='font-mono text-xs text-ink'>
-              {profile?.platform || t('common.unknown')}
-            </dd>
-            <dt className='text-muted'>{t('nodeProfile.agent')}</dt>
-            <dd className='font-mono text-xs text-ink'>
-              {profile?.agent_version || t('common.unknown')}
-            </dd>
-            <dt className='text-muted'>{t('nodeProfile.location')}</dt>
-            <dd className='text-ink'>{profile?.country_iso2 || t('common.unknown')}</dd>
-          </dl>
-        </Panel>
-        <Panel title={t('update.title')}>
-          <dl className='grid grid-cols-[auto_1fr] gap-x-5 gap-y-3 text-sm'>
-            <dt className='text-muted'>{t('update.currentVersion')}</dt>
-            <dd className='text-right font-mono text-ink'>
-              v{stats?.agent_version || t('common.unknown')}
-            </dd>
-            {stats?.update_state ? (
-              <>
-                <dt className='text-muted'>{t('update.status')}</dt>
-                <dd className='text-right text-ink'>{updateStateLabel}</dd>
-              </>
-            ) : null}
-          </dl>
-          {stats?.update_error || update.error ? (
-            <p role='alert' className='mt-3 text-sm text-danger'>
-              {stats?.update_error || update.error?.message}
-            </p>
-          ) : null}
-          <Button
-            type='button'
-            onClick={updateAgent}
-            disabled={
-              update.isPending ||
-              ['checking', 'downloading', 'restarting'].includes(stats?.update_state ?? '')
-            }
-            className='mt-4 inline-flex items-center gap-2'
-          >
-            <RefreshCw className='size-3.5' aria-hidden='true' />
-            {t('update.action')}
-          </Button>
-        </Panel>
-        <Panel title={t('settlement.title')}>
-          <p className='rounded-lg border border-warn/22 bg-warn/10 p-3 text-sm leading-5 text-ink-2'>
-            {t('settlement.notice')}
-          </p>
-          <QueryState
-            isPending={settlements.isPending}
-            isError={settlements.isError}
-            isEmpty={settlements.data?.length === 0}
-            emptyMessage={t('settlement.waiting')}
-            onRetry={() => void settlements.refetch()}
-          >
-            <p className='mt-4 text-xs font-medium text-muted'>{t('settlement.recent')}</p>
-            <ul className='mt-2 flex flex-col gap-2 text-sm'>
-              {(settlements.data ?? []).slice(0, 5).map((receipt) => (
-                <li key={receipt.request_id} className='flex justify-between gap-3'>
-                  <span className='font-medium text-good'>
-                    {formatUSDMicros(receipt.seller_amount_micros)}
-                  </span>
-                  <span className='text-faint'>{formatTime(receipt.settled_at, locale)}</span>
-                </li>
-              ))}
-            </ul>
-          </QueryState>
-        </Panel>
-
-        <Panel title={t('privacy.title')}>
-          <p className='flex gap-2.5 text-sm leading-6 text-muted'>
-            <ShieldCheck className='mt-0.5 size-4 shrink-0 text-accent' aria-hidden='true' />
-            {t('privacy.body')}
-          </p>
-        </Panel>
-        <Panel title={t('overview.actions')} className='xl:col-span-2'>
-          <p className='text-sm leading-6 text-muted'>{t('overview.actionsHint')}</p>
-          <div className='mt-4 grid gap-2 sm:grid-cols-3'>
-            <Button
-              type='button'
-              variant='ghost'
-              onClick={() => void navigate({ to: '/models' })}
-              className='inline-flex items-center justify-center gap-2'
-            >
-              <Boxes className='size-3.5' aria-hidden='true' />
-              {t('overview.openModels')}
-            </Button>
-            <Button
-              type='button'
-              variant='ghost'
-              onClick={() => void navigate({ to: '/playground' })}
-              className='inline-flex items-center justify-center gap-2'
-            >
-              <MessageSquareText className='size-3.5' aria-hidden='true' />
-              {t('overview.openPlayground')}
-            </Button>
-            <Button
-              type='button'
-              variant='ghost'
-              onClick={() => void navigate({ to: '/storage' })}
-              className='inline-flex items-center justify-center gap-2'
-            >
-              <HardDrive className='size-3.5' aria-hidden='true' />
-              {t('overview.openStorage')}
-            </Button>
+          <div data-overview-actions className='mt-5 border-t border-line pt-4'>
+            <p className='text-xs font-medium text-muted'>{t('overview.actionsHint')}</p>
+            <div className='mt-3 grid gap-2 sm:grid-cols-3'>
+              <Button
+                type='button'
+                variant='ghost'
+                onClick={() => void navigate({ to: '/models' })}
+                className='inline-flex items-center justify-center gap-2'
+              >
+                <Boxes className='size-3.5' aria-hidden='true' />
+                {t('overview.openModels')}
+              </Button>
+              <Button
+                type='button'
+                variant='ghost'
+                onClick={() => void navigate({ to: '/playground' })}
+                className='inline-flex items-center justify-center gap-2'
+              >
+                <MessageSquareText className='size-3.5' aria-hidden='true' />
+                {t('overview.openPlayground')}
+              </Button>
+              <Button
+                type='button'
+                variant='ghost'
+                onClick={() => void navigate({ to: '/storage' })}
+                className='inline-flex items-center justify-center gap-2'
+              >
+                <HardDrive className='size-3.5' aria-hidden='true' />
+                {t('overview.openStorage')}
+              </Button>
+            </div>
           </div>
         </Panel>
       </div>
+      <NodeDetails
+        profile={profile}
+        overview={stats}
+        settlements={settlements.data}
+        settlementsPending={settlements.isPending}
+        settlementsError={settlements.isError}
+        updatePending={update.isPending}
+        updateError={update.error?.message}
+        updateStateLabel={updateStateLabel}
+        profileHardware={profileHardware}
+        onRetrySettlements={() => void settlements.refetch()}
+        onUpdate={updateAgent}
+      />
     </div>
   )
 }

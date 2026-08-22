@@ -3,6 +3,83 @@ import os
 
 from playwright.sync_api import sync_playwright
 
+
+def test_remote_console_requires_pairing_before_rendering_protected_content() -> None:
+    """A remote browser sees only the pairing gate until it has a valid session."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5176")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1024, "height": 768})
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": False, "pairing_required": True})))
+        page.goto(f"{base}/models", wait_until="domcontentloaded")
+        pairing_token = page.get_by_label("Pairing token")
+        pairing_token.wait_for(timeout=2_000)
+        shell_count = page.locator('main h1:text-is("Model library")').count()
+        current_url = page.url
+        local_storage = page.evaluate("Object.keys(localStorage)")
+        browser.close()
+
+    assert shell_count == 0
+    assert current_url.endswith("/models")
+    assert local_storage == []
+
+
+def test_pairing_keeps_invalid_tokens_in_context_and_logout_restores_the_gate() -> None:
+    """Pairing uses an HttpOnly session without moving the secret into browser storage."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5176")
+    authenticated = False
+
+    def session_route(route) -> None:
+        nonlocal authenticated
+        if route.request.method == "POST":
+            token = json.loads(route.request.post_data or "{}").get("token")
+            if token != "valid-pairing-token":
+                route.fulfill(status=401, content_type="application/json", body=json.dumps({"error": {"code": "unauthorized", "message": "invalid pairing token", "retryable": False}}))
+                return
+            authenticated = True
+        elif route.request.method == "DELETE":
+            authenticated = False
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": authenticated, "pairing_required": True}))
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1024, "height": 768})
+        page.route("**/api/session", session_route)
+        page.goto(f"{base}/models", wait_until="domcontentloaded")
+        token = page.get_by_label("Pairing token")
+        token.fill("wrong-token")
+        page.get_by_role("button", name="Pair browser").click()
+        page.get_by_text("invalid pairing token").wait_for()
+        assert token.input_value() == "wrong-token"
+        token.fill("valid-pairing-token")
+        page.get_by_role("button", name="Pair browser").click()
+        page.locator('main h1:text-is("Model library")').wait_for()
+        assert page.url.endswith("/models")
+        assert page.evaluate("Object.keys(localStorage)") == []
+        page.get_by_role("button", name="Disconnect browser").click()
+        token = page.get_by_label("Pairing token")
+        token.wait_for()
+        assert token.input_value() == ""
+        assert page.get_by_role("button", name="Pair browser").is_disabled()
+        browser.close()
+
+
+def test_expired_browser_session_returns_to_the_pairing_gate() -> None:
+    """A protected API 401 closes the shell immediately instead of leaving stale authenticated UI."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5176")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1024, "height": 768})
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
+        page.route("**/api/models", lambda route: route.fulfill(status=401, content_type="application/json", body=json.dumps({"error": {"code": "unauthorized", "message": "browser session expired", "retryable": False}})))
+        page.goto(f"{base}/models", wait_until="domcontentloaded")
+        page.get_by_label("Pairing token").wait_for(timeout=2_000)
+        assert page.locator('main h1:text-is("Model library")').count() == 0
+        browser.close()
+
+
 def test_console_opens_directly_with_dashboard_chrome() -> None:
     """The local console is available to its loopback host without a token."""
     base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5176")
@@ -137,6 +214,43 @@ def test_mobile_console_keeps_live_node_status_in_view() -> None:
         browser.close()
 
     assert mobile_status_count == 1
+
+
+def test_tablet_uses_the_drawer_and_keeps_primary_actions_above_collapsed_details() -> None:
+    """A 1024px workspace keeps the full command center instead of sacrificing width to a rail."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5176")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        tablet = browser.new_page(viewport={"width": 1024, "height": 768})
+        tablet.set_default_timeout(2_000)
+        tablet.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
+        tablet.goto(base, wait_until="domcontentloaded")
+        tablet.locator("main h1").wait_for()
+        main_x = tablet.locator("main").evaluate("node => node.getBoundingClientRect().x")
+        tablet_rail = tablet.locator("body > div aside:visible").count()
+        menu_visible = tablet.get_by_role("button", name="Open navigation").is_visible()
+        actions_y = tablet.locator("[data-overview-actions]").evaluate("node => node.getBoundingClientRect().y")
+        details_y = tablet.locator("[data-node-details]").evaluate("node => node.getBoundingClientRect().y")
+        details_open = tablet.locator("[data-node-details]").get_attribute("open")
+        overview_height = tablet.locator("[data-command-center]").evaluate("node => node.getBoundingClientRect().height")
+        loaded_vram_stat = tablet.get_by_text("Loaded VRAM", exact=True).count()
+
+        desktop = browser.new_page(viewport={"width": 1440, "height": 960})
+        desktop.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
+        desktop.goto(base, wait_until="domcontentloaded")
+        desktop.locator("main h1").wait_for()
+        desktop_rail = desktop.locator("body > div aside:visible").count()
+        browser.close()
+
+    assert main_x == 0
+    assert tablet_rail == 0
+    assert menu_visible
+    assert actions_y < details_y
+    assert details_open is None
+    assert overview_height < 1_500
+    assert loaded_vram_stat == 0
+    assert desktop_rail == 1
 
 
 def test_sidebar_reports_the_real_gateway_session_state() -> None:
@@ -294,8 +408,10 @@ def test_overview_identifies_the_actual_local_node_and_hardware() -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 960})
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
         page.route("**/api/node", lambda route: route.fulfill(status=200, content_type="application/json", body=profile))
         page.goto(base, wait_until="domcontentloaded")
+        page.get_by_text("Node details, updates, settlement, and privacy", exact=True).click()
         node_profile = page.locator("[data-node-profile]")
         node_profile.wait_for(timeout=2_000)
         profile_text = node_profile.inner_text()
@@ -669,6 +785,39 @@ def test_local_playground_is_available_from_navigation() -> None:
     assert composer_count == 1
 
 
+def test_local_playground_unifies_all_ready_runtime_capabilities() -> None:
+    """One capability-driven playground exposes chat, image generation/editing, speech, and embeddings without separate navigation items."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5176")
+    capabilities = {
+        "capabilities": [
+            {"id": "text.chat", "runtime": "text", "status": "ready", "models": ["llama3.1:8b"], "paths": ["/v1/chat/completions"]},
+            {"id": "text.embedding", "runtime": "text", "status": "ready", "models": ["nomic-embed"], "paths": ["/v1/embeddings"]},
+            {"id": "image.generate", "runtime": "image", "status": "ready", "models": ["Efficient-Large-Model/Sana_600M_1024px_diffusers"], "paths": ["/v1/images/generations"]},
+            {"id": "image.edit", "runtime": "image", "status": "ready", "models": ["Qwen/Qwen-Image-Edit-2511"], "paths": ["/v1/images/edits"]},
+            {"id": "audio.tts", "runtime": "speech", "status": "ready", "models": ["hexgrad/Kokoro-82M"], "paths": ["/v1/audio/speech"], "limits": {"formats": ["mp3", "wav"]}},
+        ]
+    }
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 960})
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": False})))
+        page.route("**/api/models", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"models": [{"name": "llama3.1:8b", "size": 5 * 1024 ** 3}]})))
+        page.route("**/api/capabilities", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(capabilities)))
+        page.goto(f"{base}/playground", wait_until="networkidle")
+        modes = page.get_by_role("navigation", name="Playground mode")
+        assert [modes.get_by_role("button", name=name, exact=True).count() for name in ("Chat", "Image", "Speech", "Embedding")] == [1, 1, 1, 1]
+        modes.get_by_role("button", name="Image", exact=True).click()
+        page.get_by_role("button", name="Edit image", exact=True).click()
+        page.get_by_label("Source image").wait_for()
+        assert page.locator("[data-image-editor-model]").inner_text() == "Qwen/Qwen-Image-Edit-2511"
+        modes.get_by_role("button", name="Speech", exact=True).click()
+        page.get_by_placeholder("Text to synthesize…").wait_for()
+        modes.get_by_role("button", name="Embedding", exact=True).click()
+        page.get_by_placeholder("Text to embed…").wait_for()
+        browser.close()
+
+
 def test_local_playground_keeps_private_browser_conversation_history() -> None:
     """Chat sessions survive a reload without sending their contents to Edge."""
     base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
@@ -879,10 +1028,9 @@ def test_image_editing_playground_accepts_a_real_image_file() -> None:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 960})
         page.set_default_timeout(1_500)
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": False})))
         page.route("**/api/image-runtime", lambda route: route.fulfill(status=200, content_type="application/json", body='{"status":"ready","models":["Qwen/Qwen-Image-Edit-2511"]}'))
-        page.goto(base, wait_until="domcontentloaded")
-        page.wait_for_selector("main h1")
-        page.locator("aside").get_by_role("link", name="Image edit").click()
+        page.goto(f"{base}/image-edit", wait_until="domcontentloaded")
         file_input = page.get_by_label("Source image")
         file_input.wait_for()
         prompt = page.get_by_label("Edit instruction")
@@ -1231,8 +1379,8 @@ def test_installed_model_library_shows_catalog_provider_and_multimodal_type() ->
     assert cells[:4] == ["Google", "gemma3:27b", "Installed", "Multimodal"]
 
 
-def test_installed_model_library_contains_overflow_and_keeps_metadata_on_one_line() -> None:
-    """Dense model metadata scrolls inside its panel without wrapping or widening the page."""
+def test_installed_model_table_keeps_desktop_metadata_on_one_line_without_page_overflow() -> None:
+    """Desktop model metadata stays dense and single-line without widening the page."""
     base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
     installed = json.dumps({"models": [
         {
@@ -1254,7 +1402,6 @@ def test_installed_model_library_contains_overflow_and_keeps_metadata_on_one_lin
             {"width": 1440, "height": 960},
             {"width": 1536, "height": 960},
             {"width": 1024, "height": 768},
-            {"width": 390, "height": 844},
         ):
             context = browser.new_context(viewport=viewport, locale="zh-CN")
             page = context.new_page()
@@ -1282,21 +1429,12 @@ def test_installed_model_library_contains_overflow_and_keeps_metadata_on_one_lin
                         .map((cell) => getComputedStyle(cell).whiteSpace),
                 }
             }""")
-            capture["hintCount"] = page.get_by_text("左右滑动查看全部模型信息").count()
             captures.append(capture)
             context.close()
         browser.close()
 
     assert all(capture["documentWidth"] <= capture["viewportWidth"] for capture in captures)
-    assert all(
-        capture["scrollerScrollWidth"] <= capture["scrollerClientWidth"]
-        for capture in captures[:2]
-    )
-    assert all(
-        capture["scrollerScrollWidth"] > capture["scrollerClientWidth"]
-        for capture in captures[2:]
-    )
-    assert all(capture["hintCount"] == 1 for capture in captures[2:])
+    assert all(capture["scrollerScrollWidth"] <= capture["scrollerClientWidth"] for capture in captures)
     assert all(capture["scrollerLabel"] == "已安装模型表格" for capture in captures)
     assert all(capture["scrollerTabIndex"] == 0 for capture in captures)
     assert all(
@@ -1306,8 +1444,8 @@ def test_installed_model_library_contains_overflow_and_keeps_metadata_on_one_lin
     )
 
 
-def test_mobile_wide_tables_disclose_and_label_horizontal_scrolling() -> None:
-    """Hidden columns stay discoverable to touch and keyboard users."""
+def test_mobile_models_and_traffic_use_task_first_cards_without_horizontal_scrolling() -> None:
+    """Phone layouts expose primary metadata and actions directly instead of hiding table columns."""
     base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
     installed = json.dumps({"models": [{
         "name": "qwen3:14b",
@@ -1328,6 +1466,7 @@ def test_mobile_wide_tables_disclose_and_label_horizontal_scrolling() -> None:
         context = browser.new_context(viewport={"width": 390, "height": 844}, locale="zh-CN")
         page = context.new_page()
         page.set_default_timeout(2_000)
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
         page.route("**/api/models", lambda route: route.fulfill(
             status=200, content_type="application/json", body=installed,
         ))
@@ -1339,20 +1478,42 @@ def test_mobile_wide_tables_disclose_and_label_horizontal_scrolling() -> None:
         ))
 
         page.goto(f"{base}/models", wait_until="domcontentloaded")
-        model_hint = page.get_by_text("左右滑动查看全部模型信息")
-        model_hint.wait_for()
-        model_scroller = page.get_by_role("region", name="已安装模型表格")
-        model_tab_index = model_scroller.get_attribute("tabindex")
+        model_card = page.locator('[data-installed-model-card="qwen3:14b"]')
+        model_card.wait_for()
+        model_text = model_card.inner_text()
+        model_actions = model_card.get_by_role("button").count()
+        mobile_model_table_visible = page.get_by_role("region", name="已安装模型表格").is_visible()
+        model_document_width = page.evaluate("document.documentElement.scrollWidth")
 
         page.goto(f"{base}/traffic", wait_until="domcontentloaded")
-        traffic_hint = page.get_by_text("左右滑动查看全部请求信息")
-        traffic_hint.wait_for()
-        traffic_scroller = page.get_by_role("region", name="最近请求表格")
-        traffic_tab_index = traffic_scroller.get_attribute("tabindex")
+        traffic_card = page.locator('[data-traffic-card="req-local-001"]')
+        traffic_card.wait_for()
+        traffic_text = traffic_card.inner_text()
+        mobile_traffic_table_visible = page.get_by_role("region", name="最近请求表格").is_visible()
+        traffic_document_width = page.evaluate("document.documentElement.scrollWidth")
+
+        desktop = browser.new_page(viewport={"width": 1440, "height": 960})
+        desktop.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
+        desktop.route("**/api/models", lambda route: route.fulfill(status=200, content_type="application/json", body=installed))
+        desktop.route("**/api/runtime", lambda route: route.fulfill(status=200, content_type="application/json", body='{"version":"0.0.0","models":[]}'))
+        desktop.goto(f"{base}/models", wait_until="domcontentloaded")
+        desktop_model_table = desktop.get_by_role("region", name="Installed models table")
+        desktop_model_table.wait_for()
+        desktop_model_table_visible = desktop_model_table.is_visible()
         browser.close()
 
-    assert model_tab_index == "0"
-    assert traffic_tab_index == "0"
+    assert "qwen3:14b" in model_text
+    assert "14.8B" in model_text
+    assert "Q4_K_M" in model_text
+    assert model_actions >= 4
+    assert not mobile_model_table_visible
+    assert "local-verification-consumer-with-a-long-name" in traffic_text
+    assert "qwen3:14b" in traffic_text
+    assert "/v1/chat/completions" in traffic_text
+    assert not mobile_traffic_table_visible
+    assert model_document_width == 390
+    assert traffic_document_width == 390
+    assert desktop_model_table_visible
 
 
 def test_installed_model_library_filters_by_provider_type_and_name() -> None:
@@ -1610,9 +1771,11 @@ def test_agent_update_requires_confirmation_before_restarting_the_node() -> None
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 960})
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
         page.route("**/api/update", update_route)
         page.on("dialog", lambda dialog: (confirmations.append(dialog.message), dialog.dismiss()))
         page.goto(base, wait_until="networkidle")
+        page.get_by_text("Node details, updates, settlement, and privacy", exact=True).click()
         page.get_by_role("button", name="Check for updates").click()
         page.wait_for_timeout(150)
         browser.close()
@@ -1630,11 +1793,11 @@ def test_image_editing_can_be_stopped_while_the_local_request_is_running() -> No
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 960})
         page.set_default_timeout(1_500)
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": False})))
         page.route("**/api/image-runtime", lambda route: route.fulfill(status=200, content_type="application/json", body='{"status":"ready","models":["Qwen/Qwen-Image-Edit-2511"]}'))
         page.route("**/api/image/edit", lambda route: pending_requests.append(route))
         try:
-            page.goto(base, wait_until="networkidle")
-            page.locator("aside").get_by_role("link", name="Image edit").click()
+            page.goto(f"{base}/image-edit", wait_until="networkidle")
             page.locator("#source-image").set_input_files({"name": "source.png", "mimeType": "image/png", "buffer": b"image"})
             page.get_by_label("Edit instruction").fill("make it neon")
             page.get_by_role("button", name="Edit image").click()
@@ -1659,9 +1822,9 @@ def test_image_edit_uses_a_console_file_picker_with_the_selected_name() -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 960})
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": False})))
         page.route("**/api/image-runtime", lambda route: route.fulfill(status=200, content_type="application/json", body='{"status":"ready","models":["Qwen/Qwen-Image-Edit-2511"]}'))
-        page.goto(base, wait_until="networkidle")
-        page.locator("aside").get_by_role("link", name="Image edit").click()
+        page.goto(f"{base}/image-edit", wait_until="networkidle")
         picker = page.locator("[data-source-file-picker]")
         picker.wait_for()
         picker_text = picker.inner_text()
@@ -1699,10 +1862,10 @@ def test_image_edit_result_can_be_downloaded() -> None:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 960})
         page.set_default_timeout(1_500)
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": False})))
         page.route("**/api/image-runtime", lambda route: route.fulfill(status=200, content_type="application/json", body='{"status":"ready","models":["Qwen/Qwen-Image-Edit-2511"]}'))
         page.route("**/api/image/edit", lambda route: route.fulfill(status=200, content_type="application/json", body='{"b64_json":"aW1hZ2U="}'))
-        page.goto(base, wait_until="networkidle")
-        page.locator("aside").get_by_role("link", name="Image edit").click()
+        page.goto(f"{base}/image-edit", wait_until="networkidle")
         page.locator("#source-image").set_input_files({"name": "source.png", "mimeType": "image/png", "buffer": b"image"})
         page.get_by_label("Edit instruction").fill("make it neon")
         page.get_by_role("button", name="Edit image").click()

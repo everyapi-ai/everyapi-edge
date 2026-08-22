@@ -319,7 +319,7 @@ func TestHandleRejectsSpeechWhenRuntimeIsUnconfigured(t *testing.T) {
 	}
 }
 
-// Transcription uploads multipart audio, which the JSON request body cannot carry. It must be refused by the path whitelist even when a speech runtime is running.
+// The bundled speech runtime serves synthesis only, so transcription must be refused by the path whitelist.
 func TestHandleRejectsTranscriptionEvenWithSpeechRuntime(t *testing.T) {
 	speech := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("transcription must not reach the speech runtime")

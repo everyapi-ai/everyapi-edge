@@ -36,6 +36,7 @@ type RequestEvent struct {
 	Consumer         string
 	Model            string
 	Path             string
+	Capability       protocol.CapabilityID
 	StartedAt        time.Time
 	Duration         time.Duration
 	PromptTokens     int
@@ -107,7 +108,8 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	if req.Method == "" {
 		req.Method = http.MethodPost
 	}
-	event := RequestEvent{ID: fmt.Sprintf("local-%d", f.sequence.Add(1)), Consumer: req.ConsumerRef, Model: requestModel(req.Body), Path: req.Path, StartedAt: time.Now().UTC()}
+	capability, _ := protocol.CapabilityForRequest(req.Path)
+	event := RequestEvent{ID: fmt.Sprintf("local-%d", f.sequence.Add(1)), Consumer: req.ConsumerRef, Model: requestModel(req.Body), Path: req.Path, Capability: capability, StartedAt: time.Now().UTC()}
 	if f.Observer != nil {
 		f.Observer.Started(event)
 		defer func() {
