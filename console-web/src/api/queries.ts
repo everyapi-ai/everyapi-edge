@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 
-import { del, getJSON, postJSON, postJSONResponse } from './client'
+import { del, getJSON, postJSON, postJSONResponse, putJSONResponse } from './client'
 import {
   logListSchema,
   modelBenchmarkSchema,
@@ -19,6 +19,7 @@ import {
   settlementListSchema,
   storageSchema,
   storageMigrationSchema,
+  updateSettingsSchema,
   type EdgeRequest,
   type LogEntry,
   type Model,
@@ -33,6 +34,7 @@ import {
   type Settlement,
   type Storage,
   type StorageMigration,
+  type UpdateSettings,
 } from './schemas'
 
 // The agent holds this data in memory and it changes on every relayed request,
@@ -48,6 +50,7 @@ export const queryKeys = {
   session: ['session'] as const,
   overview: ['overview'] as const,
   nodeProfile: ['node-profile'] as const,
+  updateSettings: ['update-settings'] as const,
   models: ['models'] as const,
   modelCapabilities: (name: string) => ['models', 'capabilities', name] as const,
   requests: ['requests'] as const,
@@ -114,6 +117,37 @@ export const useUpdateAgent = () => {
     mutationFn: () => postJSON('/api/update', {}),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.overview })
+    },
+  })
+}
+
+export const useUpdateSettings = (): UseQueryResult<UpdateSettings> =>
+  useQuery({
+    queryKey: queryKeys.updateSettings,
+    queryFn: () => getJSON('/api/update/settings', updateSettingsSchema),
+    staleTime: 60_000,
+  })
+
+export const useSetAutoUpdate = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (enabled: boolean) =>
+      putJSONResponse('/api/update/settings', { auto_update: enabled }, updateSettingsSchema),
+    onMutate: async (enabled) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.updateSettings })
+      const previous = queryClient.getQueryData<UpdateSettings>(queryKeys.updateSettings)
+      if (previous) {
+        queryClient.setQueryData(queryKeys.updateSettings, { ...previous, auto_update: enabled })
+      }
+      return { previous }
+    },
+    onError: (_error, _enabled, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(queryKeys.updateSettings, context.previous)
+      }
+    },
+    onSuccess: (settings) => {
+      queryClient.setQueryData(queryKeys.updateSettings, settings)
     },
   })
 }

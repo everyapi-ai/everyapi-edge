@@ -51,6 +51,11 @@ export const nodeProfileSchema = z.object({
   vram_total_gb: z.number().int().nonnegative().optional().default(0),
 })
 
+export const updateSettingsSchema = z.object({
+  auto_update: z.boolean(),
+  check_interval_hours: z.number().int().positive(),
+})
+
 export const sessionSchema = z.object({
   authenticated: z.boolean(),
   pairing_required: z.boolean(),
@@ -282,6 +287,7 @@ export const errorEnvelopeSchema = z.object({
 
 export type Overview = z.infer<typeof overviewSchema>
 export type NodeProfile = z.infer<typeof nodeProfileSchema>
+export type UpdateSettings = z.infer<typeof updateSettingsSchema>
 export type Session = z.infer<typeof sessionSchema>
 export type ImageRuntime = z.infer<typeof imageRuntimeSchema>
 export type Capability = z.infer<typeof capabilitySchema>

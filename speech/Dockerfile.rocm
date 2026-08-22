@@ -6,9 +6,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# pip gives a network read 15 seconds and 5 attempts by default, which is not enough for a 12.8 MB wheel over a slow or filtered link — the ROCm speech image failed twice in a row on exactly that, while the CUDA one survived only because its second attempt landed. Suppliers build these images themselves, so the same ceiling applies wherever they are.
+RUN PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10 pip install --no-cache-dir -r requirements.txt
 # misaki's English G2P loads this spaCy pipeline lazily and pip-installs it on first use. Baking it in keeps the container from reaching the network while a buyer request is already in flight.
-RUN python -m spacy download en_core_web_sm
+RUN PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10 python -m spacy download en_core_web_sm
 COPY app.py model_config.py runtime.py .
 
 ENV HF_HOME=/models/cache

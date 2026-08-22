@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1385,6 +1386,127 @@ func TestHandlerExposesVersionAndStartsLatestUpdate(t *testing.T) {
 	}
 	if overview.AgentVersion != "1.2.3" || overview.UpdateState != "downloading" || overview.UpdateVersion != "1.2.4" {
 		t.Fatalf("overview = %#v", overview)
+	}
+}
+
+func TestHandlerPersistsAutomaticUpdateSettings(t *testing.T) {
+	autoUpdate := false
+	h := NewHandlers(Config{
+		LoadUpdateSettings: func() (UpdateSettings, error) {
+			return UpdateSettings{AutoUpdate: autoUpdate, CheckIntervalHours: 24}, nil
+		},
+		SaveAutoUpdate: func(enabled bool) (UpdateSettings, error) {
+			autoUpdate = enabled
+			return UpdateSettings{AutoUpdate: autoUpdate, CheckIntervalHours: 24}, nil
+		},
+	}, NewStore(16)).Control
+
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/update/settings", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var settings UpdateSettings
+	if err := json.NewDecoder(response.Body).Decode(&settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.AutoUpdate || settings.CheckIntervalHours != 24 {
+		t.Fatalf("initial settings = %#v", settings)
+	}
+
+	response = httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if err := json.NewDecoder(response.Body).Decode(&settings); err != nil {
+		t.Fatal(err)
+	}
+	if !autoUpdate || !settings.AutoUpdate || settings.CheckIntervalHours != 24 {
+		t.Fatalf("saved settings = %#v, callback=%t", settings, autoUpdate)
+	}
+}
+
+func TestHandlersExposeBackgroundAutomaticUpdateStatus(t *testing.T) {
+	handlers := NewHandlers(Config{Version: "1.2.3"}, NewStore(16))
+	handlers.ReportUpdateStatus(UpdateStatus{State: "checking", Version: "1.2.4"})
+
+	response := httptest.NewRecorder()
+	handlers.Control.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var overview Overview
+	if err := json.NewDecoder(response.Body).Decode(&overview); err != nil {
+		t.Fatal(err)
+	}
+	if overview.UpdateState != "checking" || overview.UpdateVersion != "1.2.4" {
+		t.Fatalf("overview = %#v", overview)
+	}
+}
+
+func TestManualUpdateConflictDoesNotOverwriteAutomaticUpdateStatus(t *testing.T) {
+	updateReturned := make(chan struct{})
+	handlers := NewHandlers(Config{
+		Update: func(context.Context, func(UpdateStatus)) error {
+			close(updateReturned)
+			return ErrUpdateInProgress
+		},
+	}, NewStore(16))
+	handlers.ReportUpdateStatus(UpdateStatus{State: "current", Version: "1.2.3"})
+
+	response := httptest.NewRecorder()
+	handlers.Control.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/update", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("POST status = %d, body=%s", response.Code, response.Body.String())
+	}
+	select {
+	case <-updateReturned:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for manual update conflict")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		response = httptest.NewRecorder()
+		handlers.Control.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+		var overview Overview
+		if err := json.NewDecoder(response.Body).Decode(&overview); err != nil {
+			t.Fatal(err)
+		}
+		if overview.UpdateState != "checking" {
+			if overview.UpdateState != "current" || overview.UpdateVersion != "1.2.3" || overview.UpdateError != "" {
+				t.Fatalf("overview = %#v", overview)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("manual update conflict remained stuck in checking")
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestHandlerRejectsMalformedAutomaticUpdateSettings(t *testing.T) {
+	saved := false
+	h := NewHandlers(Config{
+		SaveAutoUpdate: func(enabled bool) (UpdateSettings, error) {
+			saved = enabled
+			return UpdateSettings{}, nil
+		},
+	}, NewStore(16)).Control
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":"yes"}`))
+	request.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if saved {
+		t.Fatal("malformed automatic update setting reached persistence")
 	}
 }
 

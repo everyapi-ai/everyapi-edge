@@ -200,8 +200,7 @@ identity loss as equivalent to "machine was compromised.")
   beyond what's in `.env` (gateway URL, node id, supplier-declared
   metadata) plus liveness heartbeats with GPU utilisation.
 
-- It does not update silently. A seller or authorized platform operator must
-  explicitly choose **Update** in the Edge Control Room or App Dashboard.
+- It does not update silently by default. A seller or authorized platform operator can explicitly choose **Update** in the Edge Control Room or App Dashboard, or the seller can opt this node into automatic agent updates from the Control Room's Agent version settings. Automatic updates start only after the node has connected successfully, wait a random 0–30 minutes before the first check to spread fleet load, and check every 24 hours after that. Disabling the setting stops future scheduled checks; it does not interrupt an update that is already downloading.
   When an update changes host-detected metadata such as Apple Silicon unified
   memory, rerun the installer command above once so the host configuration is
   regenerated; no node re-registration is required.

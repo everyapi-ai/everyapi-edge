@@ -8,7 +8,9 @@ import {
   useRuntime,
   useSettlements,
   useStorage,
+  useSetAutoUpdate,
   useUpdateAgent,
+  useUpdateSettings,
 } from '@/api/queries'
 import { Button, PageHeader, Panel, QueryState, StatCard } from '@/components/primitives'
 import { CapacityRail } from '@/components/ui/CapacityRail'
@@ -25,6 +27,8 @@ export const OverviewPage = () => {
   const runtime = useRuntime()
   const storage = useStorage()
   const update = useUpdateAgent()
+  const updateSettings = useUpdateSettings()
+  const setAutoUpdate = useSetAutoUpdate()
   const navigate = useNavigate()
 
   const stats = overview.data
@@ -63,6 +67,10 @@ export const OverviewPage = () => {
     : ''
   const updateAgent = () => {
     if (window.confirm(t('update.confirm'))) update.mutate()
+  }
+  const updateAutomaticUpdates = (enabled: boolean) => {
+    if (enabled && !window.confirm(t('update.autoConfirm'))) return
+    setAutoUpdate.mutate(enabled)
   }
   const readiness = [
     {
@@ -244,9 +252,13 @@ export const OverviewPage = () => {
         updatePending={update.isPending}
         updateError={update.error?.message}
         updateStateLabel={updateStateLabel}
+        automaticUpdateSettings={updateSettings.data}
+        automaticUpdatePending={updateSettings.isPending || setAutoUpdate.isPending}
+        automaticUpdateError={updateSettings.error?.message || setAutoUpdate.error?.message}
         profileHardware={profileHardware}
         onRetrySettlements={() => void settlements.refetch()}
         onUpdate={updateAgent}
+        onAutomaticUpdateChange={updateAutomaticUpdates}
       />
     </div>
   )

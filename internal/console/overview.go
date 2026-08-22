@@ -73,26 +73,64 @@ func (h *handler) startUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mu.Lock()
-	if h.update.State == "checking" || h.update.State == "downloading" || h.update.State == "restarting" {
+	if h.updateStarting || h.update.State == "checking" || h.update.State == "downloading" || h.update.State == "restarting" {
 		h.mu.Unlock()
 		writeError(w, http.StatusConflict, errors.New("update already in progress"))
 		return
 	}
-	h.update = UpdateStatus{State: "checking"}
+	h.updateStarting = true
 	h.mu.Unlock()
 	go func() {
-		err := h.cfg.Update(context.Background(), func(status UpdateStatus) {
-			h.mu.Lock()
-			h.update = status
-			h.mu.Unlock()
-		})
-		if err != nil {
-			h.mu.Lock()
+		err := h.cfg.Update(context.Background(), h.reportUpdateStatus)
+		h.mu.Lock()
+		h.updateStarting = false
+		if err != nil && !errors.Is(err, ErrUpdateInProgress) {
 			h.update = UpdateStatus{State: "failed", Error: err.Error()}
-			h.mu.Unlock()
 		}
+		h.mu.Unlock()
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+}
+
+func (h *handler) reportUpdateStatus(status UpdateStatus) {
+	h.mu.Lock()
+	h.update = status
+	h.mu.Unlock()
+}
+
+func (h *handler) updateSettings(w http.ResponseWriter) {
+	if h.cfg.LoadUpdateSettings == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this agent does not support automatic update settings"))
+		return
+	}
+	settings, err := h.cfg.LoadUpdateSettings()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+func (h *handler) saveUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.SaveAutoUpdate == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this agent does not support automatic update settings"))
+		return
+	}
+	var input struct {
+		AutoUpdate *bool `json:"auto_update"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 8<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil || input.AutoUpdate == nil || decoder.Decode(&struct{}{}) != io.EOF {
+		writeError(w, http.StatusBadRequest, errors.New("auto_update must be a boolean"))
+		return
+	}
+	settings, err := h.cfg.SaveAutoUpdate(*input.AutoUpdate)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
 }
 
 const gibibyte = int64(1024 * 1024 * 1024)

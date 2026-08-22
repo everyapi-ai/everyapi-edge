@@ -106,6 +106,11 @@ const en = {
   'update.action': 'Check for updates',
   'update.confirm':
     'Check for and install the latest agent version? This node will restart when the update is ready.',
+  'update.autoLabel': 'Automatically install agent updates',
+  'update.autoDescription':
+    'Checks once within 30 minutes after the node first connects, then every {hours} hours. The node restarts only when a verified update is available.',
+  'update.autoConfirm':
+    'Enable automatic agent updates? This node may restart after a verified update is downloaded.',
   'update.state.checking': 'Checking for updates',
   'update.state.downloading': 'Downloading update',
   'update.state.restarting': 'Restarting agent',
@@ -474,6 +479,10 @@ const zh: Record<MessageKey, string> = {
   'update.status': '更新状态',
   'update.action': '检查更新',
   'update.confirm': '要检查并安装最新的 agent 版本吗？更新就绪后此节点会重启。',
+  'update.autoLabel': '自动安装 Agent 更新',
+  'update.autoDescription':
+    '节点首次连接后 30 分钟内检查一次，之后每 {hours} 小时检查。仅在下载到已验证更新时重启节点。',
+  'update.autoConfirm': '要启用 Agent 自动更新吗？下载到已验证更新后，此节点可能会重启。',
   'update.state.checking': '正在检查更新',
   'update.state.downloading': '正在下载更新',
   'update.state.restarting': '正在重启 agent',

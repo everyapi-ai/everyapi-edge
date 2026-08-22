@@ -3,12 +3,14 @@ package update
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,9 +31,13 @@ const (
 	maxBinaryBytes    = 128 << 20
 	phaseAttempted    = "attempted"
 	phaseActive       = "active"
+	autoCheckInterval = 24 * time.Hour
+	maxInitialJitter  = 30 * time.Minute
 )
 
 var strictVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+
+var ErrUpdateInProgress = errors.New("update already in progress")
 
 type Config struct {
 	CurrentVersion string
@@ -51,14 +57,29 @@ type Status struct {
 }
 
 type Manager struct {
-	cfg Config
-	mu  sync.Mutex
+	cfg             Config
+	mu              sync.Mutex
+	settingsMu      sync.Mutex
+	settingsVersion uint64
+	settingsChanged chan struct{}
+	initialDelay    func() time.Duration
+	after           func(time.Duration) <-chan time.Time
+	runLatest       func(context.Context, func(Status)) error
 }
 
 type state struct {
 	Version string `json:"version"`
 	Path    string `json:"path"`
 	Phase   string `json:"phase"`
+}
+
+type preferences struct {
+	AutoUpdate bool `json:"auto_update"`
+}
+
+type Settings struct {
+	AutoUpdate    bool
+	CheckInterval time.Duration
 }
 
 type release struct {
@@ -87,10 +108,19 @@ func New(cfg Config) *Manager {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 5 * time.Minute}
 	}
-	return &Manager{cfg: cfg}
+	manager := &Manager{
+		cfg:             cfg,
+		settingsChanged: make(chan struct{}, 1),
+		initialDelay:    randomInitialDelay,
+		after:           time.After,
+	}
+	manager.runLatest = manager.runLatestRelease
+	return manager
 }
 
 func statePath(dir string) string { return filepath.Join(dir, "state.json") }
+
+func preferencesPath(dir string) string { return filepath.Join(dir, "preferences.json") }
 
 func readState(dir string) (state, error) {
 	var value state
@@ -128,6 +158,183 @@ func writeState(dir string, value state) error {
 		return err
 	}
 	return os.Rename(tmpPath, statePath(dir))
+}
+
+func readPreferences(dir string) (preferences, error) {
+	var value preferences
+	b, err := os.ReadFile(preferencesPath(dir))
+	if err != nil {
+		return value, err
+	}
+	if err := json.Unmarshal(b, &value); err != nil {
+		return value, err
+	}
+	return value, nil
+}
+
+func writePreferences(dir string, value preferences) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".preferences-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err = tmp.Chmod(0o600); err == nil {
+		_, err = tmp.Write(b)
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, preferencesPath(dir))
+}
+
+func (m *Manager) Settings() (Settings, error) {
+	settings, _, err := m.settingsSnapshot()
+	return settings, err
+}
+
+func (m *Manager) settingsSnapshot() (Settings, uint64, error) {
+	m.settingsMu.Lock()
+	defer m.settingsMu.Unlock()
+	value, err := readPreferences(m.cfg.StateDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return Settings{CheckInterval: autoCheckInterval}, m.settingsVersion, nil
+	}
+	if err != nil {
+		return Settings{}, m.settingsVersion, fmt.Errorf("read update preferences: %w", err)
+	}
+	return Settings{AutoUpdate: value.AutoUpdate, CheckInterval: autoCheckInterval}, m.settingsVersion, nil
+}
+
+func (m *Manager) SetAutoUpdate(enabled bool) (Settings, error) {
+	m.settingsMu.Lock()
+	current, readErr := readPreferences(m.cfg.StateDir)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		current = preferences{}
+	}
+	changed := readErr != nil && !errors.Is(readErr, os.ErrNotExist) || current.AutoUpdate != enabled
+	current.AutoUpdate = enabled
+	if err := writePreferences(m.cfg.StateDir, current); err != nil {
+		m.settingsMu.Unlock()
+		return Settings{}, fmt.Errorf("write update preferences: %w", err)
+	}
+	if changed {
+		m.settingsVersion++
+	}
+	m.settingsMu.Unlock()
+	if changed {
+		select {
+		case m.settingsChanged <- struct{}{}:
+		default:
+		}
+	}
+	return Settings{AutoUpdate: enabled, CheckInterval: autoCheckInterval}, nil
+}
+
+func randomInitialDelay() time.Duration {
+	value, err := rand.Int(rand.Reader, big.NewInt(int64(maxInitialJitter)))
+	if err != nil {
+		return maxInitialJitter / 2
+	}
+	return time.Duration(value.Int64())
+}
+
+type autoWaitResult uint8
+
+const (
+	autoWaitStopped autoWaitResult = iota
+	autoWaitElapsed
+	autoWaitSettingsChanged
+)
+
+func (m *Manager) RunAuto(ctx context.Context, report func(Status)) {
+	firstCheck := true
+	for {
+		settings, version, err := m.settingsSnapshot()
+		if err != nil {
+			if report != nil {
+				report(Status{State: "failed", Error: err.Error()})
+			}
+			if m.waitForAutoCheck(ctx, autoCheckInterval, version) == autoWaitStopped {
+				return
+			}
+			firstCheck = true
+			continue
+		}
+		if !settings.AutoUpdate {
+			firstCheck = true
+			if !m.waitForSettingsChange(ctx, version) {
+				return
+			}
+			continue
+		}
+		delay := settings.CheckInterval
+		if firstCheck {
+			delay = m.initialDelay()
+			firstCheck = false
+		}
+		waitResult := m.waitForAutoCheck(ctx, delay, version)
+		if waitResult == autoWaitStopped {
+			return
+		}
+		if waitResult == autoWaitSettingsChanged {
+			firstCheck = true
+			continue
+		}
+		settings, currentVersion, err := m.settingsSnapshot()
+		if err != nil || !settings.AutoUpdate || currentVersion != version {
+			firstCheck = true
+			continue
+		}
+		if err := m.runLatest(ctx, report); err != nil && !errors.Is(err, ErrUpdateInProgress) && report != nil {
+			report(Status{State: "failed", Error: err.Error()})
+		}
+	}
+}
+
+func (m *Manager) waitForAutoCheck(ctx context.Context, delay time.Duration, version uint64) autoWaitResult {
+	timer := m.after(delay)
+	for {
+		select {
+		case <-ctx.Done():
+			return autoWaitStopped
+		case <-m.settingsChanged:
+			if m.currentSettingsVersion() != version {
+				return autoWaitSettingsChanged
+			}
+		case <-timer:
+			return autoWaitElapsed
+		}
+	}
+}
+
+func (m *Manager) waitForSettingsChange(ctx context.Context, version uint64) bool {
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-m.settingsChanged:
+			if m.currentSettingsVersion() != version {
+				return true
+			}
+		}
+	}
+}
+
+func (m *Manager) currentSettingsVersion() uint64 {
+	m.settingsMu.Lock()
+	defer m.settingsMu.Unlock()
+	return m.settingsVersion
 }
 
 // Bootstrap runs before normal agent startup. An active candidate remains the preferred binary across container restarts. An attempted candidate means it failed before its first successful gateway Welcome and is rolled back.
@@ -180,8 +387,12 @@ func (m *Manager) Promote() error {
 }
 
 func (m *Manager) RunLatest(ctx context.Context, report func(Status)) error {
+	return m.runLatest(ctx, report)
+}
+
+func (m *Manager) runLatestRelease(ctx context.Context, report func(Status)) error {
 	if !m.mu.TryLock() {
-		return errors.New("update already in progress")
+		return ErrUpdateInProgress
 	}
 	defer m.mu.Unlock()
 	emit := func(s Status) {

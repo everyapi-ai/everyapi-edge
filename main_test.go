@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,8 +18,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/everyapi-ai/everyapi-edge/internal/console"
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 	edgeruntime "github.com/everyapi-ai/everyapi-edge/internal/runtime"
+	edgeupdate "github.com/everyapi-ai/everyapi-edge/internal/update"
 )
 
 func TestDiscoverOllamaModelsUsesTagNamesAndDeduplicates(t *testing.T) {
@@ -432,5 +435,46 @@ func TestRediscoverMetadataWhenModelChangesDuringDiscovery(t *testing.T) {
 	}
 	if !reflect.DeepEqual(meta.Models, []string{"fresh-model"}) {
 		t.Fatalf("models = %v, want fresh snapshot", meta.Models)
+	}
+}
+
+func TestConsoleUpdateSettingsExposeTheSchedulerInterval(t *testing.T) {
+	settings := consoleUpdateSettings(edgeupdate.Settings{AutoUpdate: true, CheckInterval: 24 * time.Hour})
+	if settings != (console.UpdateSettings{AutoUpdate: true, CheckIntervalHours: 24}) {
+		t.Fatalf("console settings = %#v", settings)
+	}
+}
+
+func TestRunConsoleUpdateMapsAnActiveManagerToAConsoleConflict(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		_, _ = io.WriteString(w, `{"tag_name":"edge-v1.0.0","draft":false,"prerelease":false}`)
+	}))
+	defer server.Close()
+	manager := edgeupdate.New(edgeupdate.Config{CurrentVersion: "1.0.0", StateDir: t.TempDir(), ReleaseAPI: server.URL, HTTPClient: server.Client()})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- manager.RunLatest(context.Background(), nil)
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for active update")
+	}
+
+	if err := runConsoleUpdate(context.Background(), manager, func(console.UpdateStatus) {}); !errors.Is(err, console.ErrUpdateInProgress) {
+		t.Fatalf("console update error = %v", err)
+	}
+	close(releaseRequest)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first RunLatest: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first update")
 	}
 }

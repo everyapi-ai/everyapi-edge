@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -71,6 +72,7 @@ func runGatewayLifecycle(
 	fwd *forward.Forwarder,
 	updateManager *edgeupdate.Manager,
 	controlHandler http.Handler,
+	updateStatus func(edgeupdate.Status),
 	store *console.Store,
 	logSink *logTee,
 	metadataRefresh *metadataRefresh,
@@ -78,6 +80,7 @@ func runGatewayLifecycle(
 	if metadataRefresh == nil {
 		metadataRefresh = newMetadataRefresh()
 	}
+	var startAutoUpdates sync.Once
 	reconnector := edgeapp.Reconnector{
 		Hooks: edgeapp.Hooks{
 			Connecting: func() { store.SetGatewayState("connecting", "") },
@@ -173,6 +176,9 @@ func runGatewayLifecycle(
 					if err := updateManager.Promote(); err != nil {
 						log.Printf("warning: could not promote successful update: %v", err)
 					}
+					startAutoUpdates.Do(func() {
+						go updateManager.RunAuto(ctx, updateStatus)
+					})
 				}
 				store.SetGatewayState("online", "")
 				log.Printf("connected to gateway with %d models", len(sessionMeta.Models))

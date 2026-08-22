@@ -15,6 +15,23 @@ func readPackagingFile(t *testing.T, name string) string {
 	return string(contents)
 }
 
+func composeServiceBlock(t *testing.T, contents, service string) string {
+	t.Helper()
+	marker := "\n  " + service + ":\n"
+	start := strings.Index(contents, marker)
+	if start == -1 {
+		t.Fatalf("compose file is missing the %s service", service)
+	}
+	var lines []string
+	for _, line := range strings.Split(contents[start+len(marker):], "\n") {
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") {
+			break
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
 func TestImageRuntimeComposeProfilesMatchHostAccelerators(t *testing.T) {
 	tests := []struct {
 		file     string
@@ -32,6 +49,30 @@ func TestImageRuntimeComposeProfilesMatchHostAccelerators(t *testing.T) {
 				if !strings.Contains(contents, required) {
 					t.Errorf("%s is missing %q", test.file, required)
 				}
+			}
+		})
+	}
+}
+
+func TestAgentMountsConfiguredOllamaStorageInContainer(t *testing.T) {
+	tests := []struct {
+		file  string
+		mount string
+	}{
+		{"docker-compose.yml", "${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}:/models"},
+		{"docker-compose.rocm.yml", "${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}:/models"},
+		{"docker-compose.macos.yml", "${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}:/models"},
+		{"docker-compose.windows.yml", "${EVERYAPI_MODEL_PATH:?model path required}:/models"},
+	}
+	for _, test := range tests {
+		t.Run(test.file, func(t *testing.T) {
+			contents := readPackagingFile(t, test.file)
+			agentBlock := composeServiceBlock(t, contents, "agent")
+			if !strings.Contains(agentBlock, "EVERYAPI_OLLAMA_STORAGE_PATH: /models") {
+				t.Errorf("%s does not configure the agent storage path", test.file)
+			}
+			if !strings.Contains(agentBlock, test.mount) {
+				t.Errorf("%s does not mount the configured Ollama storage into the agent", test.file)
 			}
 		})
 	}
@@ -72,17 +113,26 @@ func TestSpeechImagesBundleTheirPhonemiserAssets(t *testing.T) {
 	}
 }
 
-func TestEdgeReleaseSmokeBuildsSpeechImages(t *testing.T) {
-	workflow := readPackagingFile(t, "../../.github/workflows/edge-release.yml")
+// Suppliers build the speech runtime themselves — docker-compose.yml says `build: ./speech`, and nothing is pushed to a registry — so a Dockerfile that does not compile reaches them as a failed `docker compose up`. CI has to build it on the pull request that changes it.
+//
+// It has to be CI and not edge-release.yml, which is where these builds used to live. The release workflow publishes clients/edge/ to the public mirror in a job that runs in parallel with the image job, so a broken Dockerfile is already shipped by the time a release-time build proves it broken; all the failure does downstream is block the GitHub Release, since `release` needs `image`. That is how edge-v0.1.27 through v0.1.31 ended up tagged with nothing published.
+func TestCIBuildsSpeechRuntimeImages(t *testing.T) {
+	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
+	// The trailing newline keeps the CUDA entry from being satisfied by the ROCm one, whose path has it as a prefix.
 	for _, required := range []string{
-		"Smoke build CUDA speech runtime",
-		"file: clients/edge/speech/Dockerfile",
-		"Smoke build ROCm speech runtime",
-		"file: clients/edge/speech/Dockerfile.rocm",
+		"name: speech-cuda",
+		"file: clients/edge/speech/Dockerfile\n",
+		"name: speech-rocm",
+		"file: clients/edge/speech/Dockerfile.rocm\n",
 	} {
 		if !strings.Contains(workflow, required) {
-			t.Errorf("Edge release is missing %q", required)
+			t.Errorf("CI is missing %q", required)
 		}
+	}
+
+	release := readPackagingFile(t, "../../.github/workflows/edge-release.yml")
+	if strings.Contains(release, "clients/edge/speech/Dockerfile") {
+		t.Error("edge-release.yml builds the speech runtime again; that check belongs on the pull request, where it can still stop a broken Dockerfile from shipping")
 	}
 }
 
@@ -138,16 +188,22 @@ func TestEdgeReleaseBuildsWindowsAgentBinary(t *testing.T) {
 	}
 }
 
-func TestEdgeReleaseSmokeBuildsDiffusersImages(t *testing.T) {
-	workflow := readPackagingFile(t, "../../.github/workflows/edge-release.yml")
+// Same reasoning as TestCIBuildsSpeechRuntimeImages: `build: ./diffusers` in the compose bundles means suppliers compile this one too, so the build that catches a broken Dockerfile has to run before the merge rather than during the release.
+func TestCIBuildsDiffusersRuntimeImages(t *testing.T) {
+	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
 	for _, required := range []string{
-		"Smoke build CUDA Diffusers runtime",
-		"file: clients/edge/diffusers/Dockerfile",
-		"Smoke build ROCm Diffusers runtime",
-		"file: clients/edge/diffusers/Dockerfile.rocm",
+		"name: diffusers-cuda",
+		"file: clients/edge/diffusers/Dockerfile\n",
+		"name: diffusers-rocm",
+		"file: clients/edge/diffusers/Dockerfile.rocm\n",
 	} {
 		if !strings.Contains(workflow, required) {
-			t.Errorf("Edge release is missing %q", required)
+			t.Errorf("CI is missing %q", required)
 		}
+	}
+
+	release := readPackagingFile(t, "../../.github/workflows/edge-release.yml")
+	if strings.Contains(release, "clients/edge/diffusers/Dockerfile") {
+		t.Error("edge-release.yml builds the Diffusers runtime again; that check belongs on the pull request, where it can still stop a broken Dockerfile from shipping")
 	}
 }

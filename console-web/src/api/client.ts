@@ -45,6 +45,15 @@ export const postJSONResponse = async <T extends z.ZodTypeAny>(
   return schema.parse(await response.json()) as z.infer<T>
 }
 
+export const putJSONResponse = async <T extends z.ZodTypeAny>(
+  path: string,
+  body: unknown,
+  schema: T,
+): Promise<z.infer<T>> => {
+  const response = await apiFetch(path, { method: 'PUT', body: JSON.stringify(body) })
+  return schema.parse(await response.json()) as z.infer<T>
+}
+
 /** Consume the local agent's small SSE envelope. It intentionally keeps the
  * parser here rather than introducing a streaming dependency into the one-file
  * control room bundle. */

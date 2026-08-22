@@ -1,6 +1,6 @@
 import { ChevronDown, RefreshCw, ShieldCheck } from 'lucide-react'
 
-import type { NodeProfile, Overview, Settlement } from '@/api/schemas'
+import type { NodeProfile, Overview, Settlement, UpdateSettings } from '@/api/schemas'
 import { Button, Panel, QueryState } from '@/components/primitives'
 import { useTranslation } from '@/i18n/useTranslation'
 import { formatTime, formatUSDMicros } from '@/lib/format'
@@ -14,9 +14,13 @@ type NodeDetailsProps = {
   updatePending: boolean
   updateError?: string
   updateStateLabel: string
+  automaticUpdateSettings?: UpdateSettings
+  automaticUpdatePending: boolean
+  automaticUpdateError?: string
   profileHardware: string
   onRetrySettlements: () => void
   onUpdate: () => void
+  onAutomaticUpdateChange: (enabled: boolean) => void
 }
 
 export const NodeDetails = ({
@@ -28,9 +32,13 @@ export const NodeDetails = ({
   updatePending,
   updateError,
   updateStateLabel,
+  automaticUpdateSettings,
+  automaticUpdatePending,
+  automaticUpdateError,
   profileHardware,
   onRetrySettlements,
   onUpdate,
+  onAutomaticUpdateChange,
 }: NodeDetailsProps) => {
   const { t, locale } = useTranslation()
 
@@ -92,6 +100,30 @@ export const NodeDetails = ({
             <RefreshCw className='size-3.5' aria-hidden='true' />
             {t('update.action')}
           </Button>
+          <div className='mt-4 border-t border-line pt-4'>
+            <label className='flex items-start gap-3 text-sm text-ink'>
+              <input
+                type='checkbox'
+                checked={automaticUpdateSettings?.auto_update ?? false}
+                disabled={automaticUpdatePending || !automaticUpdateSettings}
+                onChange={(event) => onAutomaticUpdateChange(event.target.checked)}
+                className='mt-0.5 size-4 accent-accent'
+              />
+              <span>
+                <span className='block font-medium'>{t('update.autoLabel')}</span>
+                <span className='mt-1 block text-xs leading-5 text-muted'>
+                  {t('update.autoDescription', {
+                    hours: automaticUpdateSettings?.check_interval_hours ?? 24,
+                  })}
+                </span>
+              </span>
+            </label>
+            {automaticUpdateError ? (
+              <p role='alert' className='mt-2 text-sm text-danger'>
+                {automaticUpdateError}
+              </p>
+            ) : null}
+          </div>
         </Panel>
         <Panel title={t('settlement.title')}>
           <p className='rounded-lg border border-warn/22 bg-warn/10 p-3 text-sm leading-5 text-ink-2'>

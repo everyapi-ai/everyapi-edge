@@ -102,5 +102,6 @@ services:
       EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:?console token required}
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
+      - ${EVERYAPI_MODEL_PATH:?model path required}:/models
     ports:
       - "${EVERYAPI_CONSOLE_PORT:-8421}:8421"

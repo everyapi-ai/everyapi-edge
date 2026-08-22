@@ -1,7 +1,7 @@
 import json
 import os
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 
 def test_remote_console_requires_pairing_before_rendering_protected_content() -> None:
@@ -1782,6 +1782,41 @@ def test_agent_update_requires_confirmation_before_restarting_the_node() -> None
 
     assert confirmations == ["Check for and install the latest agent version? This node will restart when the update is ready."]
     assert update_requests == 0
+
+
+def test_automatic_agent_updates_can_be_enabled_from_node_settings() -> None:
+    """Enabling automatic updates must persist the setting and explain the daily restart-capable policy."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
+    saved_settings: list[dict[str, bool]] = []
+    confirmations: list[str] = []
+
+    def settings_route(route) -> None:
+        if route.request.method == "GET":
+            route.fulfill(status=200, content_type="application/json", body='{"auto_update":false,"check_interval_hours":24}')
+            return
+        payload = route.request.post_data_json
+        saved_settings.append(payload)
+        route.fulfill(status=200, content_type="application/json", body='{"auto_update":true,"check_interval_hours":24}')
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 960})
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
+        page.route("**/api/update/settings", settings_route)
+        page.on("dialog", lambda dialog: (confirmations.append(dialog.message), dialog.accept()))
+        page.goto(base, wait_until="networkidle")
+        page.get_by_text("Node details, updates, settlement, and privacy", exact=True).click()
+        toggle = page.get_by_role("checkbox", name="Automatically install agent updates")
+        toggle.click()
+        expect(toggle).to_be_checked()
+        description = page.get_by_text("Checks once within 30 minutes after the node first connects, then every 24 hours. The node restarts only when a verified update is available.", exact=True).inner_text()
+        checked = toggle.is_checked()
+        browser.close()
+
+    assert confirmations == ["Enable automatic agent updates? This node may restart after a verified update is downloaded."]
+    assert saved_settings == [{"auto_update": True}]
+    assert checked
+    assert description.startswith("Checks once within 30 minutes")
 
 
 def test_image_editing_can_be_stopped_while_the_local_request_is_running() -> None:

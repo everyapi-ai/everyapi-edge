@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"embed"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -17,20 +18,22 @@ var webAssets embed.FS
 
 // Config is local-only console configuration.
 type Config struct {
-	OllamaURL     string
-	DiffusersURL  string
-	SpeechURL     string
-	ConsoleToken  string
-	StoragePath   string
-	VRAMTotalGB   int
-	NodeName      string
-	AgentVersion  string
-	GPUModel      string
-	Platform      string
-	CountryISO2   string
-	Version       string
-	Update        func(context.Context, func(UpdateStatus)) error
-	ModelsChanged func()
+	OllamaURL          string
+	DiffusersURL       string
+	SpeechURL          string
+	ConsoleToken       string
+	StoragePath        string
+	VRAMTotalGB        int
+	NodeName           string
+	AgentVersion       string
+	GPUModel           string
+	Platform           string
+	CountryISO2        string
+	Version            string
+	Update             func(context.Context, func(UpdateStatus)) error
+	LoadUpdateSettings func() (UpdateSettings, error)
+	SaveAutoUpdate     func(bool) (UpdateSettings, error)
+	ModelsChanged      func()
 }
 
 type UpdateStatus struct {
@@ -38,6 +41,13 @@ type UpdateStatus struct {
 	Version string `json:"version,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
+
+type UpdateSettings struct {
+	AutoUpdate         bool `json:"auto_update"`
+	CheckIntervalHours int  `json:"check_interval_hours"`
+}
+
+var ErrUpdateInProgress = errors.New("update already in progress")
 
 // NodeProfile is the startup identity of this local agent. It intentionally contains no credentials, gateway URL, or host filesystem details.
 type NodeProfile struct {
@@ -195,6 +205,7 @@ type handler struct {
 	pickStorage          func() (string, error)
 	storageAvailable     func(string) (int64, error)
 	update               UpdateStatus
+	updateStarting       bool
 }
 
 func (h *handler) textClient() *edgeruntime.TextClient {
@@ -237,8 +248,9 @@ func newHandler(cfg Config, store *Store, picker func() (string, error)) http.Ha
 
 // Handlers separates the browser management surface from the in-process gateway control surface. Both share the same feature state, but only browser mutations require same-origin evidence.
 type Handlers struct {
-	Browser http.Handler
-	Control http.Handler
+	Browser            http.Handler
+	Control            http.Handler
+	ReportUpdateStatus func(UpdateStatus)
 }
 
 func NewHandlers(cfg Config, store *Store) Handlers {
@@ -272,8 +284,9 @@ func newHandlers(cfg Config, store *Store, picker func() (string, error)) Handle
 	control := http.NewServeMux()
 	control.HandleFunc("/api/", h.api)
 	return Handlers{
-		Browser: securityHeaders(browser),
-		Control: securityHeaders(control),
+		Browser:            securityHeaders(browser),
+		Control:            securityHeaders(control),
+		ReportUpdateStatus: h.reportUpdateStatus,
 	}
 }
 

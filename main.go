@@ -124,9 +124,15 @@ func main() {
 		Platform:     hostPlatform,
 		CountryISO2:  cfg.CountryISO2,
 		Update: func(updateCtx context.Context, report func(console.UpdateStatus)) error {
-			return updateManager.RunLatest(updateCtx, func(status edgeupdate.Status) {
-				report(console.UpdateStatus{State: status.State, Version: status.Version, Error: status.Error})
-			})
+			return runConsoleUpdate(updateCtx, updateManager, report)
+		},
+		LoadUpdateSettings: func() (console.UpdateSettings, error) {
+			settings, err := updateManager.Settings()
+			return consoleUpdateSettings(settings), err
+		},
+		SaveAutoUpdate: func(enabled bool) (console.UpdateSettings, error) {
+			settings, err := updateManager.SetAutoUpdate(enabled)
+			return consoleUpdateSettings(settings), err
 		},
 		ModelsChanged: func() {
 			metadataRefresh.Notify()
@@ -170,10 +176,30 @@ func main() {
 		Location: protocol.Location{CountryISO2: cfg.CountryISO2},
 	}
 
-	if err := runWithReconnect(ctx, cfg, id, meta, fwd, updateManager, consoleHandlers.Control, store, logSink, metadataRefresh); err != nil && !errors.Is(err, context.Canceled) {
+	if err := runWithReconnect(ctx, cfg, id, meta, fwd, updateManager, consoleHandlers.Control, func(status edgeupdate.Status) {
+		consoleHandlers.ReportUpdateStatus(consoleUpdateStatus(status))
+	}, store, logSink, metadataRefresh); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("fatal: %v", err)
 	}
 	log.Print("shutting down cleanly")
+}
+
+func consoleUpdateSettings(settings edgeupdate.Settings) console.UpdateSettings {
+	return console.UpdateSettings{AutoUpdate: settings.AutoUpdate, CheckIntervalHours: int(settings.CheckInterval / time.Hour)}
+}
+
+func consoleUpdateStatus(status edgeupdate.Status) console.UpdateStatus {
+	return console.UpdateStatus{State: status.State, Version: status.Version, Error: status.Error}
+}
+
+func runConsoleUpdate(ctx context.Context, manager *edgeupdate.Manager, report func(console.UpdateStatus)) error {
+	err := manager.RunLatest(ctx, func(status edgeupdate.Status) {
+		report(consoleUpdateStatus(status))
+	})
+	if errors.Is(err, edgeupdate.ErrUpdateInProgress) {
+		return console.ErrUpdateInProgress
+	}
+	return err
 }
 
 func resolvedMemoryGB(configured int, gpuModel string, detect func() int) int {
@@ -497,11 +523,12 @@ func runWithReconnect(
 	fwd *forward.Forwarder,
 	updateManager *edgeupdate.Manager,
 	controlHandler http.Handler,
+	updateStatus func(edgeupdate.Status),
 	store *console.Store,
 	logSink *logTee,
 	metadataRefresh *metadataRefresh,
 ) error {
-	return runGatewayLifecycle(ctx, cfg, id, meta, fwd, updateManager, controlHandler, store, logSink, metadataRefresh)
+	return runGatewayLifecycle(ctx, cfg, id, meta, fwd, updateManager, controlHandler, updateStatus, store, logSink, metadataRefresh)
 }
 
 // revokedSentinelPath sits next to the identity file so it shares the same volume mount in docker-compose and survives container restarts. Named `.revoked` so a `ls -l` next to identity.json makes the failure mode obvious without grepping logs.
