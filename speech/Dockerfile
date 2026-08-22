@@ -3,7 +3,7 @@ FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
 WORKDIR /app
 # espeak-ng is Kokoro's fallback phonemiser for words its lexicon does not cover. Without it, synthesis fails on ordinary out-of-vocabulary input.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends espeak-ng \
+    && apt-get install -y --no-install-recommends espeak-ng ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 # pip gives a network read 15 seconds and 5 attempts by default, which is not enough for a 12.8 MB wheel over a slow or filtered link — the ROCm speech image failed twice in a row on exactly that, while the CUDA one survived only because its second attempt landed. Suppliers build these images themselves, so the same ceiling applies wherever they are.

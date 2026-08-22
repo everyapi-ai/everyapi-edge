@@ -1,9 +1,10 @@
 import base64
 import io
 import os
+import sys
 import unittest
 from threading import Event, Lock, Thread, current_thread
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -46,6 +47,19 @@ class _PauseAfterReleaseLock:
 
 
 class ImageRuntimeAPITests(unittest.TestCase):
+    @patch("app.select_device", return_value=Device(name="cuda", backend="cuda"))
+    def test_cuda_generation_pipeline_uses_cpu_offload_instead_of_resident_cuda(self, _select):
+        fake = MagicMock()
+        torch = MagicMock(float16="float16", float32="float32", bfloat16="bfloat16")
+        torch.cuda.is_bf16_supported.return_value = False
+        diffusers = MagicMock(SanaPipeline=MagicMock(from_pretrained=MagicMock(return_value=fake)))
+        with patch.dict(sys.modules, {"torch": torch, "diffusers": diffusers}):
+            app.generation_pipeline.cache_clear()
+            loaded = app.generation_pipeline(app.DEFAULT_GENERATION_MODEL)
+        self.assertIs(loaded, fake)
+        fake.enable_model_cpu_offload.assert_called_once_with()
+        fake.to.assert_not_called()
+
     def setUp(self):
         self.client = TestClient(app.app)
 

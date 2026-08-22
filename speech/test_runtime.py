@@ -1,9 +1,13 @@
 import unittest
 
-from runtime import select_device
+from runtime import select_device, select_tts_device
 
 
 class DeviceSelectionTests(unittest.TestCase):
+    def test_tts_defaults_to_cpu_even_when_cuda_is_available(self):
+        selected = select_tts_device(configured="", cuda_available=lambda: True, mps_available=lambda: True)
+        self.assertEqual(selected.name, "cpu")
+
     def test_cuda_is_preferred_when_available(self):
         selected = select_device(cuda_available=lambda: True, mps_available=lambda: True)
 

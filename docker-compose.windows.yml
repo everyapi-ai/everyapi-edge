@@ -32,6 +32,7 @@ services:
     restart: unless-stopped
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
+      EVERYAPI_TTS_DEVICE: ${EVERYAPI_TTS_DEVICE:-cpu}
     deploy:
       resources:
         reservations:
@@ -98,6 +99,7 @@ services:
       EVERYAPI_PLATFORM: ${EVERYAPI_PLATFORM:-windows/amd64}
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
       EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
+      EVERYAPI_MAX_CONCURRENT_REQUESTS: ${EVERYAPI_MAX_CONCURRENT_REQUESTS:-4}
       EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
       EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:?console token required}
     volumes:

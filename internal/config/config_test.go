@@ -7,11 +7,12 @@ import (
 
 func validBase() Config {
 	return Config{
-		GatewayURL:   "https://api.everyapi.ai",
-		NodeID:       7,
-		OllamaURL:    "http://ollama:11434",
-		IdentityPath: "/var/lib/everyapi-edge/identity.json",
-		ConsoleAddr:  "127.0.0.1:8421",
+		GatewayURL:            "https://api.everyapi.ai",
+		NodeID:                7,
+		OllamaURL:             "http://ollama:11434",
+		IdentityPath:          "/var/lib/everyapi-edge/identity.json",
+		ConsoleAddr:           "127.0.0.1:8421",
+		MaxConcurrentRequests: 4,
 	}
 }
 
@@ -128,6 +129,29 @@ func TestValidateRejectsNegativeVRAM(t *testing.T) {
 	cfg.VRAMTotalGB = -1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "EVERYAPI_VRAM_GB") {
 		t.Fatalf("expected VRAM error, got %v", err)
+	}
+}
+
+func TestFromEnvReadsBoundedRequestConcurrency(t *testing.T) {
+	t.Setenv("EVERYAPI_MAX_CONCURRENT_REQUESTS", "4")
+	if got := FromEnv().MaxConcurrentRequests; got != 4 {
+		t.Fatalf("MaxConcurrentRequests = %d, want 4", got)
+	}
+}
+
+func TestValidateRejectsInvalidRequestConcurrency(t *testing.T) {
+	cfg := validBase()
+	cfg.MaxConcurrentRequests = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "EVERYAPI_MAX_CONCURRENT_REQUESTS") {
+		t.Fatalf("expected concurrency error, got %v", err)
+	}
+}
+
+func TestFromEnvRejectsMalformedRequestConcurrency(t *testing.T) {
+	t.Setenv("EVERYAPI_LOCAL_PREVIEW", "true")
+	t.Setenv("EVERYAPI_MAX_CONCURRENT_REQUESTS", "many")
+	if err := FromEnv().Validate(); err == nil || !strings.Contains(err.Error(), "EVERYAPI_MAX_CONCURRENT_REQUESTS") {
+		t.Fatalf("expected malformed concurrency error, got %v", err)
 	}
 }
 

@@ -28,6 +28,8 @@ type Forwarder struct {
 	sequence atomic.Uint64
 	// ChunkBytes caps each base64-encoded Chunk frame payload. Ollama emits SSE in ~60-200 byte chunks; we batch up to this many DECODED bytes per Chunk frame to limit JSON envelope overhead without piling memory on slow gateway links.
 	ChunkBytes int
+	// gpu is a node-wide execution gate shared by Ollama, Diffusers, and ASR. A 12 GiB supplier GPU cannot safely host independent pipelines concurrently; TTS is deliberately CPU-backed and bypasses this gate.
+	gpu chan struct{}
 }
 
 // RequestEvent is safe to retain locally: it contains operational metadata and Ollama usage only, never a buyer prompt, API key, or forwarded headers.
@@ -84,7 +86,12 @@ func New(ollamaURL, diffusersURL, speechURL string) *Forwarder {
 	return &Forwarder{
 		runtimes:   edgeruntime.NewRouter(ollamaURL, diffusersURL, speechURL, httpClient),
 		ChunkBytes: DefaultChunkBytes,
+		gpu:        make(chan struct{}, 1),
 	}
+}
+
+func gpuBackedPath(path string) bool {
+	return path != "/v1/audio/speech"
 }
 
 // allowedPaths is the OpenAI-compatible surface Ollama exposes under /v1/. The gateway never sends anything else (the relay adapter constructs RequestBody.Path from the buyer's request), but defense in depth: validating here means a future relay-side regression or malicious gateway can't trick the agent into hitting /api/admin/exec or similar invented routes. Handle is the protocol.RequestHandler signature the WS client expects. Builds the outbound HTTP request, streams the response in ChunkBytes-sized batches, and returns Done with the token counts parsed off Ollama's final SSE event (when streaming) or JSON body (when not).
@@ -126,6 +133,14 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	// Bound the whole forwarded request: caps a hung or slow upstream (and aborts immediately if the session ctx is cancelled mid-call) so neither the goroutine nor the Ollama connection outlives the session. Matches the gateway's 5-min response watchdog.
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
+	if gpuBackedPath(req.Path) {
+		select {
+		case f.gpu <- struct{}{}:
+			defer func() { <-f.gpu }()
+		case <-ctx.Done():
+			return protocol.DoneBody{}, &protocol.ErrorBody{Code: "gpu_queue_timeout", Message: ctx.Err().Error()}
+		}
+	}
 
 	headers := make(http.Header, len(req.Headers)+1)
 	for k, v := range req.Headers {

@@ -126,14 +126,16 @@ func TestRouterAllowsOnlyKnownRuntimePaths(t *testing.T) {
 	router := NewRouter("http://text.internal", "http://image.internal", "http://speech.internal", http.DefaultClient)
 
 	for path, wantKind := range map[string]Kind{
-		"/v1/chat/completions":   KindText,
-		"/v1/completions":        KindText,
-		"/v1/responses":          KindText,
-		"/v1/embeddings":         KindText,
-		"/v1/models":             KindText,
-		"/v1/images/generations": KindImage,
-		"/v1/images/edits":       KindImage,
-		"/v1/audio/speech":       KindSpeech,
+		"/v1/chat/completions":     KindText,
+		"/v1/completions":          KindText,
+		"/v1/responses":            KindText,
+		"/v1/embeddings":           KindText,
+		"/v1/models":               KindText,
+		"/v1/images/generations":   KindImage,
+		"/v1/images/edits":         KindImage,
+		"/v1/audio/speech":         KindSpeech,
+		"/v1/audio/transcriptions": KindSpeech,
+		"/v1/audio/translations":   KindSpeech,
 	} {
 		target, err := router.Resolve(path)
 		if err != nil || target.Kind() != wantKind {
@@ -142,13 +144,6 @@ func TestRouterAllowsOnlyKnownRuntimePaths(t *testing.T) {
 	}
 	if _, err := router.Resolve("/api/admin/exec"); !errors.Is(err, ErrPathNotAllowed) {
 		t.Fatalf("disallowed path error = %v", err)
-	}
-
-	// The bundled speech runtime serves synthesis only, so transcription and translation must stay rejected.
-	for _, path := range []string{"/v1/audio/transcriptions", "/v1/audio/translations"} {
-		if _, err := router.Resolve(path); !errors.Is(err, ErrPathNotAllowed) {
-			t.Fatalf("resolve %q = %v, want ErrPathNotAllowed", path, err)
-		}
 	}
 
 	withoutImages := NewRouter("http://text.internal", "", "http://speech.internal", http.DefaultClient)

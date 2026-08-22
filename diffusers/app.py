@@ -176,13 +176,16 @@ def generation_pipeline(model_id: str):
         model_id,
         variant="fp16",
         torch_dtype=torch.float16,
-    ).to(device.name)
+    )
     stable_dtype = torch.float32
     if device.name == "cuda" and torch.cuda.is_bf16_supported():
         stable_dtype = torch.bfloat16
     loaded.text_encoder.to(dtype=stable_dtype)
     loaded.vae.to(dtype=stable_dtype)
-    if device.name == "mps":
+    if device.name == "cuda":
+        loaded.enable_model_cpu_offload()
+    else:
+        loaded.to(device.name)
         loaded.enable_attention_slicing()
     return loaded
 
@@ -365,14 +368,19 @@ def generate_image(request: ImageGenerationRequest):
         raise HTTPException(status_code=503, detail=generation_error)
 
     width, height = SUPPORTED_SIZES[request.size]
+    loaded = generation_pipeline(request.model)
     try:
         with runtime_lock:
-            images = generation_pipeline(request.model)(
-                prompt=request.prompt,
-                width=width,
-                height=height,
-                num_images_per_prompt=request.n,
-            ).images
+            try:
+                images = loaded(
+                    prompt=request.prompt,
+                    width=width,
+                    height=height,
+                    num_images_per_prompt=request.n,
+                ).images
+            finally:
+                if hasattr(loaded, "maybe_free_model_hooks"):
+                    loaded.maybe_free_model_hooks()
     except (DeviceUnavailableError, RuntimeError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     return {

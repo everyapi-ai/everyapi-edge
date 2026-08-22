@@ -3,3 +3,6 @@ kokoro>=0.9.4,<0.10
 misaki[zh]>=0.9.4,<0.10
 soundfile>=0.13,<0.14
 numpy>=1.26,<3
+transformers>=4.57,<4.58
+accelerate>=1.10,<2
+safetensors>=0.5,<1

@@ -485,7 +485,7 @@ func capabilityBelongsToRuntime(id protocol.CapabilityID, runtimeKind protocol.R
 	case protocol.RuntimeImage:
 		return id == protocol.CapabilityImageGenerate || id == protocol.CapabilityImageEdit
 	case protocol.RuntimeSpeech:
-		return id == protocol.CapabilityAudioTTS
+		return id == protocol.CapabilityAudioTTS || id == protocol.CapabilityAudioTranscription || id == protocol.CapabilityAudioTranslation
 	default:
 		return false
 	}

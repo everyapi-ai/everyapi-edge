@@ -28,6 +28,13 @@ if ! command -v espeak-ng >/dev/null 2>&1; then
   fi
   brew install espeak-ng
 fi
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "Homebrew is required to install the speech runtime decoder" >&2
+    exit 1
+  fi
+  brew install ffmpeg
+fi
 
 mkdir -p "$RUNTIME_DIR" "$MODEL_ROOT" "$(dirname "$PLIST_PATH")" "$LOG_DIR"
 if [ ! -x "$VENV_DIR/bin/python" ]; then

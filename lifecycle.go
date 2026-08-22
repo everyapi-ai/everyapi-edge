@@ -163,6 +163,7 @@ func runGatewayLifecycle(
 			DiffusersURL:           cfg.DiffusersURL,
 			SpeechURL:              cfg.SpeechURL,
 			VRAMTotalGB:            sessionMeta.Hardware.VRAMTotalGB,
+			MaxConcurrentRequests:  cfg.MaxConcurrentRequests,
 			GatewayRoundTrip:       store.SetGatewayRoundTrip,
 			MetadataChanged:        metadataRefresh.changes,
 			NodeID:                 cfg.NodeID,

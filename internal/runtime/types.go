@@ -122,8 +122,7 @@ func (r *Router) Resolve(path string) (*Target, error) {
 		return configured(r.text)
 	case "/v1/images/generations", "/v1/images/edits":
 		return configured(r.image)
-	// Transcription and translation are absent on purpose: the bundled speech runtime includes synthesis models only.
-	case "/v1/audio/speech":
+	case "/v1/audio/speech", "/v1/audio/transcriptions", "/v1/audio/translations":
 		return configured(r.speech)
 	default:
 		return nil, ErrPathNotAllowed

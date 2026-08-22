@@ -19,9 +19,9 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request) {
 		capabilities = append(capabilities, runtimeCapabilities(protocol.RuntimeImage, health)...)
 	}
 	if h.cfg.SpeechURL == "" {
-		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityAudioTTS, protocol.RuntimeSpeech, "speech runtime is not configured"))
+		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityAudioTTS, protocol.RuntimeSpeech, "speech runtime is not configured"), unavailableCapability(protocol.CapabilityAudioTranscription, protocol.RuntimeSpeech, "speech runtime is not configured"), unavailableCapability(protocol.CapabilityAudioTranslation, protocol.RuntimeSpeech, "speech runtime is not configured"))
 	} else if health, err := h.speechClient().Health(r.Context()); err != nil {
-		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityAudioTTS, protocol.RuntimeSpeech, "speech runtime is unavailable"))
+		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityAudioTTS, protocol.RuntimeSpeech, "speech runtime is unavailable"), unavailableCapability(protocol.CapabilityAudioTranscription, protocol.RuntimeSpeech, "speech runtime is unavailable"), unavailableCapability(protocol.CapabilityAudioTranslation, protocol.RuntimeSpeech, "speech runtime is unavailable"))
 	} else {
 		capabilities = append(capabilities, runtimeCapabilities(protocol.RuntimeSpeech, health)...)
 	}
@@ -104,7 +104,7 @@ func runtimeCapabilities(kind protocol.RuntimeKind, health edgeruntime.RuntimeHe
 }
 
 func validRuntimeCapability(kind protocol.RuntimeKind, id protocol.CapabilityID) bool {
-	return (kind == protocol.RuntimeImage && (id == protocol.CapabilityImageGenerate || id == protocol.CapabilityImageEdit)) || (kind == protocol.RuntimeSpeech && id == protocol.CapabilityAudioTTS)
+	return (kind == protocol.RuntimeImage && (id == protocol.CapabilityImageGenerate || id == protocol.CapabilityImageEdit)) || (kind == protocol.RuntimeSpeech && (id == protocol.CapabilityAudioTTS || id == protocol.CapabilityAudioTranscription || id == protocol.CapabilityAudioTranslation))
 }
 
 func unavailableCapability(id protocol.CapabilityID, kind protocol.RuntimeKind, reason string) protocol.Capability {

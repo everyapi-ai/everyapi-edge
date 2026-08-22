@@ -12,14 +12,16 @@ const (
 type CapabilityID string
 
 const (
-	CapabilityTextChat       CapabilityID = "text.chat"
-	CapabilityTextCompletion CapabilityID = "text.completion"
-	CapabilityTextResponses  CapabilityID = "text.responses"
-	CapabilityTextEmbedding  CapabilityID = "text.embedding"
-	CapabilityTextVision     CapabilityID = "text.vision"
-	CapabilityImageGenerate  CapabilityID = "image.generate"
-	CapabilityImageEdit      CapabilityID = "image.edit"
-	CapabilityAudioTTS       CapabilityID = "audio.tts"
+	CapabilityTextChat           CapabilityID = "text.chat"
+	CapabilityTextCompletion     CapabilityID = "text.completion"
+	CapabilityTextResponses      CapabilityID = "text.responses"
+	CapabilityTextEmbedding      CapabilityID = "text.embedding"
+	CapabilityTextVision         CapabilityID = "text.vision"
+	CapabilityImageGenerate      CapabilityID = "image.generate"
+	CapabilityImageEdit          CapabilityID = "image.edit"
+	CapabilityAudioTTS           CapabilityID = "audio.tts"
+	CapabilityAudioTranscription CapabilityID = "audio.transcription"
+	CapabilityAudioTranslation   CapabilityID = "audio.translation"
 )
 
 type CapabilityStatus string

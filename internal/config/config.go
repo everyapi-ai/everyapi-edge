@@ -44,6 +44,8 @@ type Config struct {
 	ConsoleToken string
 	// OllamaStoragePath is the model root visible to the agent process. It is used by the local console for storage inspection and migration planning.
 	OllamaStoragePath string
+	// MaxConcurrentRequests bounds accepted gateway work before the agent reports node_busy. GPU-backed requests are serialized separately, so this is the total queue plus CPU TTS capacity.
+	MaxConcurrentRequests int
 }
 
 // Validate returns the first config defect, or nil if the agent can start. main.go calls this before doing anything expensive (keypair generation, network dials) so misconfiguration fails in <100ms.
@@ -76,6 +78,9 @@ func (c Config) Validate() error {
 	if c.VRAMTotalGB < 0 {
 		return errors.New("EVERYAPI_VRAM_GB must not be negative")
 	}
+	if c.MaxConcurrentRequests <= 0 || c.MaxConcurrentRequests > 64 {
+		return errors.New("EVERYAPI_MAX_CONCURRENT_REQUESTS must be between 1 and 64")
+	}
 	for _, w := range c.Workloads {
 		if !knownWorkload(w) {
 			return fmt.Errorf("EVERYAPI_WORKLOADS contains unknown value %q (allowed: %s)",
@@ -97,22 +102,23 @@ func knownWorkload(w string) bool {
 // FromEnv reads every recognised variable. Missing optional fields stay zero-valued; required-field defects surface from Validate().
 func FromEnv() Config {
 	return Config{
-		LocalPreview:      parseBool(os.Getenv("EVERYAPI_LOCAL_PREVIEW")),
-		GatewayURL:        os.Getenv("EVERYAPI_GATEWAY"),
-		NodeID:            parseInt64(os.Getenv("EVERYAPI_NODE_ID")),
-		RegistrationToken: strings.TrimSpace(os.Getenv("EVERYAPI_REGISTRATION_TOKEN")),
-		IdentityPath:      defaultStr(os.Getenv("EVERYAPI_IDENTITY_PATH"), "/var/lib/everyapi-edge/identity.json"),
-		OllamaURL:         defaultStr(os.Getenv("OLLAMA_URL"), "http://ollama:11434"),
-		DiffusersURL:      strings.TrimSpace(os.Getenv("EVERYAPI_DIFFUSERS_URL")),
-		SpeechURL:         strings.TrimSpace(os.Getenv("EVERYAPI_SPEECH_URL")),
-		NodeName:          os.Getenv("EVERYAPI_NODE_NAME"),
-		GPUModel:          os.Getenv("EVERYAPI_GPU_MODEL"),
-		VRAMTotalGB:       int(parseInt64(os.Getenv("EVERYAPI_VRAM_GB"))),
-		CountryISO2:       strings.ToUpper(os.Getenv("EVERYAPI_COUNTRY")),
-		Workloads:         parseWorkloads(os.Getenv("EVERYAPI_WORKLOADS")),
-		ConsoleAddr:       defaultStr(os.Getenv("EVERYAPI_CONSOLE_ADDR"), "127.0.0.1:8421"),
-		ConsoleToken:      strings.TrimSpace(os.Getenv("EVERYAPI_CONSOLE_TOKEN")),
-		OllamaStoragePath: defaultOllamaStoragePath(),
+		LocalPreview:          parseBool(os.Getenv("EVERYAPI_LOCAL_PREVIEW")),
+		GatewayURL:            os.Getenv("EVERYAPI_GATEWAY"),
+		NodeID:                parseInt64(os.Getenv("EVERYAPI_NODE_ID")),
+		RegistrationToken:     strings.TrimSpace(os.Getenv("EVERYAPI_REGISTRATION_TOKEN")),
+		IdentityPath:          defaultStr(os.Getenv("EVERYAPI_IDENTITY_PATH"), "/var/lib/everyapi-edge/identity.json"),
+		OllamaURL:             defaultStr(os.Getenv("OLLAMA_URL"), "http://ollama:11434"),
+		DiffusersURL:          strings.TrimSpace(os.Getenv("EVERYAPI_DIFFUSERS_URL")),
+		SpeechURL:             strings.TrimSpace(os.Getenv("EVERYAPI_SPEECH_URL")),
+		NodeName:              os.Getenv("EVERYAPI_NODE_NAME"),
+		GPUModel:              os.Getenv("EVERYAPI_GPU_MODEL"),
+		VRAMTotalGB:           int(parseInt64(os.Getenv("EVERYAPI_VRAM_GB"))),
+		CountryISO2:           strings.ToUpper(os.Getenv("EVERYAPI_COUNTRY")),
+		Workloads:             parseWorkloads(os.Getenv("EVERYAPI_WORKLOADS")),
+		ConsoleAddr:           defaultStr(os.Getenv("EVERYAPI_CONSOLE_ADDR"), "127.0.0.1:8421"),
+		ConsoleToken:          strings.TrimSpace(os.Getenv("EVERYAPI_CONSOLE_TOKEN")),
+		OllamaStoragePath:     defaultOllamaStoragePath(),
+		MaxConcurrentRequests: parseConcurrentRequests(os.Getenv("EVERYAPI_MAX_CONCURRENT_REQUESTS")),
 	}
 }
 
@@ -169,6 +175,17 @@ func parseInt64(s string) int64 {
 	return v
 }
 
+func parseConcurrentRequests(raw string) int {
+	if strings.TrimSpace(raw) == "" {
+		return 4
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return -1
+	}
+	return value
+}
+
 func defaultStr(v, def string) string {
 	if strings.TrimSpace(v) == "" {
 		return def
@@ -183,7 +200,7 @@ func (c Config) String() string {
 		hadToken = "yes (length=" + strconv.Itoa(len(c.RegistrationToken)) + ")"
 	}
 	return fmt.Sprintf(
-		"Config{LocalPreview=%t Gateway=%s NodeID=%d Ollama=%s OllamaStorage=%s Identity=%s ConsoleAddr=%s ConsoleToken=%t NodeName=%q Country=%s RegistrationToken=%s}",
-		c.LocalPreview, c.GatewayURL, c.NodeID, c.OllamaURL, c.OllamaStoragePath, c.IdentityPath, c.ConsoleAddr, c.ConsoleToken != "", c.NodeName, c.CountryISO2, hadToken,
+		"Config{LocalPreview=%t Gateway=%s NodeID=%d Ollama=%s OllamaStorage=%s Identity=%s ConsoleAddr=%s ConsoleToken=%t MaxConcurrentRequests=%d NodeName=%q Country=%s RegistrationToken=%s}",
+		c.LocalPreview, c.GatewayURL, c.NodeID, c.OllamaURL, c.OllamaStoragePath, c.IdentityPath, c.ConsoleAddr, c.ConsoleToken != "", c.MaxConcurrentRequests, c.NodeName, c.CountryISO2, hadToken,
 	)
 }

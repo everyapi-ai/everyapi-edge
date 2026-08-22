@@ -33,14 +33,16 @@ func TestNodeMetaCarriesTypedCapabilities(t *testing.T) {
 
 func TestCapabilityForRequestUsesExactProtocolPaths(t *testing.T) {
 	tests := map[string]CapabilityID{
-		"/api/chat":              CapabilityTextChat,
-		"/v1/chat/completions":   CapabilityTextChat,
-		"/v1/completions":        CapabilityTextCompletion,
-		"/v1/responses":          CapabilityTextResponses,
-		"/v1/embeddings":         CapabilityTextEmbedding,
-		"/v1/images/generations": CapabilityImageGenerate,
-		"/v1/images/edits":       CapabilityImageEdit,
-		"/v1/audio/speech":       CapabilityAudioTTS,
+		"/api/chat":                CapabilityTextChat,
+		"/v1/chat/completions":     CapabilityTextChat,
+		"/v1/completions":          CapabilityTextCompletion,
+		"/v1/responses":            CapabilityTextResponses,
+		"/v1/embeddings":           CapabilityTextEmbedding,
+		"/v1/images/generations":   CapabilityImageGenerate,
+		"/v1/images/edits":         CapabilityImageEdit,
+		"/v1/audio/speech":         CapabilityAudioTTS,
+		"/v1/audio/transcriptions": CapabilityAudioTranscription,
+		"/v1/audio/translations":   CapabilityAudioTranslation,
 	}
 	for path, want := range tests {
 		got, ok := CapabilityForRequest(path)

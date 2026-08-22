@@ -18,6 +18,10 @@ func CapabilityForRequest(path string) (CapabilityID, bool) {
 		return CapabilityImageEdit, true
 	case "/v1/audio/speech":
 		return CapabilityAudioTTS, true
+	case "/v1/audio/transcriptions":
+		return CapabilityAudioTranscription, true
+	case "/v1/audio/translations":
+		return CapabilityAudioTranslation, true
 	default:
 		return "", false
 	}

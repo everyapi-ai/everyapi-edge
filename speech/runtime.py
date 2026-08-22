@@ -3,6 +3,7 @@
 Unlike the image runtime, CPU is a supported target. Kokoro-82M is small enough that CPU synthesis stays comfortably faster than realtime, so refusing to start without an accelerator would reject hosts that can serve speech perfectly well.
 """
 
+import os
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -39,6 +40,21 @@ def select_device(
     if mps_available():
         return Device(name="mps", backend="mps")
     return Device(name="cpu", backend="cpu")
+
+
+def select_tts_device(
+    configured: Optional[str] = None,
+    cuda_available: Optional[Callable[[], bool]] = None,
+    mps_available: Optional[Callable[[], bool]] = None,
+) -> Device:
+    """Keep Kokoro on CPU by default so it never occupies VRAM needed by larger runtimes."""
+    requested = (configured if configured is not None else os.getenv("EVERYAPI_TTS_DEVICE", "cpu")).strip().lower() or "cpu"
+    if requested == "cpu":
+        return Device(name="cpu", backend="cpu")
+    available = select_device(cuda_available=cuda_available, mps_available=mps_available)
+    if requested == available.name:
+        return available
+    raise ValueError(f"EVERYAPI_TTS_DEVICE={requested!r} is not available")
 
 
 def allocated_memory_bytes(device: Device) -> int:

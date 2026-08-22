@@ -84,10 +84,10 @@ func TestSpeechRuntimeIsWiredIntoEveryAcceleratedBundle(t *testing.T) {
 		file     string
 		required []string
 	}{
-		{"docker-compose.yml", []string{"speech:", "build: ./speech", "EVERYAPI_SPEECH_URL: http://speech:8189"}},
-		{"docker-compose.rocm.yml", []string{"speech:", "dockerfile: Dockerfile.rocm", "EVERYAPI_SPEECH_URL: http://speech:8189"}},
-		{"docker-compose.macos.yml", []string{"EVERYAPI_SPEECH_URL: http://host.docker.internal:8189"}},
-		{"docker-compose.windows.yml", []string{"speech:", "build: ./speech", "EVERYAPI_SPEECH_URL: http://speech:8189"}},
+		{"docker-compose.yml", []string{"speech:", "build: ./speech", "EVERYAPI_TTS_DEVICE: ${EVERYAPI_TTS_DEVICE:-cpu}", "EVERYAPI_SPEECH_URL: http://speech:8189", "EVERYAPI_MAX_CONCURRENT_REQUESTS: ${EVERYAPI_MAX_CONCURRENT_REQUESTS:-4}"}},
+		{"docker-compose.rocm.yml", []string{"speech:", "dockerfile: Dockerfile.rocm", "EVERYAPI_TTS_DEVICE: ${EVERYAPI_TTS_DEVICE:-cpu}", "EVERYAPI_SPEECH_URL: http://speech:8189", "EVERYAPI_MAX_CONCURRENT_REQUESTS: ${EVERYAPI_MAX_CONCURRENT_REQUESTS:-4}"}},
+		{"docker-compose.macos.yml", []string{"EVERYAPI_SPEECH_URL: http://host.docker.internal:8189", "EVERYAPI_MAX_CONCURRENT_REQUESTS: ${EVERYAPI_MAX_CONCURRENT_REQUESTS:-4}"}},
+		{"docker-compose.windows.yml", []string{"speech:", "build: ./speech", "EVERYAPI_TTS_DEVICE: ${EVERYAPI_TTS_DEVICE:-cpu}", "EVERYAPI_SPEECH_URL: http://speech:8189", "EVERYAPI_MAX_CONCURRENT_REQUESTS: ${EVERYAPI_MAX_CONCURRENT_REQUESTS:-4}"}},
 	}
 	for _, test := range tests {
 		t.Run(test.file, func(t *testing.T) {
@@ -101,14 +101,20 @@ func TestSpeechRuntimeIsWiredIntoEveryAcceleratedBundle(t *testing.T) {
 	}
 }
 
-// Kokoro cannot phonemise out-of-vocabulary words without espeak-ng, and misaki pip-installs the spaCy pipeline on first use unless it is baked in. Both would surface as a failure on a live buyer request, not at build time.
+// Kokoro cannot phonemise out-of-vocabulary words without espeak-ng, Whisper needs ffmpeg to decode uploads, and misaki pip-installs the spaCy pipeline on first use unless it is baked in. Any of these gaps would surface on a live buyer request rather than at build time.
 func TestSpeechImagesBundleTheirPhonemiserAssets(t *testing.T) {
 	for _, filename := range []string{"speech/Dockerfile", "speech/Dockerfile.rocm"} {
 		contents := readPackagingFile(t, filename)
-		for _, required := range []string{"espeak-ng", "spacy download en_core_web_sm", "COPY app.py model_config.py runtime.py ."} {
+		for _, required := range []string{"espeak-ng", "ffmpeg", "spacy download en_core_web_sm", "COPY app.py model_config.py runtime.py ."} {
 			if !strings.Contains(contents, required) {
 				t.Errorf("%s is missing %q", filename, required)
 			}
+		}
+	}
+	requirements := readPackagingFile(t, "speech/requirements.txt")
+	for _, required := range []string{"transformers", "accelerate", "safetensors"} {
+		if !strings.Contains(requirements, required) {
+			t.Errorf("speech/requirements.txt is missing %q", required)
 		}
 	}
 }
@@ -166,7 +172,7 @@ func TestMacOSInstallerStartsNativeMPSSpeechRuntime(t *testing.T) {
 		}
 	}
 	helper := readPackagingFile(t, "scripts/install-macos-speech.sh")
-	for _, required := range []string{"speech/requirements-macos.txt", "com.everyapi.edge-speech.plist.in", "127.0.0.1:8189/health", "+ 1200"} {
+	for _, required := range []string{"speech/requirements-macos.txt", "com.everyapi.edge-speech.plist.in", "brew install ffmpeg", "127.0.0.1:8189/health", "+ 1200"} {
 		if !strings.Contains(helper, required) {
 			t.Errorf("native speech installer is missing %q", required)
 		}

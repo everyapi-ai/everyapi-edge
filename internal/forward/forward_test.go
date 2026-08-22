@@ -319,18 +319,98 @@ func TestHandleRejectsSpeechWhenRuntimeIsUnconfigured(t *testing.T) {
 	}
 }
 
-// The bundled speech runtime serves synthesis only, so transcription must be refused by the path whitelist.
-func TestHandleRejectsTranscriptionEvenWithSpeechRuntime(t *testing.T) {
-	speech := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Fatal("transcription must not reach the speech runtime")
+func TestHandleForwardsTranscriptionToSpeechRuntime(t *testing.T) {
+	speech := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/audio/transcriptions" {
+			t.Fatalf("path = %q, want transcription path", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"text":"hello"}`))
 	}))
 	defer speech.Close()
 
 	f := New("http://localhost:11434", "", speech.URL)
 	_, errBody := f.Handle(context.Background(), protocol.RequestBody{Path: "/v1/audio/transcriptions"}, nopSend)
-	if errBody == nil || errBody.Code != "path_not_allowed" {
-		t.Fatalf("expected path_not_allowed, got %+v", errBody)
+	if errBody != nil {
+		t.Fatalf("transcription forwarding failed: %+v", errBody)
 	}
+}
+
+func TestHandleSerializesGPUBackedRequests(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		entered <- struct{}{}
+		<-release
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+	f := New(upstream.URL, upstream.URL, upstream.URL)
+	done := make(chan struct{}, 2)
+	invoke := func(path string) {
+		defer func() { done <- struct{}{} }()
+		_, _ = f.Handle(context.Background(), protocol.RequestBody{Path: path}, nopSend)
+	}
+	go invoke("/v1/chat/completions")
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first GPU request did not reach the runtime")
+	}
+	go invoke("/v1/images/generations")
+	select {
+	case <-entered:
+		close(release)
+		<-done
+		<-done
+		t.Fatal("a second GPU request reached a runtime before the first completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	<-done
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("second GPU request did not resume after the first completed")
+	}
+	<-done
+}
+
+func TestHandleAllowsCPUTTSWhileGPURequestIsRunning(t *testing.T) {
+	releaseGPU := make(chan struct{})
+	gpuEntered := make(chan struct{}, 1)
+	gpu := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gpuEntered <- struct{}{}
+		<-releaseGPU
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer gpu.Close()
+	ttsEntered := make(chan struct{}, 1)
+	tts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		ttsEntered <- struct{}{}
+		_, _ = w.Write([]byte("audio"))
+	}))
+	defer tts.Close()
+	f := New(gpu.URL, gpu.URL, tts.URL)
+	done := make(chan struct{}, 2)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		_, _ = f.Handle(context.Background(), protocol.RequestBody{Path: "/v1/chat/completions"}, nopSend)
+	}()
+	<-gpuEntered
+	go func() {
+		defer func() { done <- struct{}{} }()
+		_, _ = f.Handle(context.Background(), protocol.RequestBody{Path: "/v1/audio/speech"}, nopSend)
+	}()
+	select {
+	case <-ttsEntered:
+	case <-time.After(time.Second):
+		close(releaseGPU)
+		t.Fatal("CPU TTS was blocked behind a GPU request")
+	}
+	close(releaseGPU)
+	<-done
+	<-done
 }
 
 func nopSend(protocol.ChunkBody) error { return nil }
