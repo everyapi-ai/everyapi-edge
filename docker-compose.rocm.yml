@@ -23,6 +23,7 @@ services:
       EVERYAPI_DIFFUSERS_MODEL: ${EVERYAPI_DIFFUSERS_MODEL:-Qwen/Qwen-Image-Edit-2511}
       EVERYAPI_VRAM_GB: ${EVERYAPI_VRAM_GB:-0}
       HF_TOKEN: ${HF_TOKEN:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-}
     devices:
       - /dev/kfd
       - /dev/dri
@@ -47,6 +48,7 @@ services:
     restart: unless-stopped
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-}
       EVERYAPI_TTS_DEVICE: ${EVERYAPI_TTS_DEVICE:-cpu}
     devices:
       - /dev/kfd
@@ -73,6 +75,7 @@ services:
     environment:
       EVERYAPI_TRANSCRIPTION_MODEL: ${EVERYAPI_TRANSCRIPTION_MODEL:-openai/whisper-small}
       HF_TOKEN: ${HF_TOKEN:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-}
     devices:
       - /dev/kfd
       - /dev/dri
@@ -97,6 +100,7 @@ services:
     restart: unless-stopped
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-}
     devices:
       - /dev/kfd
       - /dev/dri
@@ -133,6 +137,7 @@ services:
     restart: unless-stopped
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-}
     devices:
       - /dev/kfd
       - /dev/dri

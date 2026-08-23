@@ -54,6 +54,23 @@ func TestImageRuntimeComposeProfilesMatchHostAccelerators(t *testing.T) {
 	}
 }
 
+// Every runtime that pulls weights from Hugging Face has to be reachable from a network that cannot reach huggingface.co. On such a node the container starts, serves /health, and sits at {"status":"warming"} forever while the real cause — [Errno 101] Network is unreachable — stays buried in its logs; a node whose models are already cached keeps working, so the gap only surfaces on a fresh node or a newly added runtime. `HF_ENDPOINT` is the single switch that redirects all of them, so it travels with `HF_TOKEN` rather than being remembered per service.
+func TestHuggingFaceRuntimesAcceptAMirrorEndpoint(t *testing.T) {
+	for _, file := range []string{"docker-compose.yml", "docker-compose.rocm.yml", "docker-compose.windows.yml"} {
+		t.Run(file, func(t *testing.T) {
+			contents := readPackagingFile(t, file)
+			tokens := strings.Count(contents, "HF_TOKEN: ${HF_TOKEN:-}")
+			if tokens == 0 {
+				t.Fatalf("%s declares no Hugging Face runtime; this test is watching the wrong file", file)
+			}
+			endpoints := strings.Count(contents, "HF_ENDPOINT: ${HF_ENDPOINT:-}")
+			if endpoints != tokens {
+				t.Errorf("%s passes HF_TOKEN to %d services but HF_ENDPOINT to %d; a runtime without the mirror hangs at warming on a network that cannot reach huggingface.co", file, tokens, endpoints)
+			}
+		})
+	}
+}
+
 func TestAgentMountsConfiguredOllamaStorageInContainer(t *testing.T) {
 	tests := []struct {
 		file  string

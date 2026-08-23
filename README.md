@@ -191,6 +191,25 @@ nvidia/cuda:12.0.0-base nvidia-smi` is the canonical check. If
 that doesn't work, the bundle won't either; fix the host's
 nvidia-container-toolkit before debugging the agent.
 
+**A runtime stays `warming` forever** — `diffusers`, `speech`,
+`transcription`, `video` and `rerank` fetch their weights from
+Hugging Face on first start, so on a network that cannot reach
+`huggingface.co` the container comes up, serves `/health`, and
+sits at `{"status":"warming"}` indefinitely. The real cause is
+buried in `docker compose logs <service>` as
+`[Errno 101] Network is unreachable`, and nothing in the health
+response points at it. Set a mirror in `.env` and restart the
+runtime:
+
+```
+HF_ENDPOINT=https://hf-mirror.com
+```
+
+Every runtime service already passes `HF_ENDPOINT` through, so one
+line covers all of them. A node whose models are already in the
+mounted cache keeps working without it, which is why this only
+shows up on a fresh node or a newly added runtime.
+
 **Identity loss** — if `./data/agent/identity.json` gets deleted, choose **Recover identity** for the existing node in the seller dashboard and run the displayed command on that node within 15 minutes. The one-time recovery token authorizes the installer to create a new local identity while preserving the node, channel, models, and history; once the new identity connects, the old private key is rejected. If the recovery connection fails, the installer restores the previous local identity backup when one exists.
 
 ## What does the agent NOT do?
