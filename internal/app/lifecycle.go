@@ -34,12 +34,13 @@ type Reconnector struct {
 func (r Reconnector) Run(ctx context.Context, registrationToken string, factory SessionFactory) error {
 	backoff := time.Second
 	reconnectAttempt := 0
+	attemptToken := registrationToken
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		call(r.Hooks.Connecting)
-		session, err := factory(ctx, registrationToken)
+		session, err := factory(ctx, attemptToken)
 		if err != nil {
 			return err
 		}
@@ -51,6 +52,14 @@ func (r Reconnector) Run(ctx context.Context, registrationToken string, factory 
 		welcomed := session.WelcomeReceived()
 		if welcomed {
 			registrationToken = ""
+			attemptToken = ""
+		} else if registrationToken != "" {
+			// Auth may have consumed the one-shot token even when the Welcome was lost in transit. Try the registered identity next; if that also fails, restore the still-pending token so a pre-consumption network failure cannot discard a valid registration or rekey credential.
+			if attemptToken == "" {
+				attemptToken = registrationToken
+			} else {
+				attemptToken = ""
+			}
 		}
 		if runErr == nil || errors.Is(runErr, context.Canceled) {
 			return runErr

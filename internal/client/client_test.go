@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -25,6 +26,129 @@ import (
 
 func testFrame() protocol.Frame {
 	return protocol.Frame{Type: protocol.FrameLog, Body: []byte(`{"msg":"x"}`)}
+}
+
+type readDeadlineRecordingConn struct {
+	net.Conn
+	events chan time.Time
+}
+
+func (c *readDeadlineRecordingConn) SetReadDeadline(deadline time.Time) error {
+	if err := c.Conn.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	c.events <- deadline
+	return nil
+}
+
+func TestReaderLoopRefreshesDeadlineOnlyAfterValidEnvelope(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	serverConnReady := make(chan *websocket.Conn, 1)
+	releaseServer := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnReady <- conn
+		<-releaseServer
+	}))
+
+	deadlineEvents := make(chan time.Time, 16)
+	dialer := websocket.Dialer{NetDialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &readDeadlineRecordingConn{Conn: conn, events: deadlineEvents}, nil
+	}}
+	clientConn, _, err := dialer.Dial(strings.Replace(srv.URL, "http://", "ws://", 1), nil)
+	if err != nil {
+		close(releaseServer)
+		srv.Close()
+		t.Fatalf("dial websocket: %v", err)
+	}
+	serverConn := <-serverConnReady
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		cancel()
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+		close(releaseServer)
+		srv.Close()
+	}()
+
+	for len(deadlineEvents) > 0 {
+		<-deadlineEvents
+	}
+	client := newTestClient(t)
+	client.conn = clientConn
+	client.cfg.Log = func(_, _ string) {}
+	readerDone := make(chan error, 1)
+	go func() { readerDone <- client.readerLoop(ctx) }()
+	select {
+	case <-deadlineEvents:
+	case <-time.After(time.Second):
+		t.Fatal("reader loop did not install its initial read deadline")
+	}
+
+	pongReceived := make(chan string, 2)
+	serverConn.SetPongHandler(func(message string) error {
+		pongReceived <- message
+		return nil
+	})
+	go func() {
+		_, _, _ = serverConn.ReadMessage()
+	}()
+	requireWrite := func(messageType int, payload []byte) {
+		t.Helper()
+		if err := serverConn.WriteMessage(messageType, payload); err != nil {
+			t.Fatalf("write websocket message: %v", err)
+		}
+	}
+	requireWrite(websocket.TextMessage, []byte(`{"type":`))
+	requireWrite(websocket.PingMessage, []byte("malformed-agent-reader-barrier"))
+	select {
+	case message := <-pongReceived:
+		if message != "malformed-agent-reader-barrier" {
+			t.Fatalf("pong barrier = %q", message)
+		}
+	case err := <-readerDone:
+		t.Fatalf("reader exited after one malformed envelope: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("reader did not continue after the malformed envelope")
+	}
+	select {
+	case deadline := <-deadlineEvents:
+		t.Fatalf("malformed envelope refreshed read deadline to %s", deadline)
+	default:
+	}
+	requireWrite(websocket.TextMessage, []byte(`{}`))
+	requireWrite(websocket.PingMessage, []byte("missing-type-agent-reader-barrier"))
+	select {
+	case message := <-pongReceived:
+		if message != "missing-type-agent-reader-barrier" {
+			t.Fatalf("pong barrier = %q", message)
+		}
+	case err := <-readerDone:
+		t.Fatalf("reader exited after an envelope without a type: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("reader did not continue after the envelope without a type")
+	}
+	select {
+	case deadline := <-deadlineEvents:
+		t.Fatalf("envelope without a type refreshed read deadline to %s", deadline)
+	default:
+	}
+
+	requireWrite(websocket.TextMessage, []byte(`{"type":"future_gateway_frame"}`))
+	select {
+	case <-deadlineEvents:
+	case err := <-readerDone:
+		t.Fatalf("reader exited after a valid future envelope: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("valid future envelope did not refresh the read deadline")
+	}
 }
 
 func TestMetadataRefreshEndsAnAuthenticatedSession(t *testing.T) {
@@ -185,6 +309,115 @@ func TestRunAssemblesChunkedMultipartRequest(t *testing.T) {
 	}
 }
 
+func TestRunDropsRequestsCanceledBeforeTheirQueuedFramesArrive(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	pongReceived := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		welcomeBody, err := json.Marshal(protocol.WelcomeBody{SessionID: "cancel-overtake", ProtocolVersion: protocol.ProtocolVersion})
+		if err != nil || conn.WriteJSON(protocol.Frame{Type: protocol.FrameWelcome, Body: welcomeBody}) != nil {
+			return
+		}
+		inlineBody, err := json.Marshal(protocol.RequestBody{Method: http.MethodPost, Path: "/v1/chat/completions", Body: []byte(`{"model":"qwen3"}`)})
+		if err != nil {
+			return
+		}
+		chunkedBody := []byte("binary-image-edit")
+		startBody, err := json.Marshal(protocol.RequestStartBody{Method: http.MethodPost, Path: "/v1/images/edits", Headers: map[string]string{"Content-Type": "application/octet-stream"}, BodySize: int64(len(chunkedBody))})
+		if err != nil {
+			return
+		}
+		bodyChunk, err := json.Marshal(protocol.RequestBodyChunk{Bytes: base64.StdEncoding.EncodeToString(chunkedBody)})
+		if err != nil {
+			return
+		}
+		frames := []protocol.Frame{
+			{Type: protocol.FrameRequestCancel, ID: "inline-canceled"},
+			{Type: protocol.FrameRequest, ID: "inline-canceled", Body: inlineBody},
+			{Type: protocol.FrameRequestCancel, ID: "chunked-canceled"},
+			{Type: protocol.FrameRequestStart, ID: "chunked-canceled", Body: startBody},
+			{Type: protocol.FrameRequestBody, ID: "chunked-canceled", Body: bodyChunk},
+			{Type: protocol.FrameRequestEnd, ID: "chunked-canceled", Body: []byte(`{}`)},
+		}
+		for _, frame := range frames {
+			if err := conn.WriteJSON(frame); err != nil {
+				return
+			}
+		}
+		conn.SetPongHandler(func(message string) error {
+			if message == "cancel-overtake-barrier" {
+				select {
+				case pongReceived <- struct{}{}:
+				default:
+				}
+			}
+			return nil
+		})
+		if err := conn.WriteControl(websocket.PingMessage, []byte("cancel-overtake-barrier"), time.Now().Add(time.Second)); err != nil {
+			return
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	handlerCalls := make(chan string, 2)
+	client, err := New(Config{
+		GatewayURL:        srv.URL,
+		NodeID:            1,
+		RegistrationToken: "tok",
+		Identity:          identity.Decoded{Public: pub, Private: priv},
+		Handler: func(_ context.Context, request protocol.RequestBody, _ func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
+			handlerCalls <- request.Path
+			return protocol.DoneBody{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- client.Run(ctx) }()
+
+	select {
+	case <-pongReceived:
+	case err := <-runErr:
+		t.Fatalf("Run returned before the ordered frame barrier: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent did not process the ordered frame barrier")
+	}
+	client.wg.Wait()
+	select {
+	case path := <-handlerCalls:
+		t.Fatalf("request canceled before arrival still reached handler: %s", path)
+	default:
+	}
+	cancel()
+	select {
+	case err := <-runErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not stop after test cancellation")
+	}
+}
+
 func TestExpiredRequestBodiesDoNotExhaustUploadSlots(t *testing.T) {
 	c := newTestClient(t)
 	now := time.Unix(1_700_000_000, 0)
@@ -200,6 +433,68 @@ func TestExpiredRequestBodiesDoNotExhaustUploadSlots(t *testing.T) {
 	c.startRequestBody(protocol.Frame{Type: protocol.FrameRequestStart, ID: "fresh", Body: []byte(`{"method":"POST","path":"/v1/images/edits","body_size":1}`)})
 	if len(c.requestBodies) != 1 || c.requestBodies["fresh"] == nil {
 		t.Fatalf("expired uploads were not reclaimed: %#v", c.requestBodies)
+	}
+}
+
+func TestCanceledRequestTombstonesCoverGatewayQueueReorderingWindow(t *testing.T) {
+	c := newTestClient(t)
+	now := time.Unix(1_700_000_000, 0)
+	c.now = func() time.Time { return now }
+	c.cancelRequest("delayed-cancel")
+	now = now.Add(requestCancellationReorderWindow + time.Second)
+	c.expireRequestBodies(now)
+	if err := c.dispatch(context.Background(), protocol.Frame{Type: protocol.FrameRequest, ID: "delayed-cancel", Body: []byte(`{"method":"POST","path":"/v1/chat/completions"}`)}); err != nil {
+		t.Fatalf("dispatch inside gateway reordering window: %v", err)
+	}
+	c.requestMu.Lock()
+	active := c.activeRequests["delayed-cancel"] != nil
+	c.requestMu.Unlock()
+	if active {
+		t.Fatal("cancellation tombstone expired while its request could still be queued at the gateway")
+	}
+}
+
+func TestCanceledRequestTombstonesExpireAfterGatewayQueueReorderingWindow(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	c := newCappedClient(t, 1, started, release)
+	now := time.Unix(1_700_000_000, 0)
+	c.now = func() time.Time { return now }
+	c.cancelRequest("expired-cancel")
+	now = now.Add(requestCancellationTombstoneTTL + time.Second)
+	c.expireRequestBodies(now)
+	if err := c.dispatch(context.Background(), protocol.Frame{Type: protocol.FrameRequest, ID: "expired-cancel", Body: []byte(`{"method":"POST","path":"/v1/chat/completions"}`)}); err != nil {
+		t.Fatalf("dispatch after tombstone expiry: %v", err)
+	}
+	c.requestMu.Lock()
+	active := c.activeRequests["expired-cancel"] != nil
+	c.requestMu.Unlock()
+	if !active {
+		t.Fatal("expired cancellation tombstone still suppressed a later request")
+	}
+	close(release)
+	c.wg.Wait()
+}
+
+func TestCanceledRequestTombstonesFailClosedAtCapacity(t *testing.T) {
+	c := newTestClient(t)
+	for i := 0; i <= maxCanceledRequestTombstones; i++ {
+		c.cancelRequest(fmt.Sprintf("early-cancel-%d", i))
+	}
+	select {
+	case <-c.done:
+	default:
+		t.Fatal("session remained open after cancellation tombstones exceeded their safe bound")
+	}
+}
+
+func TestCanceledRequestTombstonesRejectOversizedIDs(t *testing.T) {
+	c := newTestClient(t)
+	c.cancelRequest(strings.Repeat("x", maxCanceledRequestIDBytes+1))
+	select {
+	case <-c.done:
+	default:
+		t.Fatal("session remained open after an oversized cancellation id")
 	}
 }
 
@@ -337,6 +632,69 @@ func TestFetchChallengeErrorDoesNotIncludeRemoteBody(t *testing.T) {
 func TestUnexpectedHandshakeFrameErrorIsFixedText(t *testing.T) {
 	if got := unexpectedHandshakeFrameError().Error(); got != "unexpected gateway handshake frame" {
 		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestConnectAndAuthValidatesWelcomeBody(t *testing.T) {
+	tests := []struct {
+		name          string
+		frameType     protocol.FrameType
+		body          json.RawMessage
+		wantError     string
+		wantConnected bool
+		wantWelcomed  bool
+	}{
+		{name: "unexpected frame", frameType: protocol.FrameHeartbeat, wantError: "unexpected gateway handshake frame"},
+		{name: "malformed body", frameType: protocol.FrameWelcome, body: json.RawMessage(`"not-an-object"`), wantError: "decode welcome body"},
+		{name: "missing session id", frameType: protocol.FrameWelcome, body: json.RawMessage(`{"protocol_version":"1.3"}`), wantError: "welcome missing required fields"},
+		{name: "incompatible major", frameType: protocol.FrameWelcome, body: json.RawMessage(`{"session_id":"session-2","protocol_version":"2.0"}`), wantError: "gateway protocol version"},
+		{name: "future minor", frameType: protocol.FrameWelcome, body: json.RawMessage(`{"session_id":"session-1","protocol_version":"1.99"}`), wantConnected: true, wantWelcomed: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upgrader := websocket.Upgrader{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+				welcome, err := json.Marshal(protocol.Frame{Type: test.frameType, Body: test.body})
+				if err != nil {
+					return
+				}
+				_ = conn.WriteMessage(websocket.TextMessage, welcome)
+			}))
+			defer srv.Close()
+
+			pub, priv, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				t.Fatalf("generate identity: %v", err)
+			}
+			connected := false
+			client, err := New(Config{GatewayURL: srv.URL, NodeID: 1, RegistrationToken: "one-shot", Identity: identity.Decoded{Public: pub, Private: priv}, OnConnected: func() { connected = true }})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(client.closeConn)
+			err = client.connectAndAuth(context.Background())
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("connectAndAuth: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("connectAndAuth error = %v, want %q", err, test.wantError)
+			}
+			if connected != test.wantConnected {
+				t.Fatalf("OnConnected called = %t, want %t", connected, test.wantConnected)
+			}
+			if client.WelcomeReceived() != test.wantWelcomed {
+				t.Fatalf("WelcomeReceived = %t, want %t", client.WelcomeReceived(), test.wantWelcomed)
+			}
+		})
 	}
 }
 

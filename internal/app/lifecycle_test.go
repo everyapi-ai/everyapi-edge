@@ -21,9 +21,10 @@ func (s *fakeSession) Run(context.Context) error {
 
 func (s *fakeSession) WelcomeReceived() bool { return s.welcome }
 
-func TestReconnectorBurnsRegistrationTokenOnlyAfterWelcome(t *testing.T) {
+func TestReconnectorAlternatesIdentityUntilRegistrationIsConfirmed(t *testing.T) {
 	transient := errors.New("gateway unavailable")
 	sessions := []*fakeSession{
+		{err: transient},
 		{err: transient},
 		{err: transient, welcome: true},
 		{err: context.Canceled, welcome: true},
@@ -44,10 +45,10 @@ func TestReconnectorBurnsRegistrationTokenOnlyAfterWelcome(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("run error = %v", err)
 	}
-	if !reflect.DeepEqual(tokens, []string{"one-shot", "one-shot", ""}) {
+	if !reflect.DeepEqual(tokens, []string{"one-shot", "", "one-shot", ""}) {
 		t.Fatalf("tokens = %#v", tokens)
 	}
-	if len(waits) != 2 {
+	if len(waits) != 3 {
 		t.Fatalf("wait count = %d", len(waits))
 	}
 }

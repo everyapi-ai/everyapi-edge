@@ -573,7 +573,7 @@ func mergeModels(groups ...[]string) []string {
 
 // runWithReconnect drives one client lifecycle after another with exponential backoff capped at 30s. The reconnect loop is here (not inside Client) so a future test can stub the client without also stubbing the backoff behavior.
 //
-// First connect uses the RegistrationToken from config. After a successful Welcome the token is cleared from the client's config so subsequent reconnects fall through to the Ed25519 signature path — the token is one-shot on the server side and reusing it would just produce "registration token not recognised" errors.
+// First connect uses the RegistrationToken from config. If that attempt ends before Welcome, the next attempt probes the Ed25519 identity in case the server consumed the token but its acceptance frame was lost; a failed identity probe restores the token for the following attempt. A valid, protocol-compatible Welcome permanently clears the token because the server-side credential is one-shot.
 func runWithReconnect(
 	ctx context.Context,
 	cfg config.Config,

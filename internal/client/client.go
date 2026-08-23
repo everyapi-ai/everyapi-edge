@@ -132,19 +132,22 @@ type Client struct {
 	poolLimits map[protocol.RuntimeKind]int
 	sem        chan struct{}
 	controlSem chan struct{}
-	// wg tracks in-flight handlers so Run can drain them before returning — combined with session-ctx cancellation, no handler (or its upstream HTTP call) outlives the session it belongs to.
+	// wg tracks session-owned work so Run can drain it before returning — combined with session-ctx cancellation, no handler, auto-pull, remote update, or upstream HTTP call outlives the session it belongs to.
 	wg sync.WaitGroup
 	// inflight is the live handler count, surfaced to the gateway in each heartbeat (HeartbeatBody.ActiveReqs) so it has back-pressure visibility into how loaded this node is.
 	inflight atomic.Int64
 	// vramUsedBytes is the latest bounded runtime telemetry snapshot. Admission reads it without a network round trip so resource policy does not add latency to every buyer request.
 	vramUsedBytes atomic.Int64
 
-	// welcomeReceived flips true after the gateway accepts the Auth frame and we successfully parse a Welcome back. The reconnect loop in main.go reads this via WelcomeReceived() to decide whether the in-process RegistrationToken has been consumed server-side — without that gate, an Auth rejection (token already used, wrong node id, signature failure) would still burn the token in main's outer loop and brick the agent.
-	welcomeReceived      atomic.Bool
-	requestMu            sync.Mutex
-	requestBodies        map[string]*requestBodyAssembly
-	requestBodyBytes     int64
-	activeRequests       map[string]*activeRequest
+	// welcomeReceived flips true only after a valid, protocol-compatible Welcome. The reconnect loop uses it to retire the one-shot token and reset backoff; a pre-Welcome failure alternates token and identity attempts so a consumed token can still recover without treating an invalid acceptance body as a stable session.
+	welcomeReceived   atomic.Bool
+	recommendedModels []string
+	requestMu         sync.Mutex
+	requestBodies     map[string]*requestBodyAssembly
+	requestBodyBytes  int64
+	activeRequests    map[string]*activeRequest
+	// canceledRequests retains bounded, expiring tombstones only when a high-priority request_cancel overtakes its still-queued request frame, preventing that late frame from starting work after the buyer has gone away.
+	canceledRequests     map[string]time.Time
 	metadataChanged      chan struct{}
 	now                  func() time.Time
 	runtimeStateMu       sync.Mutex
@@ -169,7 +172,7 @@ type activeRequest struct {
 	cancel context.CancelFunc
 }
 
-// WelcomeReceived reports whether this Client successfully completed the WS handshake. False until the gateway's Welcome frame is read; stays false if the connection terminated during/before Auth.
+// WelcomeReceived reports whether this Client completed the WebSocket handshake with a valid, protocol-compatible Welcome. It stays false for malformed or incompatible acceptance frames.
 func (c *Client) WelcomeReceived() bool {
 	return c.welcomeReceived.Load()
 }
@@ -195,18 +198,19 @@ func New(cfg Config) (*Client, error) {
 	}
 	pools, poolLimits := resourcePools(cfg.ResourcePolicy)
 	return &Client{
-		cfg:             cfg,
-		sendQ:           make(chan protocol.Frame, 32),
-		done:            make(chan struct{}),
-		pools:           pools,
-		poolLimits:      poolLimits,
-		sem:             pools[protocol.RuntimeText],
-		controlSem:      make(chan struct{}, controlConcurrentRequests),
-		requestBodies:   make(map[string]*requestBodyAssembly),
-		activeRequests:  make(map[string]*activeRequest),
-		metadataChanged: metadataChanged,
-		drainChanged:    make(chan struct{}),
-		now:             time.Now,
+		cfg:              cfg,
+		sendQ:            make(chan protocol.Frame, 32),
+		done:             make(chan struct{}),
+		pools:            pools,
+		poolLimits:       poolLimits,
+		sem:              pools[protocol.RuntimeText],
+		controlSem:       make(chan struct{}, controlConcurrentRequests),
+		requestBodies:    make(map[string]*requestBodyAssembly),
+		activeRequests:   make(map[string]*activeRequest),
+		canceledRequests: make(map[string]time.Time),
+		metadataChanged:  metadataChanged,
+		drainChanged:     make(chan struct{}),
+		now:              time.Now,
 		runtimeFingerprints: map[protocol.RuntimeKind]string{
 			protocol.RuntimeText:   textRuntimeFingerprint(cfg.TextModels, cfg.TextResponsesSupported),
 			protocol.RuntimeImage:  capabilityFingerprint(protocol.RuntimeImage, cfg.Meta.Capabilities),
@@ -283,12 +287,12 @@ func (c *Client) Run(ctx context.Context) error {
 		return err
 	}
 	c.log("info", "gateway session authenticated")
-	// sessionCtx cancels when Run returns for ANY reason (read error, write error, or parent cancel). In-flight handlers derive their upstream-call deadline from it, so a gateway-side disconnect aborts their HTTP work instead of leaving it to run against the local Ollama after the session is gone.
+	// sessionCtx cancels when Run returns for ANY reason (read error, write error, or parent cancel). Session-owned work derives its deadline from it, so a gateway-side disconnect aborts inference, auto-pull, and remote update requests instead of leaving them to run after the session is gone.
 	sessionCtx, cancel := context.WithCancel(ctx)
-	// readerDone closes only after readerLoop has fully returned. Shutdown MUST wait on it before wg.Wait(): every wg.Add happens on the reader goroutine (inside dispatch), so starting wg.Wait while the reader is still running races Add against Wait — either a "sync: WaitGroup misuse" panic or a Wait that returns while a freshly-spawned handler is still in flight.
+	// readerDone closes only after readerLoop has fully returned. Shutdown MUST wait on it before wg.Wait(): auto-pull is registered synchronously before Run enters select, but every later wg.Add comes from the reader goroutine while dispatching a request or update. Starting wg.Wait while the reader is still running would race those late Adds against Wait — either a "sync: WaitGroup misuse" panic or a Wait that returns while freshly-spawned session work is still in flight.
 	readerDone := make(chan struct{})
 	monitorDone := make(chan struct{})
-	// Defers run LIFO: closeConn first (close done + conn → unblock a parked ReadMessage and any parked sender), then wait for the reader to exit (after which no further wg.Add can happen), then cancel (abort in-flight upstream calls), then wg.Wait (drain handlers) so Run never returns while goroutines it spawned are still touching the connection.
+	// Defers run LIFO: closeConn first (close done + conn → unblock a parked ReadMessage and any parked sender), then wait for the reader to exit (after which no further wg.Add can happen), then cancel (abort in-flight upstream calls), then wg.Wait (drain session-owned work) so Run never returns while goroutines it spawned are still active.
 	defer c.wg.Wait()
 	defer func() { <-monitorDone }()
 	defer cancel()
@@ -308,6 +312,13 @@ func (c *Client) Run(ctx context.Context) error {
 		defer close(monitorDone)
 		c.runtimeMonitorLoop(sessionCtx)
 	}()
+	if len(c.recommendedModels) > 0 {
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.pullRecommendedModels(sessionCtx, c.recommendedModels)
+		}()
+	}
 
 	select {
 	case err := <-readErr:
@@ -407,18 +418,29 @@ func (c *Client) connectAndAuth(ctx context.Context) error {
 		_ = conn.Close()
 		return unexpectedHandshakeFrameError()
 	}
+	var welcomeBody protocol.WelcomeBody
+	if err := json.Unmarshal(welcome.Body, &welcomeBody); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("decode welcome body: %w", err)
+	}
+	if strings.TrimSpace(welcomeBody.SessionID) == "" || strings.TrimSpace(welcomeBody.ProtocolVersion) == "" {
+		_ = conn.Close()
+		return errors.New("welcome missing required fields")
+	}
+	gatewayMajor, _, hasMinor := strings.Cut(welcomeBody.ProtocolVersion, ".")
+	localMajor, _, _ := strings.Cut(protocol.ProtocolVersion, ".")
+	if !hasMinor || gatewayMajor == "" || gatewayMajor != localMajor {
+		_ = conn.Close()
+		return errors.New("gateway protocol version is incompatible")
+	}
 	// Clear the deadline — heartbeat reset takes over from here.
 	_ = conn.SetReadDeadline(time.Time{})
 
 	c.conn = conn
-	// Welcome acknowledged — the registration token (if any) has now been consumed server-side. WelcomeReceived() gates the reconnect loop's token burn so an Auth rejection earlier in the handshake (before Welcome) doesn't lose the token for retry.
 	c.welcomeReceived.Store(true)
 
-	// Auto-pull whatever the gateway says this node is missing from its owner's declared target set. Off the handshake goroutine: a pull runs for minutes to hours, and the session must start serving buyer traffic with the models already present rather than waiting.
-	var welcomeBody protocol.WelcomeBody
-	if err := json.Unmarshal(welcome.Body, &welcomeBody); err == nil && len(welcomeBody.RecommendedModels) > 0 {
-		go c.pullRecommendedModels(ctx, welcomeBody.RecommendedModels)
-	}
+	// Run starts these pulls only after it creates the session context. A pull can run for minutes to hours, but it must be canceled and drained before this Client returns so a reconnect cannot start a duplicate download from the next Welcome.
+	c.recommendedModels = append([]string(nil), welcomeBody.RecommendedModels...)
 
 	if c.cfg.OnConnected != nil {
 		c.cfg.OnConnected()
@@ -483,14 +505,17 @@ func (c *Client) readerLoop(ctx context.Context) error {
 			}
 			return fmt.Errorf("ws read: %w", err)
 		}
-		_ = c.conn.SetReadDeadline(time.Now().Add(protocol.HeartbeatTimeout))
-
 		var frame protocol.Frame
 		if err := json.Unmarshal(raw, &frame); err != nil {
-			// Malformed inbound from the gateway is a bug worth surfacing but not session-terminating.
+			// Malformed inbound from the gateway is a bug worth surfacing but not session-terminating. Do not extend the read deadline until the envelope parses: a stream of garbage must expire this unusable session so the reconnect loop can recover against a healthy gateway replica.
 			c.log("warn", "malformed inbound frame from gateway")
 			continue
 		}
+		if frame.Type == "" {
+			c.log("warn", "gateway frame is missing its type")
+			continue
+		}
+		_ = c.conn.SetReadDeadline(time.Now().Add(protocol.HeartbeatTimeout))
 		c.expireRequestBodies(c.currentTime())
 		switch frame.Type {
 		case protocol.FrameHeartbeat:
@@ -577,7 +602,9 @@ func (c *Client) handleUpdate(ctx context.Context, frame protocol.Frame) {
 		emit(protocol.UpdateStatusBody{State: protocol.UpdateStateFailed, Error: "this agent does not support remote updates"})
 		return
 	}
+	c.wg.Add(1)
 	go func() {
+		defer c.wg.Done()
 		if err := c.cfg.Update(ctx, emit); err != nil {
 			emit(protocol.UpdateStatusBody{State: protocol.UpdateStateFailed, Error: err.Error()})
 		}
@@ -602,12 +629,21 @@ var errReaderClosed = errors.New("reader closed")
 const errCodeNodeBusy = "node_busy"
 
 const (
-	requestBodyAssemblyTimeout  = 30 * time.Second
-	maxBufferedRequestBodyBytes = 64 << 20
+	requestBodyAssemblyTimeout = 30 * time.Second
+	// gatewayOutboundQueueCapacityMirror mirrors both the sendCh and controlCh capacities in backend/internal/edge/session.go; update it with those queues because request_cancel may overtake one full control queue plus one full data queue.
+	gatewayOutboundQueueCapacityMirror = 32
+	requestCancellationReorderWindow   = 2 * gatewayOutboundQueueCapacityMirror * protocol.HeartbeatInterval
+	requestCancellationTombstoneTTL    = requestCancellationReorderWindow + 80*time.Second
+	maxBufferedRequestBodyBytes        = 64 << 20
+	maxCanceledRequestTombstones       = 256
+	maxCanceledRequestIDBytes          = 256
 )
 
 // dispatch try-acquires a concurrency slot and starts a handler goroutine for an inbound Request frame. It MUST NOT block on a full pool: the WS read deadline (HeartbeatTimeout, 30s) is only refreshed by successful reads, while forwarded requests run for minutes — a reader parked here would let the deadline expire, so the next ReadMessage after a slot freed would fail with an i/o timeout and tear the whole session down (aborting every in-flight handler). Parking would also stall Disconnect-frame handling (incl. node_revoked) for the duration of the saturation. Instead, a full pool rejects the request immediately with a node_busy Error frame and the reader keeps draining; the gateway retries the buyer request on another node (see errCodeNodeBusy). Returns ctx.Err() if the session context was cancelled, errReaderClosed if closeConn fired, or nil once the frame was either handed to a handler or rejected.
 func (c *Client) dispatch(ctx context.Context, frame protocol.Frame) error {
+	if c.consumeCanceledRequest(frame.ID) {
+		return nil
+	}
 	if frame.Type == protocol.FrameControlRequest {
 		return c.startHandler(ctx, frame.ID, "", c.controlSem, controlConcurrentRequests, "control", func(requestCtx context.Context) { c.handleControl(requestCtx, frame) })
 	}
@@ -879,13 +915,59 @@ func (c *Client) cancelRequest(id string) {
 	if id == "" {
 		return
 	}
+	if len(id) > maxCanceledRequestIDBytes {
+		c.closeConn()
+		return
+	}
+	now := c.currentTime()
 	c.requestMu.Lock()
+	c.expireCanceledRequestsLocked(now)
+	assembly := c.requestBodies[id]
 	c.dropRequestBodyLocked(id)
 	active := c.activeRequests[id]
+	overflow := false
+	if assembly == nil && active == nil {
+		if c.canceledRequests == nil {
+			c.canceledRequests = make(map[string]time.Time)
+		}
+		if _, exists := c.canceledRequests[id]; !exists && len(c.canceledRequests) >= maxCanceledRequestTombstones {
+			overflow = true
+		} else {
+			c.canceledRequests[id] = now
+		}
+	}
 	c.requestMu.Unlock()
+	if overflow {
+		c.closeConn()
+		return
+	}
 	if active != nil {
 		active.cancel()
 	}
+}
+
+func (c *Client) hasCanceledRequest(id string) bool {
+	now := c.currentTime()
+	c.requestMu.Lock()
+	c.expireCanceledRequestsLocked(now)
+	_, canceled := c.canceledRequests[id]
+	if canceled {
+		c.canceledRequests[id] = now
+	}
+	c.requestMu.Unlock()
+	return canceled
+}
+
+func (c *Client) consumeCanceledRequest(id string) bool {
+	now := c.currentTime()
+	c.requestMu.Lock()
+	c.expireCanceledRequestsLocked(now)
+	_, canceled := c.canceledRequests[id]
+	if canceled {
+		delete(c.canceledRequests, id)
+	}
+	c.requestMu.Unlock()
+	return canceled
 }
 
 func (c *Client) handleRequestBody(ctx context.Context, id string, body protocol.RequestBody) {
@@ -914,6 +996,9 @@ func (c *Client) handleRequestBody(ctx context.Context, id string, body protocol
 
 func (c *Client) startRequestBody(frame protocol.Frame) {
 	if frame.ID == "" {
+		return
+	}
+	if c.hasCanceledRequest(frame.ID) {
 		return
 	}
 	var start protocol.RequestStartBody
@@ -947,6 +1032,9 @@ func (c *Client) startRequestBody(frame protocol.Frame) {
 }
 
 func (c *Client) appendRequestBody(frame protocol.Frame) {
+	if c.hasCanceledRequest(frame.ID) {
+		return
+	}
 	var chunk protocol.RequestBodyChunk
 	if err := json.Unmarshal(frame.Body, &chunk); err != nil {
 		c.requestMu.Lock()
@@ -976,6 +1064,9 @@ func (c *Client) appendRequestBody(frame protocol.Frame) {
 }
 
 func (c *Client) finishRequestBody(ctx context.Context, frame protocol.Frame) error {
+	if c.consumeCanceledRequest(frame.ID) {
+		return nil
+	}
 	c.requestMu.Lock()
 	assembly, ok := c.requestBodies[frame.ID]
 	if !ok {
@@ -1012,6 +1103,15 @@ func (c *Client) expireRequestBodiesLocked(now time.Time) {
 	for id, assembly := range c.requestBodies {
 		if now.Sub(assembly.updatedAt) > requestBodyAssemblyTimeout {
 			c.dropRequestBodyLocked(id)
+		}
+	}
+	c.expireCanceledRequestsLocked(now)
+}
+
+func (c *Client) expireCanceledRequestsLocked(now time.Time) {
+	for id, updatedAt := range c.canceledRequests {
+		if now.Sub(updatedAt) > requestCancellationTombstoneTTL {
+			delete(c.canceledRequests, id)
 		}
 	}
 }

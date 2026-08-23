@@ -2,13 +2,19 @@ package client
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
+	"github.com/everyapi-ai/everyapi-edge/internal/identity"
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 )
 
@@ -138,4 +144,84 @@ func TestPullRecommendedModelsCapsAndContinues(t *testing.T) {
 func TestPullRecommendedModelsNoOllamaURL(t *testing.T) {
 	c := &Client{cfg: Config{Log: func(string, string) {}}}
 	c.pullRecommendedModels(context.Background(), []string{"qwen3"})
+}
+
+func TestRunCancelsAutoPullBeforeReturningAfterGatewayDisconnect(t *testing.T) {
+	pullStarted := make(chan struct{})
+	releasePull := make(chan struct{})
+	ollama := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		close(pullStarted)
+		<-releasePull
+	}))
+
+	disconnect := make(chan struct{})
+	var disconnectOnce sync.Once
+	disconnectGateway := func() { disconnectOnce.Do(func() { close(disconnect) }) }
+	upgrader := websocket.Upgrader{}
+	gateway := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		conn, err := upgrader.Upgrade(response, request, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		body, err := json.Marshal(protocol.WelcomeBody{SessionID: "auto-pull-session", ProtocolVersion: protocol.ProtocolVersion, RecommendedModels: []string{"qwen3"}})
+		if err != nil {
+			return
+		}
+		if err := conn.WriteJSON(protocol.Frame{Type: protocol.FrameWelcome, Body: body}); err != nil {
+			return
+		}
+		<-disconnect
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+	}))
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancelRun()
+		disconnectGateway()
+		close(releasePull)
+		gateway.CloseClientConnections()
+		gateway.Close()
+		ollama.CloseClientConnections()
+		ollama.Close()
+	})
+	public, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	pullStopped := make(chan struct{})
+	var pullStoppedOnce sync.Once
+	client, err := New(Config{GatewayURL: gateway.URL, OllamaURL: ollama.URL, NodeID: 1, RegistrationToken: "one-shot", Identity: identity.Decoded{Public: public, Private: private}, Log: func(_, message string) {
+		if strings.Contains(message, "auto-pull: qwen3 failed:") {
+			pullStoppedOnce.Do(func() { close(pullStopped) })
+		}
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- client.Run(runCtx) }()
+
+	select {
+	case <-pullStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("auto-pull did not start")
+	}
+	disconnectGateway()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after gateway disconnect")
+	}
+	select {
+	case <-pullStopped:
+	default:
+		t.Fatal("Run returned before its session auto-pull stopped")
+	}
 }

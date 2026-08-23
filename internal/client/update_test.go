@@ -2,11 +2,18 @@ package client
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
+	"github.com/everyapi-ai/everyapi-edge/internal/identity"
 	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 )
 
@@ -51,6 +58,109 @@ func TestHandleUpdateRejectsUnsupportedAction(t *testing.T) {
 	}
 	if called {
 		t.Fatal("unsupported update action reached updater")
+	}
+}
+
+func TestRunCancelsRemoteUpdateBeforeReturningAfterGatewayDisconnect(t *testing.T) {
+	updateStarted := make(chan struct{})
+	updateCanceled := make(chan struct{})
+	updateStopped := make(chan struct{})
+	releaseUpdate := make(chan struct{})
+	var releaseUpdateOnce sync.Once
+	release := func() { releaseUpdateOnce.Do(func() { close(releaseUpdate) }) }
+	disconnect := make(chan struct{})
+	var disconnectOnce sync.Once
+	disconnectGateway := func() { disconnectOnce.Do(func() { close(disconnect) }) }
+
+	upgrader := websocket.Upgrader{}
+	gateway := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		conn, err := upgrader.Upgrade(response, request, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		welcomeBody, err := json.Marshal(protocol.WelcomeBody{SessionID: "remote-update-session", ProtocolVersion: protocol.ProtocolVersion})
+		if err != nil {
+			return
+		}
+		if err := conn.WriteJSON(protocol.Frame{Type: protocol.FrameWelcome, Body: welcomeBody}); err != nil {
+			return
+		}
+		updateBody, err := json.Marshal(protocol.UpdateBody{Action: protocol.UpdateActionLatest})
+		if err != nil {
+			return
+		}
+		if err := conn.WriteJSON(protocol.Frame{Type: protocol.FrameUpdate, ID: "update-1", Body: updateBody}); err != nil {
+			return
+		}
+		<-disconnect
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+	}))
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancelRun()
+		disconnectGateway()
+		release()
+		gateway.CloseClientConnections()
+		gateway.Close()
+	})
+	public, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	client, err := New(Config{
+		GatewayURL:        gateway.URL,
+		NodeID:            1,
+		RegistrationToken: "one-shot",
+		Identity:          identity.Decoded{Public: public, Private: private},
+		Update: func(ctx context.Context, _ func(protocol.UpdateStatusBody)) error {
+			defer close(updateStopped)
+			close(updateStarted)
+			<-ctx.Done()
+			close(updateCanceled)
+			<-releaseUpdate
+			return ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- client.Run(runCtx) }()
+
+	select {
+	case <-updateStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("remote update did not start")
+	}
+	disconnectGateway()
+	select {
+	case <-updateCanceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("gateway disconnect did not cancel remote update")
+	}
+	select {
+	case err := <-runErr:
+		t.Fatalf("Run returned before its session remote update stopped: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after remote update stopped")
+	}
+	select {
+	case <-updateStopped:
+	default:
+		t.Fatal("Run returned before the remote update callback exited")
 	}
 }
 
