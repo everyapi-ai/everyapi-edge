@@ -197,14 +197,24 @@ const SpeechPlayground = ({ capability }: { capability?: Capability }) => {
   const { t } = useTranslation()
   const model = capability?.models[0] ?? ''
   const formats = capability?.limits.formats.length ? capability.limits.formats : ['mp3', 'wav']
+  const voices = capability?.limits.voices ?? []
+  const languages = capability?.limits.languages ?? []
   const [input, setInput] = useState('')
-  const [voice, setVoice] = useState('af_heart')
+  const [language, setLanguage] = useState('')
+  const [voice, setVoice] = useState('')
   const [format, setFormat] = useState(formats[0] ?? 'mp3')
   const [audio, setAudio] = useState('')
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
   const controller = useRef<AbortController | null>(null)
   useEffect(() => () => controller.current?.abort(), [])
+  useEffect(() => {
+    if (!languages.includes(language)) setLanguage(languages[0] ?? '')
+  }, [language, languages])
+  const languageVoices = voices.filter((candidate) => candidate.startsWith(language))
+  useEffect(() => {
+    if (!languageVoices.includes(voice)) setVoice(languageVoices[0] ?? voices[0] ?? '')
+  }, [languageVoices, voice, voices])
   useEffect(
     () => () => {
       if (audio) URL.revokeObjectURL(audio)
@@ -249,13 +259,27 @@ const SpeechPlayground = ({ capability }: { capability?: Capability }) => {
           placeholder={t('playground.speech.input')}
           className='min-h-32 rounded-md border border-line-2 bg-surface-1 p-3 text-sm outline-none focus:border-accent'
         />
-        <div className='grid gap-3 sm:grid-cols-2'>
-          <input
+        <div className='grid gap-3 sm:grid-cols-3'>
+          <select
+            value={language}
+            onChange={(event) => setLanguage(event.target.value)}
+            aria-label={t('playground.speech.language')}
+            className='rounded-md border border-line-2 bg-surface-1 px-3 py-2 text-sm'
+          >
+            {languages.map((value) => (
+              <option key={value}>{value}</option>
+            ))}
+          </select>
+          <select
             value={voice}
             onChange={(event) => setVoice(event.target.value)}
             aria-label={t('playground.speech.voice')}
             className='rounded-md border border-line-2 bg-surface-1 px-3 py-2 text-sm'
-          />
+          >
+            {languageVoices.map((value) => (
+              <option key={value}>{value}</option>
+            ))}
+          </select>
           <select
             value={format}
             onChange={(event) => setFormat(event.target.value)}

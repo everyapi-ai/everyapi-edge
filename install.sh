@@ -56,6 +56,9 @@ GPU=""
 MODEL=""
 MODEL_EXPLICIT=0
 FORCE=0
+UNINSTALL=0
+PURGE_MODELS=0
+REKEY_MODE=0
 # A node is a long-lived service, so it belongs at a stable path rather than
 # wherever the operator happened to be standing. The old "./everyapi-edge"
 # default planted a running agent — .env with node credentials, data/ with the
@@ -101,6 +104,8 @@ while [ $# -gt 0 ]; do
     --model)    MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
     --dir)      INSTALL_DIR="$2"; shift 2 ;;
     --force)    FORCE=1; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --purge-models) PURGE_MODELS=1; shift ;;
     -h|--help)
       sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
       exit 0
@@ -111,6 +116,12 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$PURGE_MODELS" -eq 1 ] && [ "$UNINSTALL" -ne 1 ]; then
+  err "--purge-models requires --uninstall"
+  exit 1
+fi
+case "$TOKEN" in edgerekey_*) REKEY_MODE=1 ;; esac
 
 # ----- Validate untrusted CLI values ----------------------------------------
 
@@ -159,6 +170,25 @@ case "$CANON_TARGET" in
     exit 1
     ;;
 esac
+
+safe_delete_tree() {
+  local target="$1"
+  [ -n "$target" ] && [ "$target" != "/" ] && [ "$target" != "${HOME:-}" ] || {
+    err "refusing unsafe delete target: $target"
+    return 1
+  }
+  [ -e "$target" ] || return 0
+  find -P "$target" -depth -delete
+}
+
+if [ "$UNINSTALL" -eq 1 ] && [ ! -d "$INSTALL_DIR" ]; then
+  if [ "$PURGE_MODELS" -eq 1 ] && [ -n "${HOME:-}" ]; then
+    MODEL_ROOT="$HOME/.everyapi/edge"
+    safe_delete_tree "$MODEL_ROOT"
+  fi
+  ok "EveryAPI Edge is already uninstalled"
+  exit 0
+fi
 
 # Refuse to plant a running service inside somebody's source checkout. The
 # checks above only reject the cwd ITSELF, so `cd ~/src/some-repo && curl … |
@@ -216,6 +246,27 @@ if [ -d "$INSTALL_DIR" ]; then
       ;;
   esac
   EXISTING_INSTALL=1
+  if [ "$UNINSTALL" -eq 1 ]; then
+    if ! command -v docker >/dev/null 2>&1; then
+      err "docker is required but not installed"
+      exit 1
+    fi
+    for compose_file in docker-compose.yml docker-compose.rocm.yml docker-compose.macos.yml docker-compose.windows.yml; do
+      if [ -f "$INSTALL_DIR/$compose_file" ]; then
+        (cd "$INSTALL_DIR" && docker compose -f "$compose_file" down --remove-orphans) || warn "could not stop services from $compose_file; continuing bounded uninstall"
+      fi
+    done
+    safe_delete_tree "$CANON_TARGET"
+    if [ "$PURGE_MODELS" -eq 1 ]; then
+      MODEL_ROOT="$HOME/.everyapi/edge"
+      safe_delete_tree "$MODEL_ROOT"
+      ok "removed the managed model library"
+    else
+      ok "preserved models at $HOME/.everyapi/edge"
+    fi
+    ok "EveryAPI Edge uninstalled"
+    exit 0
+  fi
   if [ -z "$NODE_ID" ]; then
     NODE_ID=$(read_existing_env_value EVERYAPI_NODE_ID)
   fi
@@ -231,17 +282,28 @@ if [ -d "$INSTALL_DIR" ]; then
   if [ -z "$TOKEN" ]; then
     TOKEN=$(read_existing_env_value EVERYAPI_REGISTRATION_TOKEN)
   fi
+  case "$TOKEN" in edgerekey_*) REKEY_MODE=1 ;; esac
   COUNTRY=$(read_existing_env_value EVERYAPI_COUNTRY)
   WORKLOADS=$(read_existing_env_value EVERYAPI_WORKLOADS)
   CONSOLE_PORT=$(read_existing_env_value EVERYAPI_CONSOLE_PORT)
   CONSOLE_TOKEN=$(read_existing_env_value EVERYAPI_CONSOLE_TOKEN)
   if [ -s "$INSTALL_DIR/data/agent/identity.json" ]; then
-    UPGRADE_MODE=1
-    # A persisted identity is authoritative for reconnects. Older installs or
-    # interrupted cleanup may leave a now-consumed token in .env; forwarding
-    # it would incorrectly force the agent back through first registration.
-    TOKEN=""
-    info "found the existing node identity — no new registration token is required"
+    if [ "$REKEY_MODE" -eq 1 ]; then
+	  if [ -f "$INSTALL_DIR/data/agent/identity.json.rekey-backup" ]; then
+		rm -f "$INSTALL_DIR/data/agent/identity.json"
+	  else
+		mv "$INSTALL_DIR/data/agent/identity.json" "$INSTALL_DIR/data/agent/identity.json.rekey-backup"
+	  fi
+      rm -f "$INSTALL_DIR/data/agent/.revoked"
+      info "secured the old identity backup; the agent will register a fresh key"
+    else
+      UPGRADE_MODE=1
+      # A persisted identity is authoritative for reconnects. Older installs or
+      # interrupted cleanup may leave a now-consumed token in .env; forwarding
+      # it would incorrectly force the agent back through first registration.
+      TOKEN=""
+      info "found the existing node identity — no new registration token is required"
+    fi
   fi
 fi
 
@@ -364,6 +426,39 @@ ensure_macos_speech() {
   info "installing the native Apple MPS speech runtime…"
   "$helper" "$HOME/.everyapi/edge/speech"
   ok "native speech runtime is ready"
+}
+
+ensure_macos_transcription() {
+  local helper="./scripts/install-macos-transcription.sh"
+  if [ ! -x "$helper" ]; then
+    err "the verified bundle is missing $helper"
+    exit 1
+  fi
+  info "installing the native Apple MPS transcription runtime…"
+  "$helper" "$HOME/.everyapi/edge/transcription"
+  ok "native transcription runtime is ready"
+}
+
+ensure_macos_video() {
+  local helper="./scripts/install-macos-video.sh"
+  if [ ! -x "$helper" ]; then
+    err "the verified bundle is missing $helper"
+    exit 1
+  fi
+  info "installing the native Apple MPS video runtime…"
+  "$helper" "$HOME/.everyapi/edge/video"
+  ok "native video runtime is ready"
+}
+
+ensure_macos_rerank() {
+  local helper="./scripts/install-macos-rerank.sh"
+  if [ ! -x "$helper" ]; then
+    err "the verified bundle is missing $helper"
+    exit 1
+  fi
+  info "installing the native Apple MPS rerank runtime…"
+  "$helper" "$HOME/.everyapi/edge/rerank"
+  ok "native rerank runtime is ready"
 }
 
 detect_macos_memory_gb() {
@@ -650,8 +745,8 @@ case "$TOKEN" in
       exit 1
     fi
     ;;
-  edgert_*)
-    if [[ ! "$TOKEN" =~ ^edgert_[A-Za-z0-9_-]+$ ]]; then
+  edgert_*|edgerekey_*)
+    if [[ ! "$TOKEN" =~ ^(edgert|edgerekey)_[A-Za-z0-9_-]+$ ]]; then
       err "token contains invalid characters"
       exit 1
     fi
@@ -702,7 +797,8 @@ fi
 # or fails to start (no half-populated .env that leaves the agent
 # unable to auth but containers nonetheless up and looping).
 info "writing .env"
-mkdir -p "$HOME/.everyapi/edge"
+mkdir -p "$HOME/.everyapi/edge" "$HOME/.everyapi/edge/rerank"
+mkdir -p data/render-workflows data/render
 TMP_ENV="$(mktemp .env.XXXXXX)"
 cat > "$TMP_ENV" <<EOF
 EVERYAPI_GATEWAY=$GATEWAY
@@ -715,6 +811,7 @@ EVERYAPI_PLATFORM=$HOST_PLATFORM
 EVERYAPI_MODEL_PATH=$HOME/.everyapi/edge
 EVERYAPI_COUNTRY=$COUNTRY
 EVERYAPI_WORKLOADS=$WORKLOADS
+EVERYAPI_RENDER_WORKFLOW_PATH=./data/render-workflows
 EVERYAPI_CONSOLE_PORT=$CONSOLE_PORT
 EVERYAPI_CONSOLE_TOKEN=$CONSOLE_TOKEN
 EOF
@@ -728,6 +825,9 @@ if [ "$GPU" = "macos" ]; then
   ensure_macos_ollama
   ensure_macos_diffusers
   ensure_macos_speech
+  ensure_macos_transcription
+  ensure_macos_video
+  ensure_macos_rerank
 fi
 
 info "pulling images…"
@@ -746,10 +846,18 @@ fi
 
 info "waiting for the agent to authenticate with the gateway…"
 if ! wait_for_agent_connection "$AGENT_CONTAINER_ID" "$AGENT_LOG_SINCE"; then
+  if [ "$REKEY_MODE" -eq 1 ] && [ -f data/agent/identity.json.rekey-backup ]; then
+    rm -f data/agent/identity.json
+    mv data/agent/identity.json.rekey-backup data/agent/identity.json
+  fi
   err "agent did not connect to the gateway; registration token was kept for recovery"
   exit 1
 fi
 clear_consumed_registration_token
+if [ "$REKEY_MODE" -eq 1 ]; then
+  rm -f data/agent/identity.json.rekey-backup
+  ok "replaced the node identity; the old private key is no longer accepted"
+fi
 
 if [ "$UPGRADE_MODE" -eq 1 ] && [ "$MODEL_EXPLICIT" -eq 0 ]; then
   ok "existing node upgraded; its persisted model library is unchanged"

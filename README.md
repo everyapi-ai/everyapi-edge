@@ -87,7 +87,7 @@ docker compose -f docker-compose.macos.yml up -d    # macOS
 docker compose -f docker-compose.windows.yml up -d  # Windows NVIDIA
 ```
 
-The macOS variant runs the agent in Docker but runs Ollama, Diffusers, and Kokoro natively because Metal/MPS is not available through a Linux container. The installer creates isolated arm64 Python environments, registers the image and speech runtimes with launchd, and verifies all three local runtimes before reporting success.
+The macOS variant runs the agent in Docker but runs Ollama and the accelerated image, speech, transcription, video, and rerank runtimes natively because Metal/MPS is not available through a Linux container. The installer creates isolated arm64 Python environments, registers those runtimes with launchd, and verifies every configured local runtime before reporting success.
 
 The agent's `OLLAMA_URL` resolves to `host.docker.internal:11434`
 in that file, which Docker Desktop / OrbStack / Colima all expose
@@ -125,12 +125,11 @@ allow-listed Qwen image editors. Buyer requests use the OpenAI-compatible
 `$HOME/.everyapi/edge/images` during runtime startup. Installation can take
 several minutes, and the node does not advertise Sana until loading succeeds.
 
-ComfyUI is not bundled. Edge uses Diffusers directly so the gateway sees one
-stable API and model-discovery contract on every supported OS.
+ComfyUI is optional and is not bundled. Diffusers provides the stable generation and editing API; the isolated render adapter can additionally execute operator-installed, read-only ComfyUI workflow templates without exposing arbitrary workflow JSON or the host Docker socket.
 
 ## Text APIs
 
-Completion-capable Ollama models are exposed through `POST /v1/chat/completions`, `POST /v1/completions`, and the stateless `POST /v1/responses` surface supported by current Ollama releases. Stateful Responses features such as `previous_response_id` and the non-standard `/v1/responses/compact` endpoint are not advertised by Edge.
+Completion-capable Ollama models are exposed through `POST /v1/chat/completions`, `POST /v1/completions`, and `POST /v1/responses`. Ollama remains stateless, so the gateway implements `previous_response_id` itself: stored response context is AES-256-GCM encrypted, isolated by authenticated user and organization, bounded to 1 MiB, and expires after seven days. Responses storage follows the API default; send `store=false` to disable it. `DELETE /v1/responses/{response_id}` removes owned state, and `POST /v1/responses/compact` asks the selected local model to produce a constrained compact context that replaces the prior state chain.
 
 ## Speech
 
@@ -140,7 +139,15 @@ Buyers can request `mp3`, `wav`, `flac`, or raw `pcm`, and the six stock OpenAI 
 
 Speech ships in the NVIDIA, ROCm, Windows, and Apple Silicon bundles. On macOS the installer runs Kokoro in a dedicated arm64 Python environment under launchd and the Dockerized agent reaches it through `host.docker.internal:8189`.
 
-Transcription (`/v1/audio/transcriptions`) is not served because the bundled speech runtime includes synthesis models only. The gateway rejects the request rather than dispatching a path the node does not advertise.
+The separate Whisper runtime serves `POST /v1/audio/transcriptions` and `POST /v1/audio/translations`. It enforces bounded uploads and duration, preloads the selected model before advertising either capability, and supports cancellation when the buyer disconnects.
+
+## Video and render
+
+Video generation uses the asynchronous `POST /v1/videos` contract with polling, cancellation, restart recovery, bounded output storage, and a node-pinned gateway task record. Render jobs use `POST /v1/render/jobs` and can select only operator-installed workflow templates with typed parameters; buyers cannot submit raw ComfyUI graphs.
+
+## Rerank
+
+The bundled cross-encoder runtime serves `POST /v1/rerank` with `BAAI/bge-reranker-v2-m3`. It accepts at most 100 bounded documents, preloads the revision-pinned model before publishing `text.rerank` as ready, batches scoring, and runs through an admission pool independent from text generation. NVIDIA, ROCm, Windows, and native Apple MPS installers use the same API contract.
 
 ## Security model
 
@@ -161,11 +168,7 @@ Transcription (`/v1/audio/transcriptions`) is not served because the bundled spe
   keys, email addresses, and internal user IDs are never stored in
   the agent.
 
-- The agent enforces a path-to-runtime whitelist on inbound requests. Even
-  if the gateway were compromised, it could not coerce your
-  machine into POST'ing to arbitrary local URLs — only the
-  the explicit Ollama, Diffusers, and speech OpenAI-compatible paths
-  are accepted.
+- The agent enforces a path-to-runtime whitelist on inbound requests. Even if the gateway were compromised, it could not coerce your machine into sending requests to arbitrary local URLs; only the explicit text, image, speech, transcription, video, render, and rerank runtime paths are accepted.
 
 - Speech voices are allow-listed. Kokoro loads a voice by fetching
   `voices/<name>.pt` from its model repository, so passing the buyer's
@@ -188,11 +191,7 @@ nvidia/cuda:12.0.0-base nvidia-smi` is the canonical check. If
 that doesn't work, the bundle won't either; fix the host's
 nvidia-container-toolkit before debugging the agent.
 
-**Identity loss** — if `./data/agent/identity.json` gets deleted,
-the gateway no longer recognises your machine's pubkey. Delete the
-node from the dashboard, register a new one. (We don't support
-"rebind to existing node id" yet because the threat model treats
-identity loss as equivalent to "machine was compromised.")
+**Identity loss** — if `./data/agent/identity.json` gets deleted, choose **Recover identity** for the existing node in the seller dashboard and run the displayed command on that node within 15 minutes. The one-time recovery token authorizes the installer to create a new local identity while preserving the node, channel, models, and history; once the new identity connects, the old private key is rejected. If the recovery connection fails, the installer restores the previous local identity backup when one exists.
 
 ## What does the agent NOT do?
 

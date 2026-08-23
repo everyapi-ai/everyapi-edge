@@ -6,7 +6,9 @@ package main
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +66,17 @@ func (t *logTee) Write(p []byte) (int, error) {
 	return t.underlying.Write(p)
 }
 
+func (t *logTee) activeDrainClient() drainClient {
+	if t == nil {
+		return nil
+	}
+	active := t.client.Load()
+	if active == nil {
+		return nil
+	}
+	return active
+}
+
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmicroseconds)
 	log.SetPrefix("[edge-agent] ")
@@ -75,11 +88,18 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	var resourceController *resourcePolicyController
 	updateManager := edgeupdate.New(edgeupdate.Config{
 		CurrentVersion: Version,
 		StateDir:       filepath.Join(filepath.Dir(cfg.IdentityPath), "updates"),
 		Exec: func(path string) error {
 			return syscall.Exec(path, append([]string{path}, os.Args[1:]...), os.Environ())
+		},
+		Drain: func(ctx context.Context) (func(), error) {
+			if resourceController == nil {
+				return func() {}, nil
+			}
+			return resourceController.BeginMaintenance(ctx)
 		},
 	})
 	if err := updateManager.Bootstrap(); err != nil {
@@ -102,19 +122,36 @@ func main() {
 		log.Fatalf("identity: %v", err)
 	}
 	log.Printf("identity loaded; pubkey=%s", id.EncodedPubkey())
+	consoleToken, err := loadConsoleToken(cfg.IdentityPath, cfg.ConsoleToken)
+	if err != nil {
+		log.Fatalf("console pairing token: %v", err)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	store := console.NewStore(200)
 	metadataRefresh := newMetadataRefresh()
+	resourcePolicyStore := config.NewResourcePolicyStore(filepath.Join(filepath.Dir(cfg.IdentityPath), "resource-policy.json"), cfg.ResourcePolicy, consoleMemoryGB)
+	activeResourcePolicy, err := resourcePolicyStore.Load()
+	if err != nil {
+		log.Fatalf("resource policy: %v", err)
+	}
+	resourceController = newResourcePolicyController(resourcePolicyStore, logSink.activeDrainClient, metadataRefresh)
 	logSink.store.Store(store)
 	defer logSink.store.Store(nil)
 	consoleHandlers := console.NewHandlers(console.Config{
-		OllamaURL:    cfg.OllamaURL,
-		DiffusersURL: cfg.DiffusersURL,
-		SpeechURL:    cfg.SpeechURL,
-		ConsoleToken: cfg.ConsoleToken,
+		OllamaURL:        cfg.OllamaURL,
+		DiffusersURL:     cfg.DiffusersURL,
+		SpeechURL:        cfg.SpeechURL,
+		TranscriptionURL: cfg.TranscriptionURL,
+		VideoURL:         cfg.VideoURL,
+		RenderURL:        cfg.RenderURL,
+		RerankURL:        cfg.RerankURL,
+		ConsoleToken:     consoleToken,
+		RotateConsoleToken: func() (string, error) {
+			return rotateConsoleToken(cfg.IdentityPath)
+		},
 		StoragePath:  cfg.OllamaStoragePath,
 		VRAMTotalGB:  consoleMemoryGB,
 		NodeName:     cfg.NodeName,
@@ -134,6 +171,13 @@ func main() {
 			settings, err := updateManager.SetAutoUpdate(enabled)
 			return consoleUpdateSettings(settings), err
 		},
+		SaveUpdateSettings: func(enabled bool, start, end string) (console.UpdateSettings, error) {
+			settings, err := updateManager.SetSettings(enabled, start, end)
+			return consoleUpdateSettings(settings), err
+		},
+		LoadResourceSettings: resourceController.Load,
+		SaveResourcePolicy:   resourceController.Save,
+		SetDrain:             resourceController.SetDrain,
 		ModelsChanged: func() {
 			metadataRefresh.Notify()
 		},
@@ -152,7 +196,7 @@ func main() {
 		return
 	}
 
-	fwd := forward.New(cfg.OllamaURL, cfg.DiffusersURL, cfg.SpeechURL)
+	fwd := forward.NewWithRerank(cfg.OllamaURL, cfg.DiffusersURL, cfg.SpeechURL, cfg.TranscriptionURL, cfg.VideoURL, cfg.RenderURL, cfg.RerankURL)
 	var requests sync.Map
 	fwd.Observer = forward.ObserverFuncs{
 		StartedFunc: func(event forward.RequestEvent) {
@@ -160,14 +204,15 @@ func main() {
 		},
 		FinishedFunc: func(event forward.RequestEvent) {
 			if handle, ok := requests.LoadAndDelete(event.ID); ok {
-				store.Finish(handle.(console.RequestHandle), console.RequestFinish{CompletedAt: time.Now().UTC(), PromptTokens: event.PromptTokens, CompletionTokens: event.CompletionTokens, Duration: event.Duration, Error: event.Error})
+				store.Finish(handle.(console.RequestHandle), console.RequestFinish{CompletedAt: time.Now().UTC(), PromptTokens: event.PromptTokens, CompletionTokens: event.CompletionTokens, Duration: event.Duration, TTFT: event.TTFT, Error: event.Error})
 			}
 		},
 	}
 	meta := protocol.NodeMeta{
-		Name:      cfg.NodeName,
-		AgentVer:  Version,
-		Workloads: cfg.Workloads,
+		Name:           cfg.NodeName,
+		AgentVer:       Version,
+		Workloads:      cfg.Workloads,
+		ResourcePolicy: activeResourcePolicy,
 		Hardware: protocol.Hardware{
 			GPUModel:    cfg.GPUModel,
 			VRAMTotalGB: consoleMemoryGB,
@@ -178,18 +223,22 @@ func main() {
 
 	if err := runWithReconnect(ctx, cfg, id, meta, fwd, updateManager, consoleHandlers.Control, func(status edgeupdate.Status) {
 		consoleHandlers.ReportUpdateStatus(consoleUpdateStatus(status))
-	}, store, logSink, metadataRefresh); err != nil && !errors.Is(err, context.Canceled) {
+	}, store, logSink, metadataRefresh, resourceController); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("fatal: %v", err)
 	}
 	log.Print("shutting down cleanly")
 }
 
 func consoleUpdateSettings(settings edgeupdate.Settings) console.UpdateSettings {
-	return console.UpdateSettings{AutoUpdate: settings.AutoUpdate, CheckIntervalHours: int(settings.CheckInterval / time.Hour)}
+	history := make([]console.UpdateStatus, 0, len(settings.History))
+	for _, status := range settings.History {
+		history = append(history, consoleUpdateStatus(status))
+	}
+	return console.UpdateSettings{AutoUpdate: settings.AutoUpdate, CheckIntervalHours: int(settings.CheckInterval / time.Hour), MaintenanceStart: settings.MaintenanceStart, MaintenanceEnd: settings.MaintenanceEnd, LastCheckAtUnixMs: settings.LastCheckAtUnixMs, NextCheckAtUnixMs: settings.NextCheckAtUnixMs, InstalledVersion: settings.InstalledVersion, LatestVersion: settings.LatestVersion, RollbackReason: settings.RollbackReason, History: history}
 }
 
 func consoleUpdateStatus(status edgeupdate.Status) console.UpdateStatus {
-	return console.UpdateStatus{State: status.State, Version: status.Version, Error: status.Error}
+	return console.UpdateStatus{State: status.State, Version: status.Version, Error: status.Error, CheckedAtUnixMs: status.CheckedAtUnixMs, NextCheckAtUnixMs: status.NextCheckAtUnixMs, InstalledVersion: status.InstalledVersion, LatestVersion: status.LatestVersion, RollbackReason: status.RollbackReason}
 }
 
 func runConsoleUpdate(ctx context.Context, manager *edgeupdate.Manager, report func(console.UpdateStatus)) error {
@@ -200,6 +249,10 @@ func runConsoleUpdate(ctx context.Context, manager *edgeupdate.Manager, report f
 		return console.ErrUpdateInProgress
 	}
 	return err
+}
+
+func protocolUpdateStatus(status edgeupdate.Status) protocol.UpdateStatusBody {
+	return protocol.UpdateStatusBody{State: status.State, Version: status.Version, Error: status.Error, CheckedAtUnixMs: status.CheckedAtUnixMs, NextCheckAtUnixMs: status.NextCheckAtUnixMs, InstalledVersion: status.InstalledVersion, LatestVersion: status.LatestVersion, RollbackReason: status.RollbackReason}
 }
 
 func resolvedMemoryGB(configured int, gpuModel string, detect func() int) int {
@@ -459,7 +512,7 @@ func protocolCapabilities(runtimeKind protocol.RuntimeKind, health edgeruntime.R
 		}
 		result = append(result, protocol.Capability{
 			ID: id, Runtime: runtimeKind, Status: status, Models: mergeModels(capability.Models), Paths: mergeModels(capability.Paths), Version: strings.TrimSpace(health.Version), Reason: reason,
-			Limits: protocol.CapabilityLimits{MaxInputBytes: capability.Limits.MaxInputBytes, MaxInputCharacters: capability.Limits.MaxInputCharacters, Formats: mergeModels(capability.Limits.Formats)},
+			Limits: protocol.CapabilityLimits{MaxInputBytes: capability.Limits.MaxInputBytes, MaxInputCharacters: capability.Limits.MaxInputCharacters, Formats: mergeModels(capability.Limits.Formats), Voices: mergeModels(capability.Limits.Voices), Languages: mergeModels(capability.Limits.Languages)},
 		})
 	}
 	return result
@@ -486,6 +539,12 @@ func capabilityBelongsToRuntime(id protocol.CapabilityID, runtimeKind protocol.R
 		return id == protocol.CapabilityImageGenerate || id == protocol.CapabilityImageEdit
 	case protocol.RuntimeSpeech:
 		return id == protocol.CapabilityAudioTTS || id == protocol.CapabilityAudioTranscription || id == protocol.CapabilityAudioTranslation
+	case protocol.RuntimeVideo:
+		return id == protocol.CapabilityVideoGenerate
+	case protocol.RuntimeRender:
+		return id == protocol.CapabilityRenderExecute
+	case protocol.RuntimeRerank:
+		return id == protocol.CapabilityTextRerank
 	default:
 		return false
 	}
@@ -527,13 +586,77 @@ func runWithReconnect(
 	store *console.Store,
 	logSink *logTee,
 	metadataRefresh *metadataRefresh,
+	resourceController *resourcePolicyController,
 ) error {
-	return runGatewayLifecycle(ctx, cfg, id, meta, fwd, updateManager, controlHandler, updateStatus, store, logSink, metadataRefresh)
+	return runGatewayLifecycle(ctx, cfg, id, meta, fwd, updateManager, controlHandler, updateStatus, store, logSink, metadataRefresh, resourceController)
 }
 
 // revokedSentinelPath sits next to the identity file so it shares the same volume mount in docker-compose and survives container restarts. Named `.revoked` so a `ls -l` next to identity.json makes the failure mode obvious without grepping logs.
 func revokedSentinelPath(identityPath string) string {
 	return filepath.Join(filepath.Dir(identityPath), ".revoked")
+}
+
+func consoleTokenPath(identityPath string) string {
+	return filepath.Join(filepath.Dir(identityPath), "console-token")
+}
+
+func loadConsoleToken(identityPath, fallback string) (string, error) {
+	path := consoleTokenPath(identityPath)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return strings.TrimSpace(fallback), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect persisted token: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("persisted token is a symlink")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("persisted token has unsafe permissions %#o", info.Mode().Perm())
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read persisted token: %w", err)
+	}
+	token := strings.TrimSpace(string(b))
+	if len(token) < 32 {
+		return "", errors.New("persisted token is invalid")
+	}
+	return token, nil
+}
+
+func rotateConsoleToken(identityPath string) (string, error) {
+	raw := make([]byte, 32)
+	if _, err := cryptorand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
+	}
+	token := hex.EncodeToString(raw)
+	path := consoleTokenPath(identityPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create token directory: %w", err)
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".console-token-*")
+	if err != nil {
+		return "", fmt.Errorf("create token file: %w", err)
+	}
+	temporary := f.Name()
+	defer os.Remove(temporary)
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("protect token: %w", err)
+	}
+	if _, err := f.WriteString(token + "\n"); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("write token: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("close token: %w", err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return "", fmt.Errorf("commit token: %w", err)
+	}
+	return token, nil
 }
 
 // readRevokedSentinel returns the persisted reason text + true when the sentinel file exists AND has content. Any read error short-circuits to "not revoked" — the worst case is the agent tries (and fails) one more reconnect cycle, which is the pre-PR behavior and not a regression.

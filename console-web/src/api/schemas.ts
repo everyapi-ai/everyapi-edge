@@ -51,15 +51,60 @@ export const nodeProfileSchema = z.object({
   vram_total_gb: z.number().int().nonnegative().optional().default(0),
 })
 
+export const updateStatusSchema = z.object({
+  state: z.string(),
+  version: z.string().optional().default(''),
+  error: z.string().optional().default(''),
+  checked_at_unix_ms: z.number().int().nonnegative().optional().default(0),
+  next_check_at_unix_ms: z.number().int().nonnegative().optional().default(0),
+  installed_version: z.string().optional().default(''),
+  latest_version: z.string().optional().default(''),
+  rollback_reason: z.string().optional().default(''),
+})
+
 export const updateSettingsSchema = z.object({
   auto_update: z.boolean(),
   check_interval_hours: z.number().int().positive(),
+  maintenance_start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  maintenance_end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  last_check_at_unix_ms: z.number().int().nonnegative().optional().default(0),
+  next_check_at_unix_ms: z.number().int().nonnegative().optional().default(0),
+  installed_version: z.string().optional().default(''),
+  latest_version: z.string().optional().default(''),
+  rollback_reason: z.string().optional().default(''),
+  history: z.array(updateStatusSchema).max(20).optional().default([]),
+})
+
+const runtimeResourcePolicySchema = z.object({
+  max_concurrent: z.number().int().min(1).max(64),
+  reserve_vram_mb: z.number().int().nonnegative().optional().default(0),
+})
+
+export const resourcePolicySchema = z.object({
+  text: runtimeResourcePolicySchema,
+  image: runtimeResourcePolicySchema,
+  speech: runtimeResourcePolicySchema,
+  video: runtimeResourcePolicySchema,
+  render: runtimeResourcePolicySchema,
+  rerank: runtimeResourcePolicySchema,
+})
+
+export const resourceSettingsSchema = z.object({
+  resource_policy: resourcePolicySchema,
+  drain_state: z.enum(['serving', 'draining', 'drained']),
+  active_requests: z.number().int().nonnegative(),
 })
 
 export const sessionSchema = z.object({
   authenticated: z.boolean(),
   pairing_required: z.boolean(),
 })
+
+export const pairingTokenSchema = z.object({
+  token: z.string().min(32),
+})
+
+export type PairingToken = z.infer<typeof pairingTokenSchema>
 
 export const modelSchema = z.object({
   name: z.string(),
@@ -131,8 +176,13 @@ export const capabilitySchema = z.object({
     'image.generate',
     'image.edit',
     'audio.tts',
+    'audio.transcription',
+    'audio.translation',
+    'video.generate',
+    'render.execute',
+    'text.rerank',
   ]),
-  runtime: z.enum(['text', 'image', 'speech']),
+  runtime: z.enum(['text', 'image', 'speech', 'video', 'render', 'rerank']),
   status: z.enum(['ready', 'warming', 'degraded', 'unavailable', 'unsupported']),
   models: z
     .array(z.string())
@@ -152,9 +202,23 @@ export const capabilitySchema = z.object({
         .array(z.string())
         .nullish()
         .transform((formats) => formats ?? []),
+      voices: z
+        .array(z.string())
+        .nullish()
+        .transform((voices) => voices ?? []),
+      languages: z
+        .array(z.string())
+        .nullish()
+        .transform((languages) => languages ?? []),
     })
     .optional()
-    .default({ max_input_bytes: 0, max_input_characters: 0, formats: [] }),
+    .default({
+      max_input_bytes: 0,
+      max_input_characters: 0,
+      formats: [],
+      voices: [],
+      languages: [],
+    }),
 })
 
 export const capabilityListSchema = z.object({
@@ -288,6 +352,8 @@ export const errorEnvelopeSchema = z.object({
 export type Overview = z.infer<typeof overviewSchema>
 export type NodeProfile = z.infer<typeof nodeProfileSchema>
 export type UpdateSettings = z.infer<typeof updateSettingsSchema>
+export type ResourcePolicy = z.infer<typeof resourcePolicySchema>
+export type ResourceSettings = z.infer<typeof resourceSettingsSchema>
 export type Session = z.infer<typeof sessionSchema>
 export type ImageRuntime = z.infer<typeof imageRuntimeSchema>
 export type Capability = z.infer<typeof capabilitySchema>

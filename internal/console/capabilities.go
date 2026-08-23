@@ -25,6 +25,34 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request) {
 	} else {
 		capabilities = append(capabilities, runtimeCapabilities(protocol.RuntimeSpeech, health)...)
 	}
+	if h.cfg.TranscriptionURL == "" {
+		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityAudioTranscription, protocol.RuntimeSpeech, "transcription runtime is not configured"), unavailableCapability(protocol.CapabilityAudioTranslation, protocol.RuntimeSpeech, "transcription runtime is not configured"))
+	} else if health, err := h.transcriptionClient().Health(r.Context()); err != nil {
+		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityAudioTranscription, protocol.RuntimeSpeech, "transcription runtime is unavailable"), unavailableCapability(protocol.CapabilityAudioTranslation, protocol.RuntimeSpeech, "transcription runtime is unavailable"))
+	} else {
+		capabilities = append(capabilities, runtimeCapabilities(protocol.RuntimeSpeech, health)...)
+	}
+	if h.cfg.VideoURL == "" {
+		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityVideoGenerate, protocol.RuntimeVideo, "video runtime is not configured"))
+	} else if health, err := h.videoClient().Health(r.Context()); err != nil {
+		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityVideoGenerate, protocol.RuntimeVideo, "video runtime is unavailable"))
+	} else {
+		capabilities = append(capabilities, runtimeCapabilities(protocol.RuntimeVideo, health)...)
+	}
+	if h.cfg.RenderURL == "" {
+		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityRenderExecute, protocol.RuntimeRender, "render runtime is not configured"))
+	} else if health, err := h.renderClient().Health(r.Context()); err != nil {
+		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityRenderExecute, protocol.RuntimeRender, "render runtime is unavailable"))
+	} else {
+		capabilities = append(capabilities, runtimeCapabilities(protocol.RuntimeRender, health)...)
+	}
+	if h.cfg.RerankURL == "" {
+		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityTextRerank, protocol.RuntimeRerank, "rerank runtime is not configured"))
+	} else if health, err := h.rerankClient().Health(r.Context()); err != nil {
+		capabilities = append(capabilities, unavailableCapability(protocol.CapabilityTextRerank, protocol.RuntimeRerank, "rerank runtime is unavailable"))
+	} else {
+		capabilities = append(capabilities, runtimeCapabilities(protocol.RuntimeRerank, health)...)
+	}
 	writeJSON(w, http.StatusOK, struct {
 		Capabilities []protocol.Capability `json:"capabilities"`
 	}{Capabilities: capabilities})
@@ -98,13 +126,13 @@ func runtimeCapabilities(kind protocol.RuntimeKind, health edgeruntime.RuntimeHe
 		default:
 			status = protocol.CapabilityUnavailable
 		}
-		result = append(result, protocol.Capability{ID: id, Runtime: kind, Status: status, Models: normalizedValues(capability.Models), Paths: normalizedValues(capability.Paths), Version: strings.TrimSpace(health.Version), Reason: strings.TrimSpace(capability.Reason), Limits: protocol.CapabilityLimits{MaxInputBytes: capability.Limits.MaxInputBytes, MaxInputCharacters: capability.Limits.MaxInputCharacters, Formats: normalizedValues(capability.Limits.Formats)}})
+		result = append(result, protocol.Capability{ID: id, Runtime: kind, Status: status, Models: normalizedValues(capability.Models), Paths: normalizedValues(capability.Paths), Version: strings.TrimSpace(health.Version), Reason: strings.TrimSpace(capability.Reason), Limits: protocol.CapabilityLimits{MaxInputBytes: capability.Limits.MaxInputBytes, MaxInputCharacters: capability.Limits.MaxInputCharacters, Formats: normalizedValues(capability.Limits.Formats), Voices: normalizedValues(capability.Limits.Voices), Languages: normalizedValues(capability.Limits.Languages)}})
 	}
 	return result
 }
 
 func validRuntimeCapability(kind protocol.RuntimeKind, id protocol.CapabilityID) bool {
-	return (kind == protocol.RuntimeImage && (id == protocol.CapabilityImageGenerate || id == protocol.CapabilityImageEdit)) || (kind == protocol.RuntimeSpeech && (id == protocol.CapabilityAudioTTS || id == protocol.CapabilityAudioTranscription || id == protocol.CapabilityAudioTranslation))
+	return (kind == protocol.RuntimeImage && (id == protocol.CapabilityImageGenerate || id == protocol.CapabilityImageEdit)) || (kind == protocol.RuntimeSpeech && (id == protocol.CapabilityAudioTTS || id == protocol.CapabilityAudioTranscription || id == protocol.CapabilityAudioTranslation)) || (kind == protocol.RuntimeVideo && id == protocol.CapabilityVideoGenerate) || (kind == protocol.RuntimeRender && id == protocol.CapabilityRenderExecute) || (kind == protocol.RuntimeRerank && id == protocol.CapabilityTextRerank)
 }
 
 func unavailableCapability(id protocol.CapabilityID, kind protocol.RuntimeKind, reason string) protocol.Capability {

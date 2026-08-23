@@ -3,7 +3,14 @@ package protocol
 import "strings"
 
 func CapabilityForRequest(path string) (CapabilityID, bool) {
-	switch strings.ToLower(path) {
+	lowerPath := strings.ToLower(path)
+	if strings.HasPrefix(lowerPath, "/v1/videos/") {
+		return CapabilityVideoGenerate, true
+	}
+	if strings.HasPrefix(lowerPath, "/v1/render/jobs/") {
+		return CapabilityRenderExecute, true
+	}
+	switch lowerPath {
 	case "/v1/chat/completions", "/api/chat":
 		return CapabilityTextChat, true
 	case "/v1/completions":
@@ -22,6 +29,12 @@ func CapabilityForRequest(path string) (CapabilityID, bool) {
 		return CapabilityAudioTranscription, true
 	case "/v1/audio/translations":
 		return CapabilityAudioTranslation, true
+	case "/v1/videos", "/v1/video/generations":
+		return CapabilityVideoGenerate, true
+	case "/v1/render/jobs":
+		return CapabilityRenderExecute, true
+	case "/v1/rerank":
+		return CapabilityTextRerank, true
 	default:
 		return "", false
 	}

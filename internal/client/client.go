@@ -49,17 +49,25 @@ type Config struct {
 	OnConnected func()
 	// HTTPClient is used for the challenge endpoint. Defaulted in New() if nil; injectable for tests.
 	HTTPClient *http.Client
-	// MaxConcurrentRequests caps how many inbound Request frames the agent forwards at once. A buggy or hostile gateway can stream Request frames faster than the local GPU drains them; without a cap each frame would spawn an unbounded goroutine + HTTP call to Ollama (resource exhaustion on the supplier host). Requests past the cap are rejected immediately with a "node_busy" Error frame (the gateway retries them on another channel/node). Defaulted in New() if <= 0.
+	// ResourcePolicy caps inbound work independently for each runtime so a long media job cannot consume the text pool. Zero fields receive safe defaults in New.
+	ResourcePolicy protocol.ResourcePolicy
+	// MaxConcurrentRequests is retained as a legacy test/config fallback. When ResourcePolicy is empty and this is positive, the value is applied to every runtime; production wiring uses ResourcePolicy.
 	MaxConcurrentRequests int
 	// Log receives agent diagnostics that would otherwise only go to stderr. main routes this into both docker logs and the supplier-local console. OllamaURL is the local model runtime, used only by the auto-pull path: the gateway's Welcome frame names models this node is missing from its owner's declared target set, and the agent pulls them here. Empty disables auto-pull.
 	OllamaURL string
-	// DiffusersURL and SpeechURL are queried only for their bounded /health resource snapshots so heartbeat scheduling accounts for every GPU runtime managed by this node.
-	DiffusersURL string
-	SpeechURL    string
+	// Local runtime URLs are queried only for their bounded /health resource snapshots so heartbeat scheduling accounts for every GPU runtime managed by this node.
+	DiffusersURL     string
+	SpeechURL        string
+	TranscriptionURL string
+	VideoURL         string
+	RenderURL        string
+	RerankURL        string
 	// VRAMTotalGB is the scheduler budget discovered at agent startup. It is sent with every heartbeat so the gateway can preserve a runtime safety reserve when it balances requests across nodes.
 	VRAMTotalGB int
 	// GatewayRoundTrip receives the measured heartbeat ACK latency over the authenticated WebSocket.
 	GatewayRoundTrip func(time.Duration)
+	// Performance returns bounded privacy-safe per-runtime EWMAs. It must never include request or response content; heartbeatTelemetry validates the structural envelope before sending it.
+	Performance func() []protocol.RuntimePerformanceSample
 	// MetadataChanged is a process-lifetime coalesced signal shared by successive Client instances. Sharing it prevents a model mutation that completes between sessions from being lost before the next Auth snapshot is built. New creates a private channel when omitted.
 	MetadataChanged chan struct{}
 
@@ -80,8 +88,7 @@ type RequestHandler func(ctx context.Context, req protocol.RequestBody, send fun
 // ControlHandler returns one bounded API response for an allowlisted Control Room operation. It is deliberately distinct from inference RequestHandler.
 type ControlHandler func(ctx context.Context, req protocol.ControlRequestBody) (protocol.ChunkBody, *protocol.ErrorBody)
 
-// defaultMaxConcurrentRequests bounds in-flight forwarded requests when Config.MaxConcurrentRequests is unset. A single BYO-GPU node rarely benefits from deep concurrency (Ollama serialises on the GPU anyway); the cap exists to stop a frame flood from spawning unbounded goroutines, not to maximise throughput.
-const defaultMaxConcurrentRequests = 16
+const controlConcurrentRequests = 2
 
 // The handshake challenge is a compact JSON envelope containing one nonce. Keep a generous ceiling while preventing a hostile gateway or proxy from growing the edge agent without bound before the WebSocket session starts.
 const maxChallengeResponseBytes int64 = 1 << 20
@@ -120,12 +127,17 @@ type Client struct {
 	// done is closed exactly once by closeConn. Senders (SendLog, sendFrame) select on it so a concurrent close doesn't panic them with "send on closed channel" — instead the send arm loses the race and the sender exits via the done arm. writerLoop also selects on it to exit cleanly after closeConn fires from outside its own error path.
 	done chan struct{}
 
-	// sem bounds concurrent handleRequest goroutines (buffered to cfg.MaxConcurrentRequests). readerLoop try-acquires a slot before spawning a handler; on a full pool dispatch rejects the request with a node_busy Error frame instead of parking the reader (see dispatch for why blocking here would tear the session down).
-	sem chan struct{}
+	// pools bound inference independently by runtime. sem aliases the text pool temporarily for legacy package tests; production admission always selects through pools.
+	pools      map[protocol.RuntimeKind]chan struct{}
+	poolLimits map[protocol.RuntimeKind]int
+	sem        chan struct{}
+	controlSem chan struct{}
 	// wg tracks in-flight handlers so Run can drain them before returning — combined with session-ctx cancellation, no handler (or its upstream HTTP call) outlives the session it belongs to.
 	wg sync.WaitGroup
 	// inflight is the live handler count, surfaced to the gateway in each heartbeat (HeartbeatBody.ActiveReqs) so it has back-pressure visibility into how loaded this node is.
 	inflight atomic.Int64
+	// vramUsedBytes is the latest bounded runtime telemetry snapshot. Admission reads it without a network round trip so resource policy does not add latency to every buyer request.
+	vramUsedBytes atomic.Int64
 
 	// welcomeReceived flips true after the gateway accepts the Auth frame and we successfully parse a Welcome back. The reconnect loop in main.go reads this via WelcomeReceived() to decide whether the in-process RegistrationToken has been consumed server-side — without that gate, an Auth rejection (token already used, wrong node id, signature failure) would still burn the token in main's outer loop and brick the agent.
 	welcomeReceived      atomic.Bool
@@ -141,6 +153,10 @@ type Client struct {
 	runtimeCandidates    map[protocol.RuntimeKind]string
 	runtimeRefreshQueued bool
 	monitoredRuntimes    map[protocol.RuntimeKind]bool
+	drainMu              sync.Mutex
+	draining             bool
+	drainChanged         chan struct{}
+	drainCommandID       string
 }
 
 type requestBodyAssembly struct {
@@ -172,35 +188,93 @@ func New(cfg Config) (*Client, error) {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 15 * time.Second}
 	}
-	if cfg.MaxConcurrentRequests <= 0 {
-		cfg.MaxConcurrentRequests = defaultMaxConcurrentRequests
-	}
+	cfg.ResourcePolicy = normalizeResourcePolicy(cfg.ResourcePolicy, cfg.MaxConcurrentRequests)
 	metadataChanged := cfg.MetadataChanged
 	if metadataChanged == nil {
 		metadataChanged = make(chan struct{}, 1)
 	}
+	pools, poolLimits := resourcePools(cfg.ResourcePolicy)
 	return &Client{
 		cfg:             cfg,
 		sendQ:           make(chan protocol.Frame, 32),
 		done:            make(chan struct{}),
-		sem:             make(chan struct{}, cfg.MaxConcurrentRequests),
+		pools:           pools,
+		poolLimits:      poolLimits,
+		sem:             pools[protocol.RuntimeText],
+		controlSem:      make(chan struct{}, controlConcurrentRequests),
 		requestBodies:   make(map[string]*requestBodyAssembly),
 		activeRequests:  make(map[string]*activeRequest),
 		metadataChanged: metadataChanged,
+		drainChanged:    make(chan struct{}),
 		now:             time.Now,
 		runtimeFingerprints: map[protocol.RuntimeKind]string{
 			protocol.RuntimeText:   textRuntimeFingerprint(cfg.TextModels, cfg.TextResponsesSupported),
 			protocol.RuntimeImage:  capabilityFingerprint(protocol.RuntimeImage, cfg.Meta.Capabilities),
 			protocol.RuntimeSpeech: capabilityFingerprint(protocol.RuntimeSpeech, cfg.Meta.Capabilities),
+			protocol.RuntimeVideo:  capabilityFingerprint(protocol.RuntimeVideo, cfg.Meta.Capabilities),
+			protocol.RuntimeRender: capabilityFingerprint(protocol.RuntimeRender, cfg.Meta.Capabilities),
+			protocol.RuntimeRerank: capabilityFingerprint(protocol.RuntimeRerank, cfg.Meta.Capabilities),
 		},
 		runtimeMismatches: make(map[protocol.RuntimeKind]int),
 		runtimeCandidates: make(map[protocol.RuntimeKind]string),
 		monitoredRuntimes: map[protocol.RuntimeKind]bool{
 			protocol.RuntimeText:   cfg.OllamaURL != "" && cfg.TextModels != nil,
 			protocol.RuntimeImage:  cfg.DiffusersURL != "",
-			protocol.RuntimeSpeech: cfg.SpeechURL != "",
+			protocol.RuntimeSpeech: cfg.SpeechURL != "" || cfg.TranscriptionURL != "",
+			protocol.RuntimeVideo:  cfg.VideoURL != "",
+			protocol.RuntimeRender: cfg.RenderURL != "",
+			protocol.RuntimeRerank: cfg.RerankURL != "",
 		},
 	}, nil
+}
+
+func normalizeResourcePolicy(policy protocol.ResourcePolicy, legacyMax int) protocol.ResourcePolicy {
+	defaults := protocol.ResourcePolicy{
+		Text:   protocol.RuntimeResourcePolicy{MaxConcurrent: 4},
+		Image:  protocol.RuntimeResourcePolicy{MaxConcurrent: 1},
+		Speech: protocol.RuntimeResourcePolicy{MaxConcurrent: 2},
+		Video:  protocol.RuntimeResourcePolicy{MaxConcurrent: 1},
+		Render: protocol.RuntimeResourcePolicy{MaxConcurrent: 1},
+		Rerank: protocol.RuntimeResourcePolicy{MaxConcurrent: 2},
+	}
+	if legacyMax > 0 && policy == (protocol.ResourcePolicy{}) {
+		defaults.Text.MaxConcurrent = legacyMax
+		defaults.Image.MaxConcurrent = legacyMax
+		defaults.Speech.MaxConcurrent = legacyMax
+		defaults.Video.MaxConcurrent = legacyMax
+		defaults.Render.MaxConcurrent = legacyMax
+		defaults.Rerank.MaxConcurrent = legacyMax
+		return defaults
+	}
+	fillResourcePolicy(&policy.Text, defaults.Text)
+	fillResourcePolicy(&policy.Image, defaults.Image)
+	fillResourcePolicy(&policy.Speech, defaults.Speech)
+	fillResourcePolicy(&policy.Video, defaults.Video)
+	fillResourcePolicy(&policy.Render, defaults.Render)
+	fillResourcePolicy(&policy.Rerank, defaults.Rerank)
+	return policy
+}
+
+func fillResourcePolicy(policy *protocol.RuntimeResourcePolicy, fallback protocol.RuntimeResourcePolicy) {
+	if policy.MaxConcurrent <= 0 {
+		policy.MaxConcurrent = fallback.MaxConcurrent
+	}
+}
+
+func resourcePools(policy protocol.ResourcePolicy) (map[protocol.RuntimeKind]chan struct{}, map[protocol.RuntimeKind]int) {
+	limits := map[protocol.RuntimeKind]int{
+		protocol.RuntimeText:   policy.Text.MaxConcurrent,
+		protocol.RuntimeImage:  policy.Image.MaxConcurrent,
+		protocol.RuntimeSpeech: policy.Speech.MaxConcurrent,
+		protocol.RuntimeVideo:  policy.Video.MaxConcurrent,
+		protocol.RuntimeRender: policy.Render.MaxConcurrent,
+		protocol.RuntimeRerank: policy.Rerank.MaxConcurrent,
+	}
+	pools := make(map[protocol.RuntimeKind]chan struct{}, len(limits))
+	for kind, limit := range limits {
+		pools[kind] = make(chan struct{}, limit)
+	}
+	return pools, limits
 }
 
 // Run connects, authenticates, and runs the session. Returns when the connection ends — nil for a clean shutdown, non-nil for any error. Callers re-invoke after a backoff for the reconnect loop.
@@ -267,8 +341,12 @@ func (c *Client) connectAndAuth(ctx context.Context) error {
 		Meta:            c.cfg.Meta,
 	}
 	if c.cfg.RegistrationToken != "" {
-		// First-connect: token + pubkey.
-		authBody.RegistrationToken = c.cfg.RegistrationToken
+		// First-connect or owner-authorized identity recovery: one-time credential + pubkey.
+		if strings.HasPrefix(c.cfg.RegistrationToken, "edgerekey_") {
+			authBody.RekeyToken = c.cfg.RegistrationToken
+		} else {
+			authBody.RegistrationToken = c.cfg.RegistrationToken
+		}
 		authBody.Pubkey = c.cfg.Identity.EncodedPubkey()
 	} else {
 		// Reconnect: fetch challenge, sign it.
@@ -457,6 +535,8 @@ func (c *Client) readerLoop(ctx context.Context) error {
 			c.handleSettlement(frame.Body)
 		case protocol.FrameUpdate:
 			c.handleUpdate(ctx, frame)
+		case protocol.FrameDrain:
+			c.handleDrain(frame)
 		default:
 			c.log("warn", "unexpected gateway frame type")
 		}
@@ -528,25 +608,76 @@ const (
 
 // dispatch try-acquires a concurrency slot and starts a handler goroutine for an inbound Request frame. It MUST NOT block on a full pool: the WS read deadline (HeartbeatTimeout, 30s) is only refreshed by successful reads, while forwarded requests run for minutes — a reader parked here would let the deadline expire, so the next ReadMessage after a slot freed would fail with an i/o timeout and tear the whole session down (aborting every in-flight handler). Parking would also stall Disconnect-frame handling (incl. node_revoked) for the duration of the saturation. Instead, a full pool rejects the request immediately with a node_busy Error frame and the reader keeps draining; the gateway retries the buyer request on another node (see errCodeNodeBusy). Returns ctx.Err() if the session context was cancelled, errReaderClosed if closeConn fired, or nil once the frame was either handed to a handler or rejected.
 func (c *Client) dispatch(ctx context.Context, frame protocol.Frame) error {
-	return c.startHandler(ctx, frame.ID, func(requestCtx context.Context) { c.handleRequest(requestCtx, frame) })
+	if frame.Type == protocol.FrameControlRequest {
+		return c.startHandler(ctx, frame.ID, "", c.controlSem, controlConcurrentRequests, "control", func(requestCtx context.Context) { c.handleControl(requestCtx, frame) })
+	}
+	var request protocol.RequestBody
+	if err := json.Unmarshal(frame.Body, &request); err != nil {
+		c.trySendError(frame.ID, "malformed_request", err.Error())
+		return nil
+	}
+	return c.dispatchRequest(ctx, frame.ID, request)
 }
 
 func (c *Client) dispatchRequest(ctx context.Context, id string, request protocol.RequestBody) error {
-	return c.startHandler(ctx, id, func(requestCtx context.Context) { c.handleRequestBody(requestCtx, id, request) })
+	kind := runtimeForRequest(request.Path)
+	pool := c.pools[kind]
+	return c.startHandler(ctx, id, kind, pool, c.poolLimits[kind], string(kind), func(requestCtx context.Context) { c.handleRequestBody(requestCtx, id, request) })
 }
 
-func (c *Client) startHandler(ctx context.Context, id string, run func(context.Context)) error {
+func runtimeForRequest(path string) protocol.RuntimeKind {
+	capability, ok := protocol.CapabilityForRequest(path)
+	if !ok {
+		return protocol.RuntimeText
+	}
+	switch capability {
+	case protocol.CapabilityImageGenerate, protocol.CapabilityImageEdit:
+		return protocol.RuntimeImage
+	case protocol.CapabilityAudioTTS, protocol.CapabilityAudioTranscription, protocol.CapabilityAudioTranslation:
+		return protocol.RuntimeSpeech
+	case protocol.CapabilityVideoGenerate:
+		return protocol.RuntimeVideo
+	case protocol.CapabilityRenderExecute:
+		return protocol.RuntimeRender
+	case protocol.CapabilityTextRerank:
+		return protocol.RuntimeRerank
+	default:
+		return protocol.RuntimeText
+	}
+}
+
+func (c *Client) startHandler(ctx context.Context, id string, kind protocol.RuntimeKind, pool chan struct{}, limit int, label string, run func(context.Context)) error {
+	if pool == nil {
+		c.trySendError(id, "runtime_unavailable", fmt.Sprintf("%s runtime has no admission pool", label))
+		return nil
+	}
+	if kind != "" && c.isDraining() {
+		c.trySendError(id, "node_draining", "node is draining and is not accepting new inference requests")
+		return nil
+	}
+	if kind != "" {
+		reserveMB := c.reserveVRAMMB(kind)
+		if totalBytes := int64(c.cfg.VRAMTotalGB) << 30; reserveMB > 0 && totalBytes > 0 && totalBytes-c.vramUsedBytes.Load() < reserveMB<<20 {
+			c.trySendError(id, "insufficient_vram", fmt.Sprintf("%s runtime requires at least %d MiB free VRAM before admission", label, reserveMB))
+			return nil
+		}
+	}
 	select {
-	case c.sem <- struct{}{}:
+	case pool <- struct{}{}:
 		// Slot acquired — but if done/ctx became ready at the same time, select picks an arm at random and can land here mid-shutdown. Re-check before wg.Add so no handler spawns once the session is closing (Run's reader-exit barrier makes a late Add safe for wg.Wait, but the handler would only burn an upstream call against a dead session).
 		select {
 		case <-c.done:
-			<-c.sem
+			<-pool
 			return errReaderClosed
 		case <-ctx.Done():
-			<-c.sem
+			<-pool
 			return ctx.Err()
 		default:
+		}
+		if kind != "" && c.isDraining() {
+			<-pool
+			c.trySendError(id, "node_draining", "node is draining and is not accepting new inference requests")
+			return nil
 		}
 	case <-ctx.Done():
 		return ctx.Err()
@@ -554,8 +685,7 @@ func (c *Client) startHandler(ctx context.Context, id string, run func(context.C
 		return errReaderClosed
 	default:
 		// Pool full. Reject without blocking the reader: emitError → sendFrame would park up to 5s if sendQ is saturated, and a parked reader stops refreshing the WS read deadline — the very stall this reject path exists to avoid. Drop the reject if the queue is full; the gateway's first-chunk wait still times out and reroutes, so it degrades gracefully.
-		c.trySendError(id, errCodeNodeBusy,
-			fmt.Sprintf("node at max concurrent requests (%d)", c.cfg.MaxConcurrentRequests))
+		c.trySendError(id, errCodeNodeBusy, fmt.Sprintf("%s runtime is at max concurrent requests (%d)", label, limit))
 		return nil
 	}
 	requestCtx, requestCancel := context.WithCancel(ctx)
@@ -564,7 +694,7 @@ func (c *Client) startHandler(ctx context.Context, id string, run func(context.C
 	if _, exists := c.activeRequests[id]; exists {
 		c.requestMu.Unlock()
 		requestCancel()
-		<-c.sem
+		<-pool
 		c.trySendError(id, "malformed_request", "duplicate active request id")
 		return nil
 	}
@@ -574,13 +704,167 @@ func (c *Client) startHandler(ctx context.Context, id string, run func(context.C
 	c.inflight.Add(1)
 	go func() {
 		defer c.wg.Done()
-		defer c.inflight.Add(-1)
-		defer func() { <-c.sem }()
+		defer c.finishInflightRequest()
+		defer func() { <-pool }()
 		defer requestCancel()
 		defer c.finishActiveRequest(id, active)
 		run(requestCtx)
 	}()
 	return nil
+}
+
+func (c *Client) reserveVRAMMB(kind protocol.RuntimeKind) int64 {
+	switch kind {
+	case protocol.RuntimeImage:
+		return c.cfg.ResourcePolicy.Image.ReserveVRAMMB
+	case protocol.RuntimeSpeech:
+		return c.cfg.ResourcePolicy.Speech.ReserveVRAMMB
+	case protocol.RuntimeVideo:
+		return c.cfg.ResourcePolicy.Video.ReserveVRAMMB
+	case protocol.RuntimeRender:
+		return c.cfg.ResourcePolicy.Render.ReserveVRAMMB
+	case protocol.RuntimeRerank:
+		return c.cfg.ResourcePolicy.Rerank.ReserveVRAMMB
+	default:
+		return c.cfg.ResourcePolicy.Text.ReserveVRAMMB
+	}
+}
+
+func (c *Client) finishInflightRequest() {
+	if c.inflight.Add(-1) == 0 {
+		c.signalDrainChanged()
+		c.reportDrainStatus()
+	}
+}
+
+// BeginDrain stops new inference admission while leaving active request contexts untouched. The caller can wait on WaitForDrained before maintenance without turning a graceful pause into a buyer-visible cancellation.
+func (c *Client) BeginDrain() {
+	c.drainMu.Lock()
+	if !c.draining {
+		c.draining = true
+		c.signalDrainChangedLocked()
+	}
+	c.drainMu.Unlock()
+}
+
+// CancelDrain returns the node to serving admission. It is safe to call when the node is already serving.
+func (c *Client) CancelDrain() {
+	c.drainMu.Lock()
+	if c.draining {
+		c.draining = false
+		c.drainCommandID = ""
+		c.signalDrainChangedLocked()
+	}
+	c.drainMu.Unlock()
+}
+
+func (c *Client) isDraining() bool {
+	c.drainMu.Lock()
+	defer c.drainMu.Unlock()
+	return c.draining
+}
+
+// DrainState derives the terminal drained state from the admission flag and live handler count so it cannot drift from actual work.
+func (c *Client) DrainState() string {
+	c.drainMu.Lock()
+	defer c.drainMu.Unlock()
+	return c.drainStateLocked()
+}
+
+// ActiveRequests returns the number of inference handlers that have passed admission and not yet completed.
+func (c *Client) ActiveRequests() int {
+	if c == nil {
+		return 0
+	}
+	return int(c.inflight.Load())
+}
+
+func (c *Client) drainStateLocked() string {
+	if !c.draining {
+		return protocol.DrainStateServing
+	}
+	if c.inflight.Load() == 0 {
+		return protocol.DrainStateDrained
+	}
+	return protocol.DrainStateDraining
+}
+
+// WaitForDrained waits on state transitions rather than polling or sleeping. Cancelling the wait never changes admission state.
+func (c *Client) WaitForDrained(ctx context.Context) error {
+	for {
+		c.drainMu.Lock()
+		if c.drainStateLocked() == protocol.DrainStateDrained {
+			c.drainMu.Unlock()
+			return nil
+		}
+		changed := c.drainChanged
+		c.drainMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+func (c *Client) signalDrainChanged() {
+	c.drainMu.Lock()
+	c.signalDrainChangedLocked()
+	c.drainMu.Unlock()
+}
+
+func (c *Client) signalDrainChangedLocked() {
+	close(c.drainChanged)
+	c.drainChanged = make(chan struct{})
+}
+
+func (c *Client) handleDrain(frame protocol.Frame) {
+	var body protocol.DrainBody
+	if frame.ID == "" || json.Unmarshal(frame.Body, &body) != nil {
+		c.trySendError(frame.ID, "malformed_drain", "invalid drain command")
+		return
+	}
+	switch body.Action {
+	case protocol.DrainActionStart:
+		c.drainMu.Lock()
+		c.drainCommandID = frame.ID
+		if !c.draining {
+			c.draining = true
+			c.signalDrainChangedLocked()
+		}
+		c.drainMu.Unlock()
+	case protocol.DrainActionCancel:
+		c.CancelDrain()
+	default:
+		c.trySendError(frame.ID, "unsupported_drain", "unsupported drain action")
+		return
+	}
+	c.trySendDrainStatus(frame.ID)
+}
+
+func (c *Client) reportDrainStatus() {
+	c.drainMu.Lock()
+	id := c.drainCommandID
+	state := c.drainStateLocked()
+	if state == protocol.DrainStateDrained {
+		c.drainCommandID = ""
+	}
+	c.drainMu.Unlock()
+	if id != "" {
+		c.trySendDrainStatus(id)
+	}
+}
+
+func (c *Client) trySendDrainStatus(id string) {
+	body, err := json.Marshal(protocol.DrainStatusBody{State: c.DrainState(), ActiveRequests: int(c.inflight.Load())})
+	if err != nil {
+		return
+	}
+	select {
+	case c.sendQ <- protocol.Frame{Type: protocol.FrameDrainStatus, ID: id, Body: body}:
+	case <-c.done:
+	default:
+	}
 }
 
 func (c *Client) finishActiveRequest(id string, active *activeRequest) {
@@ -602,25 +886,6 @@ func (c *Client) cancelRequest(id string) {
 	if active != nil {
 		active.cancel()
 	}
-}
-
-// handleRequest is the per-request goroutine: parse, hand to the installed Handler, emit Chunk frames as the handler streams, and terminate with Done/Error.
-func (c *Client) handleRequest(ctx context.Context, frame protocol.Frame) {
-	if frame.Type == protocol.FrameControlRequest {
-		c.handleControl(ctx, frame)
-		return
-	}
-	if c.cfg.Handler == nil {
-		// No handler installed — emit an immediate Error so the gateway doesn't wait HeartbeatTimeout for a dead request.
-		c.emitError(frame.ID, "no_handler", "agent has no request handler installed")
-		return
-	}
-	var body protocol.RequestBody
-	if err := json.Unmarshal(frame.Body, &body); err != nil {
-		c.emitError(frame.ID, "malformed_request", err.Error())
-		return
-	}
-	c.handleRequestBody(ctx, frame.ID, body)
 }
 
 func (c *Client) handleRequestBody(ctx context.Context, id string, body protocol.RequestBody) {
@@ -880,6 +1145,10 @@ func (c *Client) heartbeatTelemetry(ctx context.Context) protocol.HeartbeatBody 
 		NowUnixMs:   time.Now().UnixMilli(),
 		VRAMTotalGB: c.cfg.VRAMTotalGB,
 		ActiveReqs:  int(c.inflight.Load()),
+		DrainState:  c.DrainState(),
+	}
+	if c.cfg.Performance != nil {
+		telemetry.Performance = sanitizePerformanceSamples(c.cfg.Performance())
 	}
 	if c.cfg.HTTPClient == nil {
 		return telemetry
@@ -889,8 +1158,31 @@ func (c *Client) heartbeatTelemetry(ctx context.Context) protocol.HeartbeatBody 
 	usedBytes = addVRAMBytes(usedBytes, imageBytes)
 	speechBytes, _ := c.runtimeSnapshot(ctx, c.cfg.SpeechURL, protocol.RuntimeSpeech)
 	usedBytes = addVRAMBytes(usedBytes, speechBytes)
+	transcriptionBytes, _ := c.runtimeSnapshot(ctx, c.cfg.TranscriptionURL, protocol.RuntimeSpeech)
+	usedBytes = addVRAMBytes(usedBytes, transcriptionBytes)
+	videoBytes, _ := c.runtimeSnapshot(ctx, c.cfg.VideoURL, protocol.RuntimeVideo)
+	usedBytes = addVRAMBytes(usedBytes, videoBytes)
+	renderBytes, _ := c.runtimeSnapshot(ctx, c.cfg.RenderURL, protocol.RuntimeRender)
+	usedBytes = addVRAMBytes(usedBytes, renderBytes)
+	rerankBytes, _ := c.runtimeSnapshot(ctx, c.cfg.RerankURL, protocol.RuntimeRerank)
+	usedBytes = addVRAMBytes(usedBytes, rerankBytes)
+	c.vramUsedBytes.Store(usedBytes)
 	telemetry.VRAMUsedGB = float64(usedBytes) / float64(1<<30)
 	return telemetry
+}
+
+func sanitizePerformanceSamples(samples []protocol.RuntimePerformanceSample) []protocol.RuntimePerformanceSample {
+	result := make([]protocol.RuntimePerformanceSample, 0, min(len(samples), protocol.MaxPerformanceSamples))
+	for _, sample := range samples {
+		if len(result) == protocol.MaxPerformanceSamples {
+			break
+		}
+		if sample.Runtime == "" || sample.Capability == "" || sample.DurationMs <= 0 || sample.TTFTMs < 0 || sample.OutputUnits < 0 || sample.UnixMs <= 0 || sample.UnitsPerSecond < 0 || math.IsNaN(sample.UnitsPerSecond) || math.IsInf(sample.UnitsPerSecond, 0) || len(sample.Model) > 256 {
+			continue
+		}
+		result = append(result, sample)
+	}
+	return result
 }
 
 func (c *Client) ollamaVRAMBytes(ctx context.Context) int64 {
@@ -1047,7 +1339,20 @@ func (c *Client) monitorRuntimeState(ctx context.Context) {
 		return fingerprint
 	})
 	probe(protocol.RuntimeSpeech, func(probeCtx context.Context) string {
-		_, fingerprint := c.runtimeSnapshot(probeCtx, c.cfg.SpeechURL, protocol.RuntimeSpeech)
+		_, speechFingerprint := c.runtimeSnapshot(probeCtx, c.cfg.SpeechURL, protocol.RuntimeSpeech)
+		_, transcriptionFingerprint := c.runtimeSnapshot(probeCtx, c.cfg.TranscriptionURL, protocol.RuntimeSpeech)
+		return speechFingerprint + "\n" + transcriptionFingerprint
+	})
+	probe(protocol.RuntimeVideo, func(probeCtx context.Context) string {
+		_, fingerprint := c.runtimeSnapshot(probeCtx, c.cfg.VideoURL, protocol.RuntimeVideo)
+		return fingerprint
+	})
+	probe(protocol.RuntimeRender, func(probeCtx context.Context) string {
+		_, fingerprint := c.runtimeSnapshot(probeCtx, c.cfg.RenderURL, protocol.RuntimeRender)
+		return fingerprint
+	})
+	probe(protocol.RuntimeRerank, func(probeCtx context.Context) string {
+		_, fingerprint := c.runtimeSnapshot(probeCtx, c.cfg.RerankURL, protocol.RuntimeRerank)
 		return fingerprint
 	})
 	for range pending {
@@ -1070,7 +1375,8 @@ func (c *Client) observeRuntimeFingerprint(kind protocol.RuntimeKind, fingerprin
 		c.runtimeStateMu.Unlock()
 		return
 	}
-	if fingerprint == c.runtimeFingerprints[kind] {
+	previous := c.runtimeFingerprints[kind]
+	if fingerprint == previous {
 		c.runtimeMismatches[kind] = 0
 		delete(c.runtimeCandidates, kind)
 		c.runtimeStateMu.Unlock()
@@ -1088,7 +1394,29 @@ func (c *Client) observeRuntimeFingerprint(kind protocol.RuntimeKind, fingerprin
 	}
 	c.runtimeRefreshQueued = true
 	c.runtimeStateMu.Unlock()
+	if runtimeFingerprintDegraded(fingerprint) {
+		c.sendDiagnostic("error", "runtime_degraded", kind)
+	} else if runtimeFingerprintDegraded(previous) {
+		c.sendDiagnostic("info", "runtime_recovered", kind)
+	}
 	c.RequestMetadataRefresh()
+}
+
+func runtimeFingerprintDegraded(fingerprint string) bool {
+	return fingerprint == "unavailable" || strings.Contains(fingerprint, "|degraded|") || strings.Contains(fingerprint, "|unavailable|")
+}
+
+func (c *Client) sendDiagnostic(level, code string, runtimeKind protocol.RuntimeKind) {
+	body, err := json.Marshal(protocol.DiagnosticsBody{Events: []protocol.DiagnosticEvent{{UnixMs: time.Now().UnixMilli(), Level: level, Code: code, Runtime: runtimeKind}}})
+	if err != nil {
+		return
+	}
+	frame := protocol.Frame{Type: protocol.FrameDiagnostics, Body: body}
+	select {
+	case c.sendQ <- frame:
+	case <-c.done:
+	default:
+	}
 }
 
 func textRuntimeFingerprint(models []string, responses bool) string {

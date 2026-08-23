@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -147,6 +148,9 @@ func TestHandleReportsRedactedRequestMetrics(t *testing.T) {
 	}
 	if finished.PromptTokens != 3 || finished.CompletionTokens != 5 || finished.Error != "" {
 		t.Fatalf("finished = %+v", finished)
+	}
+	if finished.TTFT <= 0 {
+		t.Fatalf("finished TTFT = %v, want positive first-chunk latency", finished.TTFT)
 	}
 }
 
@@ -319,13 +323,37 @@ func TestHandleRejectsSpeechWhenRuntimeIsUnconfigured(t *testing.T) {
 	}
 }
 
-func TestHandleForwardsTranscriptionToSpeechRuntime(t *testing.T) {
+func TestHandleForwardsTranscriptionToDedicatedRuntime(t *testing.T) {
+	transcription := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/audio/transcriptions" || r.Header.Get("Content-Type") != "multipart/form-data; boundary=test" {
+			t.Fatalf("request = %s content-type %q", r.URL.Path, r.Header.Get("Content-Type"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"text":"hello"}`)
+	}))
+	defer transcription.Close()
+
+	f := NewWithTranscription("http://localhost:11434", "", "", transcription.URL)
+	var got bytes.Buffer
+	_, errBody := f.Handle(context.Background(), protocol.RequestBody{Path: "/v1/audio/transcriptions", Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=test"}, Body: []byte("--test--\r\n")}, func(chunk protocol.ChunkBody) error {
+		decoded, err := base64.StdEncoding.DecodeString(chunk.Bytes)
+		if err == nil {
+			_, _ = got.Write(decoded)
+		}
+		return err
+	})
+	if errBody != nil || got.String() != `{"text":"hello"}` {
+		t.Fatalf("Handle = %q, %+v", got.String(), errBody)
+	}
+}
+
+func TestHandleForwardsTranscriptionToCombinedSpeechRuntime(t *testing.T) {
 	speech := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/audio/transcriptions" {
 			t.Fatalf("path = %q, want transcription path", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"text":"hello"}`))
+		_, _ = io.WriteString(w, `{"text":"hello"}`)
 	}))
 	defer speech.Close()
 

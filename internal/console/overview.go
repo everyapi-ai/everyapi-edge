@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 func (h *handler) runtime(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +63,16 @@ func (h *handler) overview(w http.ResponseWriter, r *http.Request) {
 			overview.LoadedVRAMBytes += health.VRAMBytes
 		}
 	}
+	if h.cfg.TranscriptionURL != "" {
+		if health, err := h.transcriptionClient().Health(r.Context()); err == nil && health.VRAMBytes > 0 {
+			overview.LoadedVRAMBytes += health.VRAMBytes
+		}
+	}
+	if h.cfg.VideoURL != "" {
+		if health, err := h.videoClient().Health(r.Context()); err == nil && health.VRAMBytes > 0 {
+			overview.LoadedVRAMBytes += health.VRAMBytes
+		}
+	}
 	overview.ReservedVRAMBytes = memoryReserveBytes(overview.VRAMTotalGB)
 	overview.AvailableVRAMBytes = availableMemoryBytes(overview.VRAMTotalGB, overview.LoadedVRAMBytes, overview.ReservedVRAMBytes)
 	writeJSON(w, http.StatusOK, overview)
@@ -112,20 +123,54 @@ func (h *handler) updateSettings(w http.ResponseWriter) {
 }
 
 func (h *handler) saveUpdateSettings(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.SaveAutoUpdate == nil {
+	if h.cfg.SaveAutoUpdate == nil && h.cfg.SaveUpdateSettings == nil {
 		writeError(w, http.StatusNotImplemented, errors.New("this agent does not support automatic update settings"))
 		return
 	}
 	var input struct {
-		AutoUpdate *bool `json:"auto_update"`
+		AutoUpdate       *bool   `json:"auto_update"`
+		MaintenanceStart *string `json:"maintenance_start"`
+		MaintenanceEnd   *string `json:"maintenance_end"`
 	}
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 8<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil || input.AutoUpdate == nil || decoder.Decode(&struct{}{}) != io.EOF {
-		writeError(w, http.StatusBadRequest, errors.New("auto_update must be a boolean"))
+		writeError(w, http.StatusBadRequest, errors.New("auto_update must be a boolean and maintenance times must use HH:MM"))
 		return
 	}
-	settings, err := h.cfg.SaveAutoUpdate(*input.AutoUpdate)
+	for _, value := range []*string{input.MaintenanceStart, input.MaintenanceEnd} {
+		if value == nil {
+			continue
+		}
+		parsed, err := time.Parse("15:04", *value)
+		if err != nil || parsed.Format("15:04") != *value {
+			writeError(w, http.StatusBadRequest, errors.New("maintenance times must use a valid 24-hour HH:MM time"))
+			return
+		}
+	}
+	var settings UpdateSettings
+	var err error
+	if h.cfg.SaveUpdateSettings != nil {
+		if h.cfg.LoadUpdateSettings == nil {
+			writeError(w, http.StatusNotImplemented, errors.New("this agent does not support automatic update settings"))
+			return
+		}
+		current, loadErr := h.cfg.LoadUpdateSettings()
+		if loadErr != nil {
+			writeError(w, http.StatusInternalServerError, loadErr)
+			return
+		}
+		start, end := current.MaintenanceStart, current.MaintenanceEnd
+		if input.MaintenanceStart != nil {
+			start = *input.MaintenanceStart
+		}
+		if input.MaintenanceEnd != nil {
+			end = *input.MaintenanceEnd
+		}
+		settings, err = h.cfg.SaveUpdateSettings(*input.AutoUpdate, start, end)
+	} else {
+		settings, err = h.cfg.SaveAutoUpdate(*input.AutoUpdate)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

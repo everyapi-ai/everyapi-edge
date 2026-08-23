@@ -389,6 +389,15 @@ func TestHeartbeatTelemetrySumsAllManagedRuntimeMemory(t *testing.T) {
 	}
 }
 
+func TestHeartbeatTelemetryIncludesBoundedPerformanceSamples(t *testing.T) {
+	want := []protocol.RuntimePerformanceSample{{Runtime: protocol.RuntimeText, Capability: protocol.CapabilityTextChat, Model: "qwen3:8b", DurationMs: 500, OutputUnits: 20, UnitsPerSecond: 40, Succeeded: true, UnixMs: time.Now().UnixMilli()}}
+	c := &Client{cfg: Config{Performance: func() []protocol.RuntimePerformanceSample { return want }}, drainChanged: make(chan struct{})}
+	got := c.heartbeatTelemetry(context.Background())
+	if len(got.Performance) != 1 || got.Performance[0] != want[0] {
+		t.Fatalf("performance = %+v, want %+v", got.Performance, want)
+	}
+}
+
 func TestRuntimeMonitorRefreshesMetadataAfterStableStateChange(t *testing.T) {
 	image := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"ready","version":"1.0.0","vram_bytes":0,"capabilities":[{"id":"image.generate","status":"ready","models":["sana"],"paths":["/v1/images/generations"]}]}`)
@@ -495,6 +504,29 @@ func TestRuntimeMonitorRequiresTheSameCandidateTwice(t *testing.T) {
 	case <-c.metadataChanged:
 		t.Fatal("two different transient fingerprints triggered refresh")
 	default:
+	}
+}
+
+func TestRuntimeMonitorEmitsRedactedDegradedDiagnostic(t *testing.T) {
+	c := newTestClient(t)
+	c.runtimeFingerprints[protocol.RuntimeImage] = "ready"
+	c.observeRuntimeFingerprint(protocol.RuntimeImage, "unavailable")
+	c.observeRuntimeFingerprint(protocol.RuntimeImage, "unavailable")
+
+	select {
+	case frame := <-c.sendQ:
+		if frame.Type != protocol.FrameDiagnostics {
+			t.Fatalf("frame type = %q, want diagnostics", frame.Type)
+		}
+		var body protocol.DiagnosticsBody
+		if err := json.Unmarshal(frame.Body, &body); err != nil {
+			t.Fatalf("decode diagnostics: %v", err)
+		}
+		if len(body.Events) != 1 || body.Events[0].Code != "runtime_degraded" || body.Events[0].Runtime != protocol.RuntimeImage || body.Events[0].Message != "" {
+			t.Fatalf("diagnostics = %#v", body.Events)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime degradation did not emit diagnostics")
 	}
 }
 
@@ -758,6 +790,208 @@ func TestDispatchBoundsConcurrency(t *testing.T) {
 	c.wg.Wait()
 	if got := c.inflight.Load(); got != 0 {
 		t.Fatalf("inflight after drain = %d, want 0", got)
+	}
+}
+
+func TestDispatchUsesIndependentRuntimePools(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan string, 8)
+	release := make(chan struct{})
+	c, err := New(Config{
+		GatewayURL: "https://localhost",
+		NodeID:     1,
+		Identity:   identity.Decoded{Public: pub, Private: priv},
+		ResourcePolicy: protocol.ResourcePolicy{
+			Text: protocol.RuntimeResourcePolicy{MaxConcurrent: 2}, Image: protocol.RuntimeResourcePolicy{MaxConcurrent: 1}, Speech: protocol.RuntimeResourcePolicy{MaxConcurrent: 1}, Video: protocol.RuntimeResourcePolicy{MaxConcurrent: 1}, Render: protocol.RuntimeResourcePolicy{MaxConcurrent: 1}, Rerank: protocol.RuntimeResourcePolicy{MaxConcurrent: 1},
+		},
+		Handler: func(_ context.Context, req protocol.RequestBody, _ func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
+			started <- req.Path
+			<-release
+			return protocol.DoneBody{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := []protocol.RequestBody{
+		{Path: "/v1/images/generations"},
+		{Path: "/v1/chat/completions"},
+		{Path: "/v1/embeddings"},
+	}
+	for i, request := range requests {
+		if err := c.dispatchRequest(context.Background(), fmt.Sprintf("request-%d", i), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range requests {
+		select {
+		case <-started:
+		case <-time.After(shortBudget):
+			t.Fatal("independent runtime request did not start")
+		}
+	}
+	if err := c.dispatchRequest(context.Background(), "second-image", protocol.RequestBody{Path: "/v1/images/edits"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-started:
+		t.Fatalf("second image request started despite the image pool limit: %s", path)
+	case <-time.After(100 * time.Millisecond):
+	}
+	frame := <-c.sendQ
+	var body protocol.ErrorBody
+	if err := json.Unmarshal(frame.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if frame.ID != "second-image" || body.Code != errCodeNodeBusy || !strings.Contains(body.Message, "image") {
+		t.Fatalf("busy frame = %#v, body = %#v", frame, body)
+	}
+	close(release)
+	c.wg.Wait()
+}
+
+func TestDrainRejectsNewRequestsAndWaitsForInflightWork(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	c := newCappedClient(t, 1, started, release)
+	if err := c.dispatchRequest(context.Background(), "active", protocol.RequestBody{Path: "/v1/chat/completions"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(shortBudget):
+		t.Fatal("active request did not start")
+	}
+	c.BeginDrain()
+	if got := c.DrainState(); got != protocol.DrainStateDraining {
+		t.Fatalf("drain state = %q, want draining", got)
+	}
+	if err := c.dispatchRequest(context.Background(), "rejected", protocol.RequestBody{Path: "/v1/chat/completions"}); err != nil {
+		t.Fatal(err)
+	}
+	frame := <-c.sendQ
+	var body protocol.ErrorBody
+	if err := json.Unmarshal(frame.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if frame.ID != "rejected" || body.Code != "node_draining" {
+		t.Fatalf("drain rejection = %#v, body = %#v", frame, body)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	drained := make(chan error, 1)
+	go func() { drained <- c.WaitForDrained(waitCtx) }()
+	select {
+	case err := <-drained:
+		t.Fatalf("drain completed while a request was active: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-drained; err != nil {
+		t.Fatalf("WaitForDrained: %v", err)
+	}
+	if got := c.DrainState(); got != protocol.DrainStateDrained {
+		t.Fatalf("drain state = %q, want drained", got)
+	}
+	c.CancelDrain()
+	if got := c.DrainState(); got != protocol.DrainStateServing {
+		t.Fatalf("drain state = %q, want serving", got)
+	}
+}
+
+func TestHeartbeatReportsDrainState(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	c := newCappedClient(t, 1, started, release)
+	c.BeginDrain()
+	if got := c.heartbeatTelemetry(context.Background()).DrainState; got != protocol.DrainStateDrained {
+		t.Fatalf("heartbeat drain state = %q, want drained", got)
+	}
+	close(release)
+}
+
+func TestReserveVRAMRejectsBeforeStartingRuntimeWork(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, 1)
+	c, err := New(Config{
+		GatewayURL:  "https://localhost",
+		NodeID:      1,
+		Identity:    identity.Decoded{Public: pub, Private: priv},
+		VRAMTotalGB: 8,
+		ResourcePolicy: protocol.ResourcePolicy{
+			Image: protocol.RuntimeResourcePolicy{MaxConcurrent: 1, ReserveVRAMMB: 4096},
+		},
+		Handler: func(context.Context, protocol.RequestBody, func(protocol.ChunkBody) error) (protocol.DoneBody, *protocol.ErrorBody) {
+			started <- struct{}{}
+			return protocol.DoneBody{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.vramUsedBytes.Store(6 << 30)
+	if err := c.dispatchRequest(context.Background(), "image", protocol.RequestBody{Path: "/v1/images/generations"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+		t.Fatal("image runtime started without its configured VRAM reserve")
+	case <-time.After(100 * time.Millisecond):
+	}
+	frame := <-c.sendQ
+	var body protocol.ErrorBody
+	if err := json.Unmarshal(frame.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "insufficient_vram" || !strings.Contains(body.Message, "4096") {
+		t.Fatalf("VRAM rejection = %#v", body)
+	}
+}
+
+func TestDrainFrameReportsDrainingAndTerminalState(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	c := newCappedClient(t, 1, started, release)
+	if err := c.dispatchRequest(context.Background(), "active", protocol.RequestBody{Path: "/v1/chat/completions"}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	body, _ := json.Marshal(protocol.DrainBody{Action: protocol.DrainActionStart})
+	c.handleDrain(protocol.Frame{Type: protocol.FrameDrain, ID: "drain-1", Body: body})
+	first := <-c.sendQ
+	var firstStatus protocol.DrainStatusBody
+	if err := json.Unmarshal(first.Body, &firstStatus); err != nil {
+		t.Fatal(err)
+	}
+	if first.Type != protocol.FrameDrainStatus || first.ID != "drain-1" || firstStatus.State != protocol.DrainStateDraining || firstStatus.ActiveRequests != 1 {
+		t.Fatalf("first drain status = %#v, body = %#v", first, firstStatus)
+	}
+	close(release)
+	c.wg.Wait()
+	deadline := time.After(shortBudget)
+	for {
+		select {
+		case terminal := <-c.sendQ:
+			if terminal.Type != protocol.FrameDrainStatus || terminal.ID != "drain-1" {
+				continue
+			}
+			var terminalStatus protocol.DrainStatusBody
+			if err := json.Unmarshal(terminal.Body, &terminalStatus); err != nil {
+				t.Fatal(err)
+			}
+			if terminalStatus.State != protocol.DrainStateDrained || terminalStatus.ActiveRequests != 0 {
+				t.Fatalf("terminal drain status = %#v, body = %#v", terminal, terminalStatus)
+			}
+			return
+		case <-deadline:
+			t.Fatal("terminal drained status was not reported")
+		}
 	}
 }
 

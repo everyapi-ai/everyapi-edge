@@ -25,6 +25,8 @@ type RuntimeLimits struct {
 	MaxInputBytes      int64    `json:"max_input_bytes,omitempty"`
 	MaxInputCharacters int      `json:"max_input_characters,omitempty"`
 	Formats            []string `json:"formats,omitempty"`
+	Voices             []string `json:"voices,omitempty"`
+	Languages          []string `json:"languages,omitempty"`
 }
 
 type RuntimeCapability struct {
@@ -102,6 +104,9 @@ func fetchHealth(ctx context.Context, target *Target) (RuntimeHealth, error) {
 	for i := range payload.Capabilities {
 		payload.Capabilities[i].Models = normalizedStrings(payload.Capabilities[i].Models)
 		payload.Capabilities[i].Paths = normalizedStrings(payload.Capabilities[i].Paths)
+		payload.Capabilities[i].Limits.Formats = normalizedStrings(payload.Capabilities[i].Limits.Formats)
+		payload.Capabilities[i].Limits.Voices = normalizedStrings(payload.Capabilities[i].Limits.Voices)
+		payload.Capabilities[i].Limits.Languages = normalizedStrings(payload.Capabilities[i].Limits.Languages)
 	}
 	return RuntimeHealth{
 		Status: payload.Status, Models: models, Error: payload.Error, Version: payload.Version,

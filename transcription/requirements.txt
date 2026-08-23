@@ -1,0 +1,5 @@
+fastapi[standard]>=0.128,<0.129
+transformers>=4.57,<4.58
+accelerate>=1.10,<2
+soundfile>=0.13,<0.14
+numpy>=1.26,<3

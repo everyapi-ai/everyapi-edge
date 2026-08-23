@@ -323,6 +323,47 @@ func TestRevokedSentinelRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConsoleTokenRotationPersistsPrivatelyAndOverridesBootstrapToken(t *testing.T) {
+	dir := t.TempDir()
+	identityPath := filepath.Join(dir, "identity.json")
+	token, err := rotateConsoleToken(identityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(token) != 64 {
+		t.Fatalf("token length = %d", len(token))
+	}
+	got, err := loadConsoleToken(identityPath, strings.Repeat("a", 64))
+	if err != nil || got != token {
+		t.Fatalf("load = %q, %v", got, err)
+	}
+	info, err := os.Stat(consoleTokenPath(identityPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %#o", info.Mode().Perm())
+	}
+}
+
+func TestConsoleTokenLoadRejectsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink permissions differ on Windows")
+	}
+	dir := t.TempDir()
+	identityPath := filepath.Join(dir, "identity.json")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte(strings.Repeat("a", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, consoleTokenPath(identityPath)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConsoleToken(identityPath, "fallback"); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("load error = %v", err)
+	}
+}
+
 // TestRevokedSentinelPathLivesNextToIdentity pins the location: reviewers and operators look at the identity dir; the sentinel must surface there rather than buried under XDG / TempDir / etc.
 func TestRevokedSentinelPathLivesNextToIdentity(t *testing.T) {
 	dir := t.TempDir()
@@ -440,8 +481,15 @@ func TestRediscoverMetadataWhenModelChangesDuringDiscovery(t *testing.T) {
 
 func TestConsoleUpdateSettingsExposeTheSchedulerInterval(t *testing.T) {
 	settings := consoleUpdateSettings(edgeupdate.Settings{AutoUpdate: true, CheckInterval: 24 * time.Hour})
-	if settings != (console.UpdateSettings{AutoUpdate: true, CheckIntervalHours: 24}) {
+	if !reflect.DeepEqual(settings, console.UpdateSettings{AutoUpdate: true, CheckIntervalHours: 24, History: []console.UpdateStatus{}}) {
 		t.Fatalf("console settings = %#v", settings)
+	}
+}
+
+func TestProtocolUpdateStatusPreservesUpdateObservations(t *testing.T) {
+	status := protocolUpdateStatus(edgeupdate.Status{State: protocol.UpdateStateRolledBack, Version: "1.3.0", Error: "failed", CheckedAtUnixMs: 10, NextCheckAtUnixMs: 20, InstalledVersion: "1.2.9", LatestVersion: "1.3.0", RollbackReason: "candidate did not reconnect"})
+	if status.State != protocol.UpdateStateRolledBack || status.Version != "1.3.0" || status.Error != "failed" || status.CheckedAtUnixMs != 10 || status.NextCheckAtUnixMs != 20 || status.InstalledVersion != "1.2.9" || status.LatestVersion != "1.3.0" || status.RollbackReason != "candidate did not reconnect" {
+		t.Fatalf("protocol update status = %#v", status)
 	}
 }
 

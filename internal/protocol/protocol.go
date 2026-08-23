@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ProtocolVersion = "1.2"
+	ProtocolVersion = "1.3"
 
 	HeartbeatInterval = 10 * time.Second
 	HeartbeatTimeout  = 30 * time.Second
@@ -18,6 +18,7 @@ const (
 	MaxRequestBodyBytes     = 32 << 20 // 32 MiB
 	RequestBodyChunkBytes   = 64 << 10 // 64 KiB decoded
 	MaxPendingRequestBodies = 4
+	MaxPerformanceSamples   = 64
 )
 
 type FrameType string
@@ -44,6 +45,9 @@ const (
 	FrameUpdate         FrameType = "update"
 	FrameUpdateStatus   FrameType = "update_status"
 	FrameControlRequest FrameType = "control_request"
+	FrameDrain          FrameType = "drain"
+	FrameDrainStatus    FrameType = "drain_status"
+	FrameDiagnostics    FrameType = "diagnostics"
 )
 
 type Frame struct {
@@ -57,6 +61,7 @@ type AuthBody struct {
 	ProtocolVersion   string   `json:"protocol_version"`
 	AgentVersion      string   `json:"agent_version"`
 	RegistrationToken string   `json:"registration_token,omitempty"`
+	RekeyToken        string   `json:"rekey_token,omitempty"`
 	Pubkey            string   `json:"pubkey,omitempty"`
 	Challenge         string   `json:"challenge,omitempty"`
 	Signature         string   `json:"signature,omitempty"`
@@ -70,11 +75,25 @@ type WelcomeBody struct {
 }
 
 type HeartbeatBody struct {
-	NowUnixMs   int64   `json:"now_unix_ms"`
-	GPUUtilPct  int     `json:"gpu_util_pct,omitempty"`
-	VRAMUsedGB  float64 `json:"vram_used_gb,omitempty"`
-	VRAMTotalGB int     `json:"vram_total_gb,omitempty"`
-	ActiveReqs  int     `json:"active_requests,omitempty"`
+	NowUnixMs   int64                      `json:"now_unix_ms"`
+	GPUUtilPct  int                        `json:"gpu_util_pct,omitempty"`
+	VRAMUsedGB  float64                    `json:"vram_used_gb,omitempty"`
+	VRAMTotalGB int                        `json:"vram_total_gb,omitempty"`
+	ActiveReqs  int                        `json:"active_requests,omitempty"`
+	DrainState  string                     `json:"drain_state,omitempty"`
+	Performance []RuntimePerformanceSample `json:"performance,omitempty"`
+}
+
+type RuntimePerformanceSample struct {
+	Runtime        RuntimeKind  `json:"runtime"`
+	Capability     CapabilityID `json:"capability"`
+	Model          string       `json:"model,omitempty"`
+	TTFTMs         int64        `json:"ttft_ms,omitempty"`
+	DurationMs     int64        `json:"duration_ms"`
+	OutputUnits    int64        `json:"output_units,omitempty"`
+	UnitsPerSecond float64      `json:"units_per_second,omitempty"`
+	Succeeded      bool         `json:"succeeded"`
+	UnixMs         int64        `json:"unix_ms"`
 }
 
 type RequestBody struct {
@@ -136,12 +155,47 @@ const (
 	UpdateStateRestarting  = "restarting"
 	UpdateStateCurrent     = "current"
 	UpdateStateFailed      = "failed"
+	UpdateStateRolledBack  = "rolled_back"
 )
 
 type UpdateStatusBody struct {
-	State   string `json:"state"`
-	Version string `json:"version,omitempty"`
-	Error   string `json:"error,omitempty"`
+	State             string `json:"state"`
+	Version           string `json:"version,omitempty"`
+	Error             string `json:"error,omitempty"`
+	CheckedAtUnixMs   int64  `json:"checked_at_unix_ms,omitempty"`
+	NextCheckAtUnixMs int64  `json:"next_check_at_unix_ms,omitempty"`
+	InstalledVersion  string `json:"installed_version,omitempty"`
+	LatestVersion     string `json:"latest_version,omitempty"`
+	RollbackReason    string `json:"rollback_reason,omitempty"`
+}
+
+const (
+	DrainActionStart   = "start"
+	DrainActionCancel  = "cancel"
+	DrainStateServing  = "serving"
+	DrainStateDraining = "draining"
+	DrainStateDrained  = "drained"
+)
+
+type DrainBody struct {
+	Action string `json:"action"`
+}
+
+type DrainStatusBody struct {
+	State          string `json:"state"`
+	ActiveRequests int    `json:"active_requests"`
+}
+
+type DiagnosticEvent struct {
+	UnixMs  int64       `json:"unix_ms"`
+	Level   string      `json:"level"`
+	Code    string      `json:"code"`
+	Runtime RuntimeKind `json:"runtime,omitempty"`
+	Message string      `json:"message,omitempty"`
+}
+
+type DiagnosticsBody struct {
+	Events []DiagnosticEvent `json:"events"`
 }
 
 // ControlRequestBody mirrors backend/pkg/edge. It is reserved for the gateway's administrator-only, allowlisted Control Room API operations.

@@ -72,6 +72,61 @@ func TestSessionRejectsInvalidPairingToken(t *testing.T) {
 	}
 }
 
+func TestPairingTokenRotationInvalidatesExistingSessionAndOldToken(t *testing.T) {
+	newToken := strings.Repeat("b2", 32)
+	handlers := NewHandlers(Config{
+		ConsoleToken: testConsoleToken,
+		RotateConsoleToken: func() (string, error) {
+			return newToken, nil
+		},
+	}, NewStore(1))
+	login := httptest.NewRecorder()
+	handlers.Browser.ServeHTTP(login, consoleRequest(http.MethodPost, "/api/session", `{"token":"`+testConsoleToken+`"}`))
+	cookie := login.Result().Cookies()[0]
+
+	rotate := httptest.NewRecorder()
+	request := consoleRequest(http.MethodPost, "/api/session/rotate", "{}")
+	request.AddCookie(cookie)
+	handlers.Browser.ServeHTTP(rotate, request)
+	if rotate.Code != http.StatusOK || !strings.Contains(rotate.Body.String(), newToken) {
+		t.Fatalf("rotate = %d %s", rotate.Code, rotate.Body.String())
+	}
+
+	oldSession := httptest.NewRecorder()
+	request = consoleRequest(http.MethodGet, "/api/node", "")
+	request.AddCookie(cookie)
+	handlers.Browser.ServeHTTP(oldSession, request)
+	if oldSession.Code != http.StatusUnauthorized {
+		t.Fatalf("old session remained valid: %d %s", oldSession.Code, oldSession.Body.String())
+	}
+
+	oldLogin := httptest.NewRecorder()
+	handlers.Browser.ServeHTTP(oldLogin, consoleRequest(http.MethodPost, "/api/session", `{"token":"`+testConsoleToken+`"}`))
+	if oldLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("old token remained valid: %d %s", oldLogin.Code, oldLogin.Body.String())
+	}
+
+	newLogin := httptest.NewRecorder()
+	handlers.Browser.ServeHTTP(newLogin, consoleRequest(http.MethodPost, "/api/session", `{"token":"`+newToken+`"}`))
+	if newLogin.Code != http.StatusOK {
+		t.Fatalf("new token rejected: %d %s", newLogin.Code, newLogin.Body.String())
+	}
+}
+
+func TestPairingTokenRotationIsNotAvailableThroughRemoteControl(t *testing.T) {
+	handlers := NewHandlers(Config{
+		ConsoleToken: testConsoleToken,
+		RotateConsoleToken: func() (string, error) {
+			return strings.Repeat("b2", 32), nil
+		},
+	}, NewStore(1))
+	response := httptest.NewRecorder()
+	handlers.Control.ServeHTTP(response, consoleRequest(http.MethodPost, "/api/session/rotate", "{}"))
+	if response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), "b2b2") {
+		t.Fatalf("remote control exposed token rotation: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestSessionLoginIssuesHardenedCookieAndUnlocksBrowserAPI(t *testing.T) {
 	handler := NewHandlers(Config{ConsoleToken: testConsoleToken, NodeName: "studio-gpu"}, NewStore(1)).Browser
 	login := httptest.NewRecorder()

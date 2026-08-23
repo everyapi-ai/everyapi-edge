@@ -1,0 +1,4 @@
+fastapi[standard]>=0.128,<0.129
+transformers>=4.57,<4.58
+sentencepiece>=0.2,<0.3
+safetensors>=0.5,<1

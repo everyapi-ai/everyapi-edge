@@ -16,10 +16,12 @@ import {
   requestListSchema,
   runtimeSchema,
   sessionSchema,
+  pairingTokenSchema,
   settlementListSchema,
   storageSchema,
   storageMigrationSchema,
   updateSettingsSchema,
+  resourceSettingsSchema,
   type EdgeRequest,
   type LogEntry,
   type Model,
@@ -35,6 +37,8 @@ import {
   type Storage,
   type StorageMigration,
   type UpdateSettings,
+  type ResourcePolicy,
+  type ResourceSettings,
 } from './schemas'
 
 // The agent holds this data in memory and it changes on every relayed request,
@@ -51,6 +55,7 @@ export const queryKeys = {
   overview: ['overview'] as const,
   nodeProfile: ['node-profile'] as const,
   updateSettings: ['update-settings'] as const,
+  resourceSettings: ['resource-settings'] as const,
   models: ['models'] as const,
   modelCapabilities: (name: string) => ['models', 'capabilities', name] as const,
   requests: ['requests'] as const,
@@ -94,6 +99,12 @@ export const useLogout = () => {
         pairing_required: true,
       } satisfies Session)
     },
+  })
+}
+
+export const useRotatePairingToken = () => {
+  return useMutation({
+    mutationFn: () => postJSONResponse('/api/session/rotate', {}, pairingTokenSchema),
   })
 }
 
@@ -148,6 +159,47 @@ export const useSetAutoUpdate = () => {
     },
     onSuccess: (settings) => {
       queryClient.setQueryData(queryKeys.updateSettings, settings)
+    },
+  })
+}
+
+export const useSaveUpdateSettings = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (
+      input: Pick<UpdateSettings, 'auto_update' | 'maintenance_start' | 'maintenance_end'>,
+    ) => putJSONResponse('/api/update/settings', input, updateSettingsSchema),
+    onSuccess: (settings) => {
+      queryClient.setQueryData(queryKeys.updateSettings, settings)
+    },
+  })
+}
+
+export const useResourceSettings = (): UseQueryResult<ResourceSettings> =>
+  useQuery({
+    queryKey: queryKeys.resourceSettings,
+    queryFn: () => getJSON('/api/settings', resourceSettingsSchema),
+    refetchInterval: LIVE_REFETCH_MS,
+  })
+
+export const useSaveResourcePolicy = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (resourcePolicy: ResourcePolicy) =>
+      putJSONResponse('/api/settings', { resource_policy: resourcePolicy }, resourceSettingsSchema),
+    onSuccess: (settings) => {
+      queryClient.setQueryData(queryKeys.resourceSettings, settings)
+    },
+  })
+}
+
+export const useSetDrain = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (enabled: boolean) =>
+      postJSONResponse('/api/drain', { enabled }, resourceSettingsSchema),
+    onSuccess: (settings) => {
+      queryClient.setQueryData(queryKeys.resourceSettings, settings)
     },
   })
 }

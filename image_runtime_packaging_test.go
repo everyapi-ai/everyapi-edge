@@ -101,6 +101,90 @@ func TestSpeechRuntimeIsWiredIntoEveryAcceleratedBundle(t *testing.T) {
 	}
 }
 
+func TestTranscriptionRuntimeIsWiredIntoEveryAcceleratedBundle(t *testing.T) {
+	tests := []struct {
+		file     string
+		required []string
+	}{
+		{"docker-compose.yml", []string{"transcription:", "build: ./transcription", "EVERYAPI_TRANSCRIPTION_URL: http://transcription:8190"}},
+		{"docker-compose.rocm.yml", []string{"transcription:", "dockerfile: Dockerfile.rocm", "EVERYAPI_TRANSCRIPTION_URL: http://transcription:8190"}},
+		{"docker-compose.macos.yml", []string{"EVERYAPI_TRANSCRIPTION_URL: http://host.docker.internal:8190"}},
+		{"docker-compose.windows.yml", []string{"transcription:", "build: ./transcription", "EVERYAPI_TRANSCRIPTION_URL: http://transcription:8190"}},
+	}
+	for _, test := range tests {
+		t.Run(test.file, func(t *testing.T) {
+			contents := readPackagingFile(t, test.file)
+			for _, required := range test.required {
+				if !strings.Contains(contents, required) {
+					t.Errorf("%s is missing %q", test.file, required)
+				}
+			}
+		})
+	}
+}
+
+func TestVideoRuntimeIsWiredIntoEveryAcceleratedBundle(t *testing.T) {
+	tests := []struct {
+		file     string
+		required []string
+	}{
+		{"docker-compose.yml", []string{"video:", "build: ./video", "EVERYAPI_VIDEO_URL: http://video:8191"}},
+		{"docker-compose.rocm.yml", []string{"video:", "dockerfile: Dockerfile.rocm", "EVERYAPI_VIDEO_URL: http://video:8191"}},
+		{"docker-compose.macos.yml", []string{"EVERYAPI_VIDEO_URL: http://host.docker.internal:8191"}},
+		{"docker-compose.windows.yml", []string{"video:", "build: ./video", "EVERYAPI_VIDEO_URL: http://video:8191"}},
+	}
+	for _, test := range tests {
+		t.Run(test.file, func(t *testing.T) {
+			contents := readPackagingFile(t, test.file)
+			for _, required := range test.required {
+				if !strings.Contains(contents, required) {
+					t.Errorf("%s is missing %q", test.file, required)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderAdapterIsIsolatedInEveryBundle(t *testing.T) {
+	for _, filename := range []string{"docker-compose.yml", "docker-compose.rocm.yml", "docker-compose.macos.yml", "docker-compose.windows.yml"} {
+		contents := readPackagingFile(t, filename)
+		service := composeServiceBlock(t, contents, "render")
+		for _, required := range []string{"build: ./render", ":/workflows:ro", "./data/render:/data", "EVERYAPI_COMFYUI_URL:"} {
+			if !strings.Contains(service, required) {
+				t.Errorf("%s render service is missing %q", filename, required)
+			}
+		}
+		if strings.Contains(service, "/var/run/docker.sock") {
+			t.Errorf("%s exposes the Docker socket to the render adapter", filename)
+		}
+		if !strings.Contains(contents, "EVERYAPI_RENDER_URL: http://render:8192") {
+			t.Errorf("%s does not route the agent through the render adapter", filename)
+		}
+	}
+}
+
+func TestRerankRuntimeIsWiredIntoEveryAcceleratedBundle(t *testing.T) {
+	tests := []struct {
+		file     string
+		required []string
+	}{
+		{"docker-compose.yml", []string{"rerank:", "build: ./rerank", "EVERYAPI_RERANK_URL: http://rerank:8193"}},
+		{"docker-compose.rocm.yml", []string{"rerank:", "dockerfile: Dockerfile.rocm", "EVERYAPI_RERANK_URL: http://rerank:8193"}},
+		{"docker-compose.macos.yml", []string{"EVERYAPI_RERANK_URL: http://host.docker.internal:8193"}},
+		{"docker-compose.windows.yml", []string{"rerank:", "build: ./rerank", "EVERYAPI_RERANK_URL: http://rerank:8193"}},
+	}
+	for _, test := range tests {
+		t.Run(test.file, func(t *testing.T) {
+			contents := readPackagingFile(t, test.file)
+			for _, required := range test.required {
+				if !strings.Contains(contents, required) {
+					t.Errorf("%s is missing %q", test.file, required)
+				}
+			}
+		})
+	}
+}
+
 // Kokoro cannot phonemise out-of-vocabulary words without espeak-ng, Whisper needs ffmpeg to decode uploads, and misaki pip-installs the spaCy pipeline on first use unless it is baked in. Any of these gaps would surface on a live buyer request rather than at build time.
 func TestSpeechImagesBundleTheirPhonemiserAssets(t *testing.T) {
 	for _, filename := range []string{"speech/Dockerfile", "speech/Dockerfile.rocm"} {
@@ -139,6 +223,42 @@ func TestCIBuildsSpeechRuntimeImages(t *testing.T) {
 	release := readPackagingFile(t, "../../.github/workflows/edge-release.yml")
 	if strings.Contains(release, "clients/edge/speech/Dockerfile") {
 		t.Error("edge-release.yml builds the speech runtime again; that check belongs on the pull request, where it can still stop a broken Dockerfile from shipping")
+	}
+}
+
+func TestCIBuildsTranscriptionRuntimeImages(t *testing.T) {
+	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
+	for _, required := range []string{"name: transcription-cuda", "file: clients/edge/transcription/Dockerfile\n", "name: transcription-rocm", "file: clients/edge/transcription/Dockerfile.rocm\n"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("CI is missing %q", required)
+		}
+	}
+}
+
+func TestCIBuildsVideoRuntimeImages(t *testing.T) {
+	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
+	for _, required := range []string{"name: video-cuda", "file: clients/edge/video/Dockerfile\n", "name: video-rocm", "file: clients/edge/video/Dockerfile.rocm\n"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("CI is missing %q", required)
+		}
+	}
+}
+
+func TestCIBuildsRenderAdapterImage(t *testing.T) {
+	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
+	for _, required := range []string{"name: render", "file: clients/edge/render/Dockerfile\n"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("CI is missing %q", required)
+		}
+	}
+}
+
+func TestCIBuildsRerankRuntimeImages(t *testing.T) {
+	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
+	for _, required := range []string{"name: rerank-cuda", "file: clients/edge/rerank/Dockerfile\n", "name: rerank-rocm", "file: clients/edge/rerank/Dockerfile.rocm\n"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("CI is missing %q", required)
+		}
 	}
 }
 
@@ -184,6 +304,51 @@ func TestMacOSInstallerStartsNativeMPSSpeechRuntime(t *testing.T) {
 	plist := readPackagingFile(t, "scripts/com.everyapi.edge-speech.plist.in")
 	if !strings.Contains(plist, "/opt/homebrew/bin") {
 		t.Fatal("native speech launchd service must be able to resolve Homebrew espeak-ng")
+	}
+}
+
+func TestMacOSInstallerStartsNativeMPSTranscriptionRuntime(t *testing.T) {
+	installer := readPackagingFile(t, "install.sh")
+	for _, required := range []string{"ensure_macos_transcription", "install-macos-transcription.sh"} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("macOS installer is missing %q", required)
+		}
+	}
+	helper := readPackagingFile(t, "scripts/install-macos-transcription.sh")
+	for _, required := range []string{"transcription/requirements.txt", "com.everyapi.edge-transcription.plist.in", "127.0.0.1:8190/health", "+ 1200"} {
+		if !strings.Contains(helper, required) {
+			t.Errorf("native transcription installer is missing %q", required)
+		}
+	}
+}
+
+func TestMacOSInstallerStartsNativeMPSVideoRuntime(t *testing.T) {
+	installer := readPackagingFile(t, "install.sh")
+	for _, required := range []string{"ensure_macos_video", "install-macos-video.sh"} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("macOS installer is missing %q", required)
+		}
+	}
+	helper := readPackagingFile(t, "scripts/install-macos-video.sh")
+	for _, required := range []string{"video/requirements-macos.txt", "com.everyapi.edge-video.plist.in", "127.0.0.1:8191/health", "+ 1200"} {
+		if !strings.Contains(helper, required) {
+			t.Errorf("native video installer is missing %q", required)
+		}
+	}
+}
+
+func TestMacOSInstallerStartsNativeMPSRerankRuntime(t *testing.T) {
+	installer := readPackagingFile(t, "install.sh")
+	for _, required := range []string{"ensure_macos_rerank", "install-macos-rerank.sh"} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("macOS installer is missing %q", required)
+		}
+	}
+	helper := readPackagingFile(t, "scripts/install-macos-rerank.sh")
+	for _, required := range []string{"rerank/requirements-macos.txt", "com.everyapi.edge-rerank.plist.in", "127.0.0.1:8193/health", "+ 1200"} {
+		if !strings.Contains(helper, required) {
+			t.Errorf("native rerank installer is missing %q", required)
+		}
 	}
 }
 

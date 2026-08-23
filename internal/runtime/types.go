@@ -17,6 +17,9 @@ const (
 	KindText   Kind = "text"
 	KindImage  Kind = "image"
 	KindSpeech Kind = "speech"
+	KindVideo  Kind = "video"
+	KindRender Kind = "render"
+	KindRerank Kind = "rerank"
 )
 
 var (
@@ -103,16 +106,43 @@ func joinURL(baseURL, path string) (string, error) {
 }
 
 type Router struct {
-	text   *Target
-	image  *Target
-	speech *Target
+	text          *Target
+	image         *Target
+	speech        *Target
+	transcription *Target
+	video         *Target
+	render        *Target
+	rerank        *Target
 }
 
 func NewRouter(textURL, imageURL, speechURL string, client HTTPDoer) *Router {
+	return NewRouterWithTranscription(textURL, imageURL, speechURL, "", client)
+}
+
+func NewRouterWithTranscription(textURL, imageURL, speechURL, transcriptionURL string, client HTTPDoer) *Router {
+	return NewRouterWithMedia(textURL, imageURL, speechURL, transcriptionURL, "", client)
+}
+
+func NewRouterWithMedia(textURL, imageURL, speechURL, transcriptionURL, videoURL string, client HTTPDoer) *Router {
+	return NewRouterWithWorkflows(textURL, imageURL, speechURL, transcriptionURL, videoURL, "", client)
+}
+
+func NewRouterWithWorkflows(textURL, imageURL, speechURL, transcriptionURL, videoURL, renderURL string, client HTTPDoer) *Router {
+	return NewRouterWithAdvanced(textURL, imageURL, speechURL, transcriptionURL, videoURL, renderURL, "", client)
+}
+
+func NewRouterWithAdvanced(textURL, imageURL, speechURL, transcriptionURL, videoURL, renderURL, rerankURL string, client HTTPDoer) *Router {
+	if strings.TrimSpace(transcriptionURL) == "" {
+		transcriptionURL = speechURL
+	}
 	return &Router{
-		text:   newTarget(KindText, textURL, client),
-		image:  newTarget(KindImage, imageURL, client),
-		speech: newTarget(KindSpeech, speechURL, client),
+		text:          newTarget(KindText, textURL, client),
+		image:         newTarget(KindImage, imageURL, client),
+		speech:        newTarget(KindSpeech, speechURL, client),
+		transcription: newTarget(KindSpeech, transcriptionURL, client),
+		video:         newTarget(KindVideo, videoURL, client),
+		render:        newTarget(KindRender, renderURL, client),
+		rerank:        newTarget(KindRerank, rerankURL, client),
 	}
 }
 
@@ -122,9 +152,23 @@ func (r *Router) Resolve(path string) (*Target, error) {
 		return configured(r.text)
 	case "/v1/images/generations", "/v1/images/edits":
 		return configured(r.image)
-	case "/v1/audio/speech", "/v1/audio/transcriptions", "/v1/audio/translations":
+	case "/v1/audio/speech":
 		return configured(r.speech)
+	case "/v1/audio/transcriptions", "/v1/audio/translations":
+		return configured(r.transcription)
+	case "/v1/videos", "/v1/video/generations":
+		return configured(r.video)
+	case "/v1/render/jobs":
+		return configured(r.render)
+	case "/v1/rerank":
+		return configured(r.rerank)
 	default:
+		if strings.HasPrefix(path, "/v1/videos/") {
+			return configured(r.video)
+		}
+		if strings.HasPrefix(path, "/v1/render/jobs/") {
+			return configured(r.render)
+		}
 		return nil, ErrPathNotAllowed
 	}
 }

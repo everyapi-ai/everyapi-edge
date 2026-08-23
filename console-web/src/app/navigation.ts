@@ -5,6 +5,7 @@ import {
   HardDrive,
   MessageSquareText,
   ScrollText,
+  Settings,
   SlidersHorizontal,
   type LucideIcon,
 } from 'lucide-react'
@@ -34,7 +35,10 @@ export const NAVIGATION_GROUPS: NavigationGroup[] = [
   },
   {
     labelKey: 'nav.groupMaintain',
-    items: [{ to: '/storage', labelKey: 'nav.storage', icon: HardDrive }],
+    items: [
+      { to: '/storage', labelKey: 'nav.storage', icon: HardDrive },
+      { to: '/settings', labelKey: 'nav.settings', icon: Settings },
+    ],
   },
   {
     labelKey: 'nav.groupObserve',

@@ -76,6 +76,7 @@ func runGatewayLifecycle(
 	store *console.Store,
 	logSink *logTee,
 	metadataRefresh *metadataRefresh,
+	resourceController *resourcePolicyController,
 ) error {
 	if metadataRefresh == nil {
 		metadataRefresh = newMetadataRefresh()
@@ -87,6 +88,9 @@ func runGatewayLifecycle(
 			Active: func(session edgeapp.Session) {
 				if active, ok := session.(*client.Client); ok {
 					logSink.client.Store(active)
+					if resourceController != nil {
+						resourceController.SessionActive(active)
+					}
 				}
 			},
 			Inactive: func() { logSink.client.Store(nil) },
@@ -115,10 +119,19 @@ func runGatewayLifecycle(
 	}
 
 	return reconnector.Run(ctx, cfg.RegistrationToken, func(ctx context.Context, registrationToken string) (edgeapp.Session, error) {
+		resourcePolicy := cfg.ResourcePolicy
+		if resourceController != nil {
+			settings, err := resourceController.Load()
+			if err != nil {
+				return nil, fmt.Errorf("load resource policy: %w", err)
+			}
+			resourcePolicy = settings.ResourcePolicy
+		}
 		var textModels []string
 		var textResponsesSupported bool
 		sessionMeta := rediscoverUntilStable(metadataRefresh, func() protocol.NodeMeta {
 			sessionMeta := meta
+			sessionMeta.ResourcePolicy = resourcePolicy
 			models, modelErr := discoverOllamaModels(ctx, cfg.OllamaURL)
 			if modelErr != nil {
 				textModels = nil
@@ -154,6 +167,46 @@ func runGatewayLifecycle(
 					log.Printf("speech runtime is %s with %d models", health.Status, len(health.Models))
 				}
 			}
+			if cfg.TranscriptionURL != "" {
+				health, healthErr := edgeruntime.NewSpeechClient(cfg.TranscriptionURL, &http.Client{Timeout: 10 * time.Second}).Health(ctx)
+				if healthErr != nil {
+					log.Printf("warning: could not discover transcription runtime capabilities: %v", healthErr)
+				} else {
+					sessionMeta.Capabilities = append(sessionMeta.Capabilities, protocolCapabilities(protocol.RuntimeSpeech, health)...)
+					sessionMeta.Models = mergeModels(sessionMeta.Models, readyRuntimeModels(health))
+					log.Printf("transcription runtime is %s with %d models", health.Status, len(health.Models))
+				}
+			}
+			if cfg.VideoURL != "" {
+				health, healthErr := edgeruntime.NewVideoClient(cfg.VideoURL, &http.Client{Timeout: 10 * time.Second}).Health(ctx)
+				if healthErr != nil {
+					log.Printf("warning: could not discover video runtime capabilities: %v", healthErr)
+				} else {
+					sessionMeta.Capabilities = append(sessionMeta.Capabilities, protocolCapabilities(protocol.RuntimeVideo, health)...)
+					sessionMeta.Models = mergeModels(sessionMeta.Models, readyRuntimeModels(health))
+					log.Printf("video runtime is %s with %d models", health.Status, len(health.Models))
+				}
+			}
+			if cfg.RenderURL != "" {
+				health, healthErr := edgeruntime.NewRenderClient(cfg.RenderURL, &http.Client{Timeout: 10 * time.Second}).Health(ctx)
+				if healthErr != nil {
+					log.Printf("warning: could not discover render runtime capabilities: %v", healthErr)
+				} else {
+					sessionMeta.Capabilities = append(sessionMeta.Capabilities, protocolCapabilities(protocol.RuntimeRender, health)...)
+					sessionMeta.Models = mergeModels(sessionMeta.Models, readyRuntimeModels(health))
+					log.Printf("render runtime is %s with %d templates", health.Status, len(health.Models))
+				}
+			}
+			if cfg.RerankURL != "" {
+				health, healthErr := edgeruntime.NewRerankClient(cfg.RerankURL, &http.Client{Timeout: 10 * time.Second}).Health(ctx)
+				if healthErr != nil {
+					log.Printf("warning: could not discover rerank runtime capabilities: %v", healthErr)
+				} else {
+					sessionMeta.Capabilities = append(sessionMeta.Capabilities, protocolCapabilities(protocol.RuntimeRerank, health)...)
+					sessionMeta.Models = mergeModels(sessionMeta.Models, readyRuntimeModels(health))
+					log.Printf("rerank runtime is %s with %d models", health.Status, len(health.Models))
+				}
+			}
 			return sessionMeta
 		})
 
@@ -162,9 +215,15 @@ func runGatewayLifecycle(
 			OllamaURL:              cfg.OllamaURL,
 			DiffusersURL:           cfg.DiffusersURL,
 			SpeechURL:              cfg.SpeechURL,
+			TranscriptionURL:       cfg.TranscriptionURL,
+			VideoURL:               cfg.VideoURL,
+			RenderURL:              cfg.RenderURL,
+			RerankURL:              cfg.RerankURL,
 			VRAMTotalGB:            sessionMeta.Hardware.VRAMTotalGB,
+			ResourcePolicy:         resourcePolicy,
 			MaxConcurrentRequests:  cfg.MaxConcurrentRequests,
 			GatewayRoundTrip:       store.SetGatewayRoundTrip,
+			Performance:            func() []protocol.RuntimePerformanceSample { return store.PerformanceSamples(time.Now().UTC()) },
 			MetadataChanged:        metadataRefresh.changes,
 			NodeID:                 cfg.NodeID,
 			RegistrationToken:      registrationToken,
@@ -172,6 +231,17 @@ func runGatewayLifecycle(
 			Meta:                   sessionMeta,
 			TextModels:             textModels,
 			TextResponsesSupported: textResponsesSupported,
+			Update: func(updateCtx context.Context, emit func(protocol.UpdateStatusBody)) error {
+				if updateManager == nil {
+					return errors.New("this agent does not support updates")
+				}
+				return updateManager.RunLatest(updateCtx, func(status edgeupdate.Status) {
+					if updateStatus != nil {
+						updateStatus(status)
+					}
+					emit(protocolUpdateStatus(status))
+				})
+			},
 			OnConnected: func() {
 				if updateManager != nil {
 					if err := updateManager.Promote(); err != nil {

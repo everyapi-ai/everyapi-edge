@@ -196,6 +196,105 @@ func TestAutoUpdateSettingDefaultsOffAndPersists(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsPersistMaintenanceWindowAndObservations(t *testing.T) {
+	dir := t.TempDir()
+	manager := New(Config{CurrentVersion: "1.2.3", StateDir: dir})
+	settings, err := manager.SetSettings(true, "23:00", "02:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.AutoUpdate || settings.MaintenanceStart != "23:00" || settings.MaintenanceEnd != "02:00" {
+		t.Fatalf("settings = %+v", settings)
+	}
+	for index := 0; index < 25; index++ {
+		manager.recordStatus(Status{State: "current", Version: "1.2.3", InstalledVersion: "1.2.3", LatestVersion: "1.2.3", CheckedAtUnixMs: int64(1_700_000_000_000 + index)})
+	}
+	restarted := New(Config{CurrentVersion: "1.2.3", StateDir: dir})
+	settings, err = restarted.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.MaintenanceStart != "23:00" || settings.MaintenanceEnd != "02:00" || settings.LastCheckAtUnixMs == 0 || settings.InstalledVersion != "1.2.3" || settings.LatestVersion != "1.2.3" {
+		t.Fatalf("restarted settings = %+v", settings)
+	}
+	if len(settings.History) != 20 {
+		t.Fatalf("history = %d, want 20", len(settings.History))
+	}
+}
+
+func TestMaintenanceDelayHandlesWindowsAcrossMidnight(t *testing.T) {
+	location := time.FixedZone("JST", 9*60*60)
+	cases := []struct {
+		now  time.Time
+		want time.Duration
+	}{
+		{time.Date(2026, 8, 23, 23, 30, 0, 0, location), 0},
+		{time.Date(2026, 8, 24, 1, 30, 0, 0, location), 0},
+		{time.Date(2026, 8, 24, 12, 0, 0, 0, location), 11 * time.Hour},
+	}
+	for _, test := range cases {
+		got, err := maintenanceDelay(test.now, "23:00", "02:00")
+		if err != nil || got != test.want {
+			t.Fatalf("maintenanceDelay(%s) = %s, %v; want %s", test.now, got, err, test.want)
+		}
+	}
+}
+
+func TestBootstrapRecordsRollbackReason(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "everyapi-edge-1.2.3")
+	if err := os.WriteFile(path, []byte("candidate"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeState(dir, state{Version: "1.2.3", Path: path, Phase: phaseAttempted}); err != nil {
+		t.Fatal(err)
+	}
+	manager := New(Config{CurrentVersion: "1.0.0", StateDir: dir})
+	if err := manager.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := manager.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.RollbackReason == "" || len(settings.History) != 1 || settings.History[0].State != "rolled_back" {
+		t.Fatalf("rollback settings = %+v", settings)
+	}
+}
+
+func TestRunLatestDrainsBeforeExecAndResumesWhenExecFails(t *testing.T) {
+	binary := []byte("new edge binary")
+	sum := sha256.Sum256(binary)
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			fmt.Fprintf(w, `{"tag_name":"edge-v1.2.3","assets":[{"name":"everyapi-edge-linux-amd64","browser_download_url":%q},{"name":"checksums.txt","browser_download_url":%q}]}`, server.URL+"/binary", server.URL+"/checksums")
+		case "/binary":
+			_, _ = w.Write(binary)
+		case "/checksums":
+			fmt.Fprintf(w, "%x  everyapi-edge-linux-amd64\n", sum)
+		}
+	}))
+	defer server.Close()
+	var drained, resumed bool
+	manager := New(Config{CurrentVersion: "1.0.0", StateDir: t.TempDir(), GOOS: "linux", GOARCH: "amd64", ReleaseAPI: server.URL + "/latest", AllowAssetHost: server.URL, HTTPClient: server.Client(), Exec: func(string) error {
+		if !drained {
+			t.Fatal("candidate executed before drain")
+		}
+		return errExecTest
+	}, Drain: func(context.Context) (func(), error) {
+		drained = true
+		return func() { resumed = true }, nil
+	}})
+	if err := manager.RunLatest(context.Background(), nil); !errors.Is(err, errExecTest) {
+		t.Fatalf("RunLatest = %v", err)
+	}
+	if !resumed {
+		t.Fatal("serving did not resume after failed exec")
+	}
+}
+
 func TestAutoUpdateSchedulerChecksAfterJitterThenEveryDay(t *testing.T) {
 	type scheduledTimer struct {
 		delay time.Duration

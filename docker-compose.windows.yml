@@ -50,6 +50,85 @@ services:
       retries: 6
       start_period: 20m
 
+  transcription:
+    build: ./transcription
+    container_name: everyapi-edge-transcription
+    restart: unless-stopped
+    environment:
+      EVERYAPI_TRANSCRIPTION_MODEL: ${EVERYAPI_TRANSCRIPTION_MODEL:-openai/whisper-small}
+      HF_TOKEN: ${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ${EVERYAPI_TRANSCRIPTION_MODEL_PATH:-${EVERYAPI_MODEL_PATH:?model path required}/transcription}:/models/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8190/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20m
+
+  video:
+    build: ./video
+    container_name: everyapi-edge-video
+    restart: unless-stopped
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ${EVERYAPI_VIDEO_MODEL_PATH:-${EVERYAPI_MODEL_PATH:?model path required}/video}:/models/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8191/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20m
+
+  render:
+    build: ./render
+    container_name: everyapi-edge-render
+    restart: unless-stopped
+    environment:
+      EVERYAPI_COMFYUI_URL: ${EVERYAPI_COMFYUI_URL:-http://host.docker.internal:8188}
+    volumes:
+      - ${EVERYAPI_RENDER_WORKFLOW_PATH:-./data/render-workflows}:/workflows:ro
+      - ./data/render:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  rerank:
+    build: ./rerank
+    container_name: everyapi-edge-rerank
+    restart: unless-stopped
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ${EVERYAPI_RERANK_MODEL_PATH:-${EVERYAPI_MODEL_PATH:?model path required}/rerank}:/models/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8193/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20m
+
   ollama:
     image: ollama/ollama:latest
     container_name: everyapi-edge-ollama
@@ -82,6 +161,12 @@ services:
         condition: service_healthy
       speech:
         condition: service_healthy
+      transcription:
+        condition: service_healthy
+      video:
+        condition: service_healthy
+      rerank:
+        condition: service_healthy
       ollama:
         condition: service_healthy
     environment:
@@ -91,6 +176,10 @@ services:
       OLLAMA_URL: http://ollama:11434
       EVERYAPI_DIFFUSERS_URL: http://diffusers:8188
       EVERYAPI_SPEECH_URL: http://speech:8189
+      EVERYAPI_TRANSCRIPTION_URL: http://transcription:8190
+      EVERYAPI_VIDEO_URL: http://video:8191
+      EVERYAPI_RENDER_URL: http://render:8192
+      EVERYAPI_RERANK_URL: http://rerank:8193
       EVERYAPI_OLLAMA_STORAGE_PATH: /models
       EVERYAPI_IDENTITY_PATH: /var/lib/everyapi-edge/identity.json
       EVERYAPI_NODE_NAME: ${EVERYAPI_NODE_NAME:-}
@@ -100,6 +189,18 @@ services:
       EVERYAPI_COUNTRY: ${EVERYAPI_COUNTRY:-}
       EVERYAPI_WORKLOADS: ${EVERYAPI_WORKLOADS:-}
       EVERYAPI_MAX_CONCURRENT_REQUESTS: ${EVERYAPI_MAX_CONCURRENT_REQUESTS:-4}
+      EVERYAPI_MAX_CONCURRENT_TEXT: ${EVERYAPI_MAX_CONCURRENT_TEXT:-4}
+      EVERYAPI_MAX_CONCURRENT_IMAGE: ${EVERYAPI_MAX_CONCURRENT_IMAGE:-1}
+      EVERYAPI_MAX_CONCURRENT_SPEECH: ${EVERYAPI_MAX_CONCURRENT_SPEECH:-2}
+      EVERYAPI_MAX_CONCURRENT_VIDEO: ${EVERYAPI_MAX_CONCURRENT_VIDEO:-1}
+      EVERYAPI_MAX_CONCURRENT_RENDER: ${EVERYAPI_MAX_CONCURRENT_RENDER:-1}
+      EVERYAPI_MAX_CONCURRENT_RERANK: ${EVERYAPI_MAX_CONCURRENT_RERANK:-2}
+      EVERYAPI_RESERVE_VRAM_MB_TEXT: ${EVERYAPI_RESERVE_VRAM_MB_TEXT:-0}
+      EVERYAPI_RESERVE_VRAM_MB_IMAGE: ${EVERYAPI_RESERVE_VRAM_MB_IMAGE:-0}
+      EVERYAPI_RESERVE_VRAM_MB_SPEECH: ${EVERYAPI_RESERVE_VRAM_MB_SPEECH:-0}
+      EVERYAPI_RESERVE_VRAM_MB_VIDEO: ${EVERYAPI_RESERVE_VRAM_MB_VIDEO:-0}
+      EVERYAPI_RESERVE_VRAM_MB_RENDER: ${EVERYAPI_RESERVE_VRAM_MB_RENDER:-0}
+      EVERYAPI_RESERVE_VRAM_MB_RERANK: ${EVERYAPI_RESERVE_VRAM_MB_RERANK:-0}
       EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
       EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:?console token required}
     volumes:

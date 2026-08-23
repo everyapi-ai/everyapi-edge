@@ -16,6 +16,7 @@ import { playgroundRoute } from '@/routes/playground'
 import { imageEditRoute } from '@/routes/image-edit'
 import { runtimeRoute } from '@/routes/runtime'
 import { storageRoute } from '@/routes/storage'
+import { settingsRoute } from '@/routes/settings'
 import { rootRoute } from '@/routes/root'
 import { trafficRoute } from '@/routes/traffic'
 
@@ -30,6 +31,7 @@ const routeTree: AnyRoute = rootRoute.addChildren([
   overviewRoute,
   runtimeRoute,
   storageRoute,
+  settingsRoute,
   modelsRoute,
   playgroundRoute,
   imageEditRoute,

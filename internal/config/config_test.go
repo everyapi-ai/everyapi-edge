@@ -12,6 +12,7 @@ func validBase() Config {
 		OllamaURL:             "http://ollama:11434",
 		IdentityPath:          "/var/lib/everyapi-edge/identity.json",
 		ConsoleAddr:           "127.0.0.1:8421",
+		ResourcePolicy:        defaultResourcePolicy(),
 		MaxConcurrentRequests: 4,
 	}
 }
@@ -139,6 +140,20 @@ func TestFromEnvReadsBoundedRequestConcurrency(t *testing.T) {
 	}
 }
 
+func TestFromEnvUsesGlobalConcurrencyAsPerRuntimeFallback(t *testing.T) {
+	t.Setenv("EVERYAPI_MAX_CONCURRENT_REQUESTS", "8")
+	t.Setenv("EVERYAPI_MAX_CONCURRENT_TEXT", "6")
+	policy := FromEnv().ResourcePolicy
+	if policy.Text.MaxConcurrent != 6 {
+		t.Fatalf("text concurrency = %d, want explicit override 6", policy.Text.MaxConcurrent)
+	}
+	for name, got := range map[string]int{"image": policy.Image.MaxConcurrent, "speech": policy.Speech.MaxConcurrent, "video": policy.Video.MaxConcurrent, "render": policy.Render.MaxConcurrent, "rerank": policy.Rerank.MaxConcurrent} {
+		if got != 8 {
+			t.Fatalf("%s concurrency = %d, want global fallback 8", name, got)
+		}
+	}
+}
+
 func TestValidateRejectsInvalidRequestConcurrency(t *testing.T) {
 	cfg := validBase()
 	cfg.MaxConcurrentRequests = -1
@@ -162,5 +177,70 @@ func TestValidateAllowsLocalPreviewWithoutGatewayCredentials(t *testing.T) {
 	cfg.NodeID = 0
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("local preview should not need gateway credentials, got: %v", err)
+	}
+}
+
+func TestFromEnvBuildsPerRuntimeResourcePolicy(t *testing.T) {
+	t.Setenv("EVERYAPI_MAX_CONCURRENT_TEXT", "6")
+	t.Setenv("EVERYAPI_MAX_CONCURRENT_IMAGE", "1")
+	t.Setenv("EVERYAPI_MAX_CONCURRENT_SPEECH", "3")
+	t.Setenv("EVERYAPI_MAX_CONCURRENT_VIDEO", "1")
+	t.Setenv("EVERYAPI_MAX_CONCURRENT_RENDER", "1")
+	t.Setenv("EVERYAPI_MAX_CONCURRENT_RERANK", "4")
+	t.Setenv("EVERYAPI_RESERVE_VRAM_MB_TEXT", "1024")
+	t.Setenv("EVERYAPI_RESERVE_VRAM_MB_IMAGE", "4096")
+	t.Setenv("EVERYAPI_RESERVE_VRAM_MB_SPEECH", "512")
+	t.Setenv("EVERYAPI_RESERVE_VRAM_MB_VIDEO", "8192")
+	t.Setenv("EVERYAPI_RESERVE_VRAM_MB_RENDER", "8192")
+	t.Setenv("EVERYAPI_RESERVE_VRAM_MB_RERANK", "2048")
+
+	policy := FromEnv().ResourcePolicy
+	if policy.Text.MaxConcurrent != 6 || policy.Text.ReserveVRAMMB != 1024 {
+		t.Fatalf("text policy = %#v", policy.Text)
+	}
+	if policy.Image.MaxConcurrent != 1 || policy.Image.ReserveVRAMMB != 4096 {
+		t.Fatalf("image policy = %#v", policy.Image)
+	}
+	if policy.Speech.MaxConcurrent != 3 || policy.Speech.ReserveVRAMMB != 512 {
+		t.Fatalf("speech policy = %#v", policy.Speech)
+	}
+	if policy.Video.MaxConcurrent != 1 || policy.Video.ReserveVRAMMB != 8192 {
+		t.Fatalf("video policy = %#v", policy.Video)
+	}
+	if policy.Render.MaxConcurrent != 1 || policy.Render.ReserveVRAMMB != 8192 {
+		t.Fatalf("render policy = %#v", policy.Render)
+	}
+	if policy.Rerank.MaxConcurrent != 4 || policy.Rerank.ReserveVRAMMB != 2048 {
+		t.Fatalf("rerank policy = %#v", policy.Rerank)
+	}
+}
+
+func TestFromEnvUsesSafeResourcePolicyDefaults(t *testing.T) {
+	policy := FromEnv().ResourcePolicy
+	if policy.Text.MaxConcurrent != 4 || policy.Image.MaxConcurrent != 1 || policy.Speech.MaxConcurrent != 2 || policy.Video.MaxConcurrent != 1 || policy.Render.MaxConcurrent != 1 || policy.Rerank.MaxConcurrent != 2 {
+		t.Fatalf("unexpected defaults: %#v", policy)
+	}
+}
+
+func TestValidateRejectsInvalidResourcePolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{name: "zero concurrency", mutate: func(cfg *Config) { cfg.ResourcePolicy.Image.MaxConcurrent = 0 }, want: "image max concurrency"},
+		{name: "excess concurrency", mutate: func(cfg *Config) { cfg.ResourcePolicy.Text.MaxConcurrent = 65 }, want: "text max concurrency"},
+		{name: "negative reserve", mutate: func(cfg *Config) { cfg.ResourcePolicy.Speech.ReserveVRAMMB = -1 }, want: "speech VRAM reserve"},
+		{name: "reserve larger than device", mutate: func(cfg *Config) { cfg.VRAMTotalGB = 8; cfg.ResourcePolicy.Video.ReserveVRAMMB = 9 * 1024 }, want: "video VRAM reserve"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validBase()
+			cfg.ResourcePolicy = defaultResourcePolicy()
+			tt.mutate(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() = %v, want error containing %q", err, tt.want)
+			}
+		})
 	}
 }

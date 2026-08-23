@@ -15,6 +15,12 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		h.updateSettings(w)
 	case r.Method == http.MethodPut && r.URL.Path == "/api/update/settings":
 		h.saveUpdateSettings(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/settings":
+		h.resourceSettings(w)
+	case r.Method == http.MethodPut && r.URL.Path == "/api/settings":
+		h.saveResourceSettings(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/drain":
+		h.setDrain(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/node":
 		h.nodeProfile(w)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/requests":

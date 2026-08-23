@@ -20,6 +20,85 @@ import (
 	edgeruntime "github.com/everyapi-ai/everyapi-edge/internal/runtime"
 )
 
+func TestResourceSettingsAPIReadsAndSavesPolicy(t *testing.T) {
+	policy := protocol.ResourcePolicy{
+		Text:   protocol.RuntimeResourcePolicy{MaxConcurrent: 4, ReserveVRAMMB: 1024},
+		Image:  protocol.RuntimeResourcePolicy{MaxConcurrent: 1, ReserveVRAMMB: 4096},
+		Speech: protocol.RuntimeResourcePolicy{MaxConcurrent: 2},
+		Video:  protocol.RuntimeResourcePolicy{MaxConcurrent: 1, ReserveVRAMMB: 8192},
+		Render: protocol.RuntimeResourcePolicy{MaxConcurrent: 1},
+		Rerank: protocol.RuntimeResourcePolicy{MaxConcurrent: 2},
+	}
+	saved := make(chan protocol.ResourcePolicy, 1)
+	h := NewHandlers(Config{
+		LoadResourceSettings: func() (ResourceSettings, error) {
+			return ResourceSettings{ResourcePolicy: policy, DrainState: protocol.DrainStateServing, ActiveRequests: 2}, nil
+		},
+		SaveResourcePolicy: func(_ context.Context, next protocol.ResourcePolicy) (ResourceSettings, error) {
+			saved <- next
+			return ResourceSettings{ResourcePolicy: next, DrainState: protocol.DrainStateServing}, nil
+		},
+	}, NewStore(16)).Control
+
+	getResponse := httptest.NewRecorder()
+	h.ServeHTTP(getResponse, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if getResponse.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %s", getResponse.Code, getResponse.Body.String())
+	}
+	var got ResourceSettings
+	if err := json.Unmarshal(getResponse.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode GET: %v", err)
+	}
+	if got.ResourcePolicy != policy || got.ActiveRequests != 2 {
+		t.Fatalf("GET settings = %#v", got)
+	}
+
+	next := policy
+	next.Image.MaxConcurrent = 2
+	body, _ := json.Marshal(struct {
+		ResourcePolicy protocol.ResourcePolicy `json:"resource_policy"`
+	}{ResourcePolicy: next})
+	putResponse := httptest.NewRecorder()
+	h.ServeHTTP(putResponse, httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader(body)))
+	if putResponse.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", putResponse.Code, putResponse.Body.String())
+	}
+	if actual := <-saved; actual != next {
+		t.Fatalf("saved = %#v, want %#v", actual, next)
+	}
+}
+
+func TestDrainAPIStartsAndCancelsDrain(t *testing.T) {
+	actions := make(chan bool, 2)
+	h := NewHandlers(Config{
+		SetDrain: func(_ context.Context, enabled bool) (ResourceSettings, error) {
+			actions <- enabled
+			state := protocol.DrainStateServing
+			if enabled {
+				state = protocol.DrainStateDraining
+			}
+			return ResourceSettings{DrainState: state}, nil
+		},
+	}, NewStore(16)).Control
+
+	for _, test := range []struct {
+		body string
+		want bool
+	}{
+		{body: `{"enabled":true}`, want: true},
+		{body: `{"enabled":false}`, want: false},
+	} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/drain", strings.NewReader(test.body)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("POST status = %d, body = %s", response.Code, response.Body.String())
+		}
+		if got := <-actions; got != test.want {
+			t.Fatalf("drain enabled = %t, want %t", got, test.want)
+		}
+	}
+}
+
 func TestHandlerListsModelsWithoutLocalToken(t *testing.T) {
 	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/tags" {
@@ -1426,6 +1505,54 @@ func TestHandlerPersistsAutomaticUpdateSettings(t *testing.T) {
 	}
 	if !autoUpdate || !settings.AutoUpdate || settings.CheckIntervalHours != 24 {
 		t.Fatalf("saved settings = %#v, callback=%t", settings, autoUpdate)
+	}
+}
+
+func TestHandlerPersistsAutomaticUpdateMaintenanceWindow(t *testing.T) {
+	current := UpdateSettings{AutoUpdate: false, CheckIntervalHours: 24, MaintenanceStart: "01:00", MaintenanceEnd: "03:00"}
+	h := NewHandlers(Config{
+		LoadUpdateSettings: func() (UpdateSettings, error) { return current, nil },
+		SaveUpdateSettings: func(enabled bool, start, end string) (UpdateSettings, error) {
+			current.AutoUpdate = enabled
+			current.MaintenanceStart = start
+			current.MaintenanceEnd = end
+			return current, nil
+		},
+	}, NewStore(16)).Control
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":true,"maintenance_start":"23:30","maintenance_end":"02:00"}`))
+	request.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if !current.AutoUpdate || current.MaintenanceStart != "23:30" || current.MaintenanceEnd != "02:00" {
+		t.Fatalf("saved settings = %#v", current)
+	}
+}
+
+func TestHandlerRejectsInvalidAutomaticUpdateMaintenanceWindow(t *testing.T) {
+	saved := false
+	h := NewHandlers(Config{
+		LoadUpdateSettings: func() (UpdateSettings, error) {
+			return UpdateSettings{MaintenanceStart: "00:00", MaintenanceEnd: "00:00"}, nil
+		},
+		SaveUpdateSettings: func(bool, string, string) (UpdateSettings, error) {
+			saved = true
+			return UpdateSettings{}, nil
+		},
+	}, NewStore(16)).Control
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":true,"maintenance_start":"24:00","maintenance_end":"02:00"}`))
+	request.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if saved {
+		t.Fatal("invalid maintenance window reached persistence")
 	}
 }
 

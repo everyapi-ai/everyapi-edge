@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODEL_ROOT="${1:?rerank model cache path required}"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
+BUNDLE_DIR=$(cd "$SCRIPT_DIR/.." && pwd -P)
+RUNTIME_DIR="$BUNDLE_DIR/.rerank-runtime"
+VENV_DIR="$RUNTIME_DIR/venv"
+PLIST_PATH="$HOME/Library/LaunchAgents/com.everyapi.edge-rerank.plist"
+LOG_DIR="$HOME/Library/Logs/EveryAPI"
+
+if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
+  echo "native rerank requires Apple Silicon macOS" >&2
+  exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Python 3 is required for the native macOS rerank runtime" >&2
+  exit 1
+fi
+
+mkdir -p "$RUNTIME_DIR" "$MODEL_ROOT" "$(dirname "$PLIST_PATH")" "$LOG_DIR"
+if [ ! -x "$VENV_DIR/bin/python" ]; then
+  python3 -m venv "$VENV_DIR"
+fi
+"$VENV_DIR/bin/pip" install --disable-pip-version-check -r "$BUNDLE_DIR/rerank/requirements-macos.txt"
+
+TMP_PLIST=$(mktemp "$PLIST_PATH.XXXXXX")
+trap 'rm -f "$TMP_PLIST"' EXIT
+cp "$SCRIPT_DIR/com.everyapi.edge-rerank.plist.in" "$TMP_PLIST"
+plutil -replace ProgramArguments.0 -string "$VENV_DIR/bin/fastapi" "$TMP_PLIST"
+plutil -replace WorkingDirectory -string "$BUNDLE_DIR/rerank" "$TMP_PLIST"
+plutil -replace EnvironmentVariables.HF_HOME -string "$MODEL_ROOT" "$TMP_PLIST"
+plutil -replace StandardOutPath -string "$LOG_DIR/rerank.log" "$TMP_PLIST"
+plutil -replace StandardErrorPath -string "$LOG_DIR/rerank-error.log" "$TMP_PLIST"
+plutil -lint "$TMP_PLIST" >/dev/null
+mv "$TMP_PLIST" "$PLIST_PATH"
+
+DOMAIN="gui/$(id -u)"
+launchctl bootout "$DOMAIN" "$PLIST_PATH" >/dev/null 2>&1 || true
+launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
+launchctl kickstart -k "$DOMAIN/com.everyapi.edge-rerank"
+
+deadline=$(( $(date +%s) + 1200 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8193/health >/dev/null; then
+    exit 0
+  fi
+  sleep 1
+done
+echo "Rerank runtime did not become ready; inspect $LOG_DIR/rerank-error.log" >&2
+exit 1

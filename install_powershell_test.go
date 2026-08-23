@@ -43,3 +43,16 @@ func TestWindowsInstallerRejectsUntrustedDotenvValues(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsInstallerHasLiteralPathUninstallAndRekeyRecovery(t *testing.T) {
+	contents, err := os.ReadFile("install.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	for _, required := range []string{"[switch]$Uninstall", "[switch]$PurgeModels", "Remove-Item -LiteralPath", "edgerekey_", "rekey-backup", "already uninstalled"} {
+		if !strings.Contains(script, required) {
+			t.Errorf("Windows lifecycle support is missing %q", required)
+		}
+	}
+}

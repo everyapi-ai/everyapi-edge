@@ -18,6 +18,30 @@ func TestInstallerNeverRecursivelyDeletesCallerPath(t *testing.T) {
 	}
 }
 
+func TestInstallerProvidesBoundedIdempotentUninstallAndRekeyRecovery(t *testing.T) {
+	contents, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	for _, required := range []string{
+		"--uninstall)",
+		"--purge-models)",
+		"safe_delete_tree",
+		"already uninstalled",
+		`$HOME/.everyapi/edge`,
+		"edgerekey_",
+		"identity.json.rekey-backup",
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("installer lifecycle support is missing %q", required)
+		}
+	}
+	if strings.Contains(script, `rm -rf "$CANON_TARGET"`) || strings.Contains(script, `rm -rf "$MODEL_ROOT"`) {
+		t.Fatal("installer must not use broad recursive removal")
+	}
+}
+
 func runInstallerExpectFailure(t *testing.T, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("bash", append([]string{"install.sh"}, args...)...)
@@ -203,6 +227,15 @@ func TestExistingNodeUpgradeReusesIdentityWithoutRegistrationToken(t *testing.T)
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(installDir, "scripts", "install-macos-speech.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, "scripts", "install-macos-transcription.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, "scripts", "install-macos-video.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, "scripts", "install-macos-rerank.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(installDir, "data", "agent", "identity.json"), []byte(`{"private_key":"persisted"}`), 0o600); err != nil {

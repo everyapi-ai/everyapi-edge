@@ -41,6 +41,7 @@ type RequestEvent struct {
 	Capability       protocol.CapabilityID
 	StartedAt        time.Time
 	Duration         time.Duration
+	TTFT             time.Duration
 	PromptTokens     int
 	CompletionTokens int
 	Error            string
@@ -80,11 +81,27 @@ const (
 
 // New constructs a Forwarder with defaults filled in.
 func New(ollamaURL, diffusersURL, speechURL string) *Forwarder {
+	return NewWithTranscription(ollamaURL, diffusersURL, speechURL, "")
+}
+
+func NewWithTranscription(ollamaURL, diffusersURL, speechURL, transcriptionURL string) *Forwarder {
+	return NewWithVideo(ollamaURL, diffusersURL, speechURL, transcriptionURL, "")
+}
+
+func NewWithVideo(ollamaURL, diffusersURL, speechURL, transcriptionURL, videoURL string) *Forwarder {
+	return NewWithRender(ollamaURL, diffusersURL, speechURL, transcriptionURL, videoURL, "")
+}
+
+func NewWithRender(ollamaURL, diffusersURL, speechURL, transcriptionURL, videoURL, renderURL string) *Forwarder {
+	return NewWithRerank(ollamaURL, diffusersURL, speechURL, transcriptionURL, videoURL, renderURL, "")
+}
+
+func NewWithRerank(ollamaURL, diffusersURL, speechURL, transcriptionURL, videoURL, renderURL, rerankURL string) *Forwarder {
 	httpClient := &http.Client{
 		// No client-level timeout — Handle owns the streaming deadline.
 	}
 	return &Forwarder{
-		runtimes:   edgeruntime.NewRouter(ollamaURL, diffusersURL, speechURL, httpClient),
+		runtimes:   edgeruntime.NewRouterWithAdvanced(ollamaURL, diffusersURL, speechURL, transcriptionURL, videoURL, renderURL, rerankURL, httpClient),
 		ChunkBytes: DefaultChunkBytes,
 		gpu:        make(chan struct{}, 1),
 	}
@@ -117,6 +134,14 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	}
 	capability, _ := protocol.CapabilityForRequest(req.Path)
 	event := RequestEvent{ID: fmt.Sprintf("local-%d", f.sequence.Add(1)), Consumer: req.ConsumerRef, Model: requestModel(req.Body), Path: req.Path, Capability: capability, StartedAt: time.Now().UTC()}
+	firstChunk := true
+	observedSend := func(chunk protocol.ChunkBody) error {
+		if firstChunk {
+			event.TTFT = time.Since(event.StartedAt)
+			firstChunk = false
+		}
+		return send(chunk)
+	}
 	if f.Observer != nil {
 		f.Observer.Started(event)
 		defer func() {
@@ -164,7 +189,7 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 
 	// First chunk carries the upstream status + headers so the gateway-side adapter can patch its synthetic *http.Response before the body bytes start arriving. Subsequent chunks just stream bytes.
 	headerCopy := make(map[string]string, 4)
-	for _, h := range []string{"Content-Type", "Cache-Control", "X-Request-Id"} {
+	for _, h := range []string{"Content-Type", "Content-Length", "Accept-Ranges", "Content-Range", "Cache-Control", "X-Request-Id"} {
 		if v := resp.Header.Get(h); v != "" {
 			headerCopy[h] = v
 		}
@@ -174,7 +199,7 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	tee := &usageScanner{}
 	body := io.TeeReader(resp.Body, tee)
 
-	firstChunk := true
+	firstResponseChunk := true
 	chunkSize := f.ChunkBytes
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkBytes
@@ -186,12 +211,12 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 			chunk := protocol.ChunkBody{
 				Bytes: base64.StdEncoding.EncodeToString(buf[:n]),
 			}
-			if firstChunk {
+			if firstResponseChunk {
 				chunk.StatusCode = resp.StatusCode
 				chunk.Headers = headerCopy
-				firstChunk = false
+				firstResponseChunk = false
 			}
-			if err := send(chunk); err != nil {
+			if err := observedSend(chunk); err != nil {
 				return protocol.DoneBody{}, &protocol.ErrorBody{Code: "send_failed", Message: err.Error()}
 			}
 		}
@@ -204,8 +229,8 @@ func (f *Forwarder) Handle(ctx context.Context, req protocol.RequestBody, send f
 	}
 
 	// Always send at least one chunk so the gateway-side waitForFirstChunk doesn't time out on an immediately-EOF response (e.g. a buggy upstream returning 200 + empty body).
-	if firstChunk {
-		_ = send(protocol.ChunkBody{
+	if firstResponseChunk {
+		_ = observedSend(protocol.ChunkBody{
 			StatusCode: resp.StatusCode,
 			Headers:    headerCopy,
 		})

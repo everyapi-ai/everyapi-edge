@@ -152,6 +152,8 @@ def speech_capability(status="ready", reason=""):
         "limits": {
             "max_input_characters": MAX_INPUT_CHARACTERS,
             "formats": sorted(SUPPORTED_RESPONSE_FORMATS),
+            "voices": sorted(SUPPORTED_VOICES),
+            "languages": sorted(WARMUP_PHRASES),
         },
     }
     if reason:

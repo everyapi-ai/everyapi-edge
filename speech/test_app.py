@@ -124,7 +124,21 @@ class SpeechRuntimeAPITests(unittest.TestCase):
         self.assertEqual(payload["version"], app.RUNTIME_VERSION)
         self.assertIsInstance(payload["vram_bytes"], int)
         tts = next(item for item in payload["capabilities"] if item["id"] == "audio.tts")
-        self.assertEqual(tts, {"id": "audio.tts", "status": "ready", "models": [DEFAULT_MODEL], "paths": ["/v1/audio/speech"], "limits": {"max_input_characters": app.MAX_INPUT_CHARACTERS, "formats": sorted(app.SUPPORTED_RESPONSE_FORMATS)}})
+        self.assertEqual(
+            tts,
+            {
+                "id": "audio.tts",
+                "status": "ready",
+                "models": [DEFAULT_MODEL],
+                "paths": ["/v1/audio/speech"],
+                "limits": {
+                    "max_input_characters": app.MAX_INPUT_CHARACTERS,
+                    "formats": sorted(app.SUPPORTED_RESPONSE_FORMATS),
+                    "voices": sorted(app.SUPPORTED_VOICES),
+                    "languages": sorted(app.WARMUP_PHRASES),
+                },
+            },
+        )
 
     @patch("app.select_device", return_value=Device(name="cpu", backend="cpu"))
     @patch("app.asr_ready", False)

@@ -2,10 +2,13 @@
 package console
 
 import (
+	"math"
 	"regexp"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/everyapi-ai/everyapi-edge/internal/protocol"
 )
 
 // maxLogMessageBytes prevents a failing dependency or an untrusted peer from turning the bounded log entry count into unbounded process memory use.
@@ -33,6 +36,7 @@ type RequestFinish struct {
 	PromptTokens     int
 	CompletionTokens int
 	Duration         time.Duration
+	TTFT             time.Duration
 	Error            string
 }
 
@@ -46,6 +50,7 @@ type Request struct {
 	StartedAt        time.Time `json:"started_at"`
 	CompletedAt      time.Time `json:"completed_at,omitempty"`
 	DurationMs       int64     `json:"duration_ms,omitempty"`
+	TTFTMs           int64     `json:"ttft_ms,omitempty"`
 	PromptTokens     int       `json:"prompt_tokens,omitempty"`
 	CompletionTokens int       `json:"completion_tokens,omitempty"`
 	Error            string    `json:"error,omitempty"`
@@ -103,6 +108,7 @@ type Store struct {
 	settlementHistory []Settlement
 	logs              []LogEntry
 	overview          Overview
+	performance       map[string]protocol.RuntimePerformanceSample
 }
 
 // Log appends one local agent line. Standard log output is already line-based; the caller removes trailing newlines before recording it.
@@ -137,7 +143,7 @@ func NewStore(capacity int) *Store {
 	if capacity <= 0 {
 		capacity = 200
 	}
-	return &Store{capacity: capacity, active: make(map[string]*Request), settlements: make(map[string]Settlement), overview: Overview{GatewayState: "connecting"}}
+	return &Store{capacity: capacity, active: make(map[string]*Request), settlements: make(map[string]Settlement), performance: make(map[string]protocol.RuntimePerformanceSample), overview: Overview{GatewayState: "connecting"}}
 }
 
 // SetGatewayState records the real upstream session state separately from the local control room HTTP listener. A reachable local page must not imply that the node is currently able to receive gateway work.
@@ -244,6 +250,7 @@ func (s *Store) Finish(handle RequestHandle, finish RequestFinish) {
 	s.overview.ActiveRequests = len(s.active)
 	r.CompletedAt = finish.CompletedAt
 	r.DurationMs = finish.Duration.Milliseconds()
+	r.TTFTMs = finish.TTFT.Milliseconds()
 	r.PromptTokens = finish.PromptTokens
 	r.CompletionTokens = finish.CompletionTokens
 	r.Error = sanitizeRuntimeBrand(finish.Error)
@@ -258,6 +265,118 @@ func (s *Store) Finish(handle RequestHandle, finish RequestFinish) {
 	if len(s.history) > s.capacity {
 		s.history = append([]Request(nil), s.history[len(s.history)-s.capacity:]...)
 	}
+	s.updatePerformance(*r, finish)
+}
+
+const (
+	performanceEWMAAlpha = 0.25
+	performanceMaxAge    = 10 * time.Minute
+)
+
+func (s *Store) updatePerformance(request Request, finish RequestFinish) {
+	capability := protocol.CapabilityID(request.Capability)
+	runtimeKind := runtimeForCapability(capability)
+	if runtimeKind == "" || request.DurationMs <= 0 || request.CompletedAt.IsZero() {
+		return
+	}
+	model := request.Model
+	if model == "unknown" {
+		model = ""
+	}
+	outputUnits := int64(finish.CompletionTokens)
+	if outputUnits <= 0 && finish.Error == "" {
+		outputUnits = 1
+	}
+	unitsPerSecond := float64(0)
+	if outputUnits > 0 {
+		unitsPerSecond = float64(outputUnits) / finish.Duration.Seconds()
+	}
+	sample := protocol.RuntimePerformanceSample{Runtime: runtimeKind, Capability: capability, Model: model, TTFTMs: request.TTFTMs, DurationMs: request.DurationMs, OutputUnits: outputUnits, UnitsPerSecond: unitsPerSecond, Succeeded: finish.Error == "", UnixMs: request.CompletedAt.UnixMilli()}
+	key := string(runtimeKind) + "\x00" + string(capability) + "\x00" + model
+	if previous, ok := s.performance[key]; ok {
+		sample.TTFTMs = ewmaInt(previous.TTFTMs, sample.TTFTMs)
+		sample.DurationMs = ewmaInt(previous.DurationMs, sample.DurationMs)
+		sample.OutputUnits = ewmaInt(previous.OutputUnits, sample.OutputUnits)
+		sample.UnitsPerSecond = ewmaFloat(previous.UnitsPerSecond, sample.UnitsPerSecond)
+	}
+	s.performance[key] = sample
+	if len(s.performance) <= protocol.MaxPerformanceSamples {
+		return
+	}
+	oldestKey := ""
+	oldestAt := int64(math.MaxInt64)
+	for candidateKey, candidate := range s.performance {
+		if candidate.UnixMs < oldestAt {
+			oldestKey, oldestAt = candidateKey, candidate.UnixMs
+		}
+	}
+	delete(s.performance, oldestKey)
+}
+
+func ewmaInt(previous, current int64) int64 {
+	if previous <= 0 {
+		return current
+	}
+	if current <= 0 {
+		return previous
+	}
+	return int64(math.Round((1-performanceEWMAAlpha)*float64(previous) + performanceEWMAAlpha*float64(current)))
+}
+
+func ewmaFloat(previous, current float64) float64 {
+	if previous <= 0 {
+		return current
+	}
+	if current <= 0 {
+		return previous
+	}
+	return (1-performanceEWMAAlpha)*previous + performanceEWMAAlpha*current
+}
+
+func runtimeForCapability(capability protocol.CapabilityID) protocol.RuntimeKind {
+	switch capability {
+	case protocol.CapabilityImageGenerate, protocol.CapabilityImageEdit:
+		return protocol.RuntimeImage
+	case protocol.CapabilityAudioTTS, protocol.CapabilityAudioTranscription, protocol.CapabilityAudioTranslation:
+		return protocol.RuntimeSpeech
+	case protocol.CapabilityVideoGenerate:
+		return protocol.RuntimeVideo
+	case protocol.CapabilityRenderExecute:
+		return protocol.RuntimeRender
+	case protocol.CapabilityTextRerank:
+		return protocol.RuntimeRerank
+	case protocol.CapabilityTextChat, protocol.CapabilityTextCompletion, protocol.CapabilityTextResponses, protocol.CapabilityTextEmbedding, protocol.CapabilityTextVision:
+		return protocol.RuntimeText
+	default:
+		return ""
+	}
+}
+
+func (s *Store) PerformanceSamples(now time.Time) []protocol.RuntimePerformanceSample {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	cutoff := now.Add(-performanceMaxAge).UnixMilli()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	samples := make([]protocol.RuntimePerformanceSample, 0, len(s.performance))
+	for key, sample := range s.performance {
+		if sample.UnixMs < cutoff {
+			delete(s.performance, key)
+			continue
+		}
+		samples = append(samples, sample)
+	}
+	sort.Slice(samples, func(i, j int) bool {
+		if samples[i].UnixMs != samples[j].UnixMs {
+			return samples[i].UnixMs > samples[j].UnixMs
+		}
+		if samples[i].Capability != samples[j].Capability {
+			return samples[i].Capability < samples[j].Capability
+		}
+		return samples[i].Model < samples[j].Model
+	})
+	return samples
 }
 
 func (s *Store) Overview() Overview {

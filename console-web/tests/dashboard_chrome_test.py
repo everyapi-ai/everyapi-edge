@@ -427,25 +427,24 @@ def test_every_console_route_has_a_dashboard_page_heading() -> None:
     """Each local task needs an explicit page context after the shell redesign."""
     base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5176")
     routes = [
-        ("Overview", "Node workspace"),
-        ("Local runtime", "Local runtime"),
-        ("Models", "Model library"),
-        ("Storage", "Storage & migration"),
-        ("Traffic", "Recent traffic"),
-        ("Logs", "Agent logs"),
+        ("/", "Node workspace"),
+        ("/runtime", "Local runtime"),
+        ("/models", "Model library"),
+        ("/playground", "Local playground"),
+        ("/image-edit", "Image edit"),
+        ("/storage", "Storage & migration"),
+        ("/settings", "Machine settings"),
+        ("/traffic", "Recent traffic"),
+        ("/logs", "Agent logs"),
     ]
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 960})
-        page.goto(base, wait_until="domcontentloaded")
-        page.wait_for_selector("main h1")
-
-        navigation = page.locator("aside")
-        for label, heading in routes:
-            navigation.get_by_role("link", name=label).click()
-            page.wait_for_timeout(120)
-            assert page.locator("main h1").inner_text() == heading
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
+        for path, heading in routes:
+            page.goto(f"{base}{path}", wait_until="domcontentloaded")
+            expect(page.locator("main h1")).to_have_text(heading)
 
         browser.close()
 
@@ -1514,6 +1513,117 @@ def test_mobile_models_and_traffic_use_task_first_cards_without_horizontal_scrol
     assert model_document_width == 390
     assert traffic_document_width == 390
     assert desktop_model_table_visible
+
+
+def test_mobile_machine_settings_edits_resource_policy_without_horizontal_scrolling() -> None:
+    """Phone operators can edit every runtime policy directly while desktop keeps the comparison table."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
+    resource_settings = {
+        "resource_policy": {
+            "text": {"max_concurrent": 4, "reserve_vram_mb": 1024},
+            "image": {"max_concurrent": 1, "reserve_vram_mb": 4096},
+            "speech": {"max_concurrent": 2, "reserve_vram_mb": 1024},
+            "video": {"max_concurrent": 1, "reserve_vram_mb": 8192},
+            "render": {"max_concurrent": 1, "reserve_vram_mb": 4096},
+            "rerank": {"max_concurrent": 2, "reserve_vram_mb": 2048},
+        },
+        "drain_state": "serving",
+        "active_requests": 0,
+    }
+    update_settings = {
+        "auto_update": False,
+        "check_interval_hours": 24,
+        "maintenance_start": "02:00",
+        "maintenance_end": "04:00",
+    }
+
+    def resource_settings_route(route) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(resource_settings))
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        mobile = browser.new_page(viewport={"width": 390, "height": 844})
+        mobile.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
+        mobile.route("**/api/settings", resource_settings_route)
+        mobile.route("**/api/update/settings", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(update_settings)))
+        mobile.goto(f"{base}/settings", wait_until="domcontentloaded")
+
+        policy_cards = mobile.locator("[data-resource-policy-card]")
+        expect(policy_cards).to_have_count(6)
+        mobile_table = mobile.get_by_role("table", name="Runtime resource policy")
+        expect(mobile_table).to_be_visible()
+        mobile.locator('[data-resource-policy-card="text"]').get_by_label("Text Max concurrent").fill("5")
+        with mobile.expect_request(lambda request: request.method == "PUT" and request.url.endswith("/api/settings")) as save_request:
+            mobile.get_by_role("button", name="Save resource policy").click()
+        saved_policy = save_request.value.post_data_json
+        mobile_document_width = mobile.evaluate("document.documentElement.scrollWidth")
+        mobile_table_width = mobile_table.evaluate("element => ({ client: element.clientWidth, scroll: element.scrollWidth })")
+        mobile_card_display = policy_cards.first.evaluate("element => getComputedStyle(element).display")
+
+        desktop = browser.new_page(viewport={"width": 1440, "height": 960})
+        desktop.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
+        desktop.route("**/api/settings", resource_settings_route)
+        desktop.route("**/api/update/settings", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(update_settings)))
+        desktop.goto(f"{base}/settings", wait_until="domcontentloaded")
+        desktop_table = desktop.get_by_role("table", name="Runtime resource policy")
+        desktop_table.wait_for()
+        desktop_table_visible = desktop_table.is_visible()
+        desktop_card_display = desktop.locator("[data-resource-policy-card]").first.evaluate("element => getComputedStyle(element).display")
+        browser.close()
+
+    assert saved_policy["resource_policy"]["text"]["max_concurrent"] == 5
+    assert saved_policy["resource_policy"]["video"]["reserve_vram_mb"] == 8192
+    assert mobile_document_width == 390
+    assert mobile_table_width["scroll"] <= mobile_table_width["client"]
+    assert mobile_card_display == "grid"
+    assert desktop_table_visible
+    assert desktop_card_display == "table-row"
+
+
+def test_machine_settings_executes_explicit_node_lifecycle_controls() -> None:
+    """Drain and pairing-token rotation stay actionable and expose their resulting state."""
+    base = os.environ.get("EDGE_CONSOLE_WEB", "http://127.0.0.1:5175")
+    resource_settings = {
+        "resource_policy": {
+            runtime: {"max_concurrent": 1, "reserve_vram_mb": 0}
+            for runtime in ("text", "image", "speech", "video", "render", "rerank")
+        },
+        "drain_state": "serving",
+        "active_requests": 2,
+    }
+    drained_settings = {**resource_settings, "drain_state": "draining"}
+    update_settings = {
+        "auto_update": False,
+        "check_interval_hours": 24,
+        "maintenance_start": "02:00",
+        "maintenance_end": "04:00",
+    }
+    rotated_token = "edge-pairing-token-rotated-0123456789abcdef"
+    confirmations: list[str] = []
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.route("**/api/session", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"authenticated": True, "pairing_required": True})))
+        page.route("**/api/settings", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(resource_settings)))
+        page.route("**/api/update/settings", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(update_settings)))
+        page.route("**/api/drain", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(drained_settings)))
+        page.route("**/api/session/rotate", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"token": rotated_token})))
+        page.on("dialog", lambda dialog: (confirmations.append(dialog.message), dialog.accept()))
+        page.goto(f"{base}/settings", wait_until="domcontentloaded")
+
+        with page.expect_request(lambda request: request.method == "POST" and request.url.endswith("/api/drain")) as drain_request:
+            page.get_by_role("button", name="Drain node").click()
+        expect(page.get_by_role("button", name="Resume serving")).to_be_visible()
+
+        with page.expect_request(lambda request: request.method == "POST" and request.url.endswith("/api/session/rotate")) as rotate_request:
+            page.get_by_role("button", name="Rotate pairing token").click()
+        expect(page.get_by_text(rotated_token, exact=True)).to_be_visible()
+        browser.close()
+
+    assert drain_request.value.post_data_json == {"enabled": True}
+    assert rotate_request.value.post_data_json == {}
+    assert confirmations == ["Rotate the pairing token and disconnect every paired browser?"]
 
 
 def test_installed_model_library_filters_by_provider_type_and_name() -> None:

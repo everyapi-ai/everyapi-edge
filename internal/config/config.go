@@ -31,11 +31,18 @@ type Config struct {
 	DiffusersURL string
 	// SpeechURL is an optional local text-to-speech runtime, separate again because Kokoro synthesis returns audio bytes rather than the token stream Ollama produces.
 	SpeechURL string
+	// TranscriptionURL is an optional local speech-to-text runtime serving transcription and translation independently from synthesis.
+	TranscriptionURL string
+	VideoURL         string
+	RenderURL        string
+	RerankURL        string
 	// NodeName / Hardware / Location — supplier-declared metadata reported on every connect. Picked up from env so the docker-compose .env is the single config seam.
 	NodeName    string
 	GPUModel    string
 	VRAMTotalGB int
 	CountryISO2 string
+	// ResourcePolicy controls admission independently for each local runtime. Separate limits prevent a long image or video job from consuming the text pool and let the operator reserve enough VRAM for the selected workload before a local request starts.
+	ResourcePolicy protocol.ResourcePolicy
 	// Workloads — capability declaration (EVERYAPI_WORKLOADS, comma- separated; see protocol.KnownWorkloads). Optional: the gateway only uses this to backfill nodes whose seller never declared workloads in the dashboard — the dashboard value wins otherwise.
 	Workloads []string
 	// ConsoleAddr is the local HTTP listener for the embedded supplier console. A direct binary defaults to loopback; Compose deliberately overrides it to 0.0.0.0 inside the container while Compose publishes the port on the supplier's trusted LAN. A direct binary remains loopback-only by default.
@@ -78,6 +85,9 @@ func (c Config) Validate() error {
 	if c.VRAMTotalGB < 0 {
 		return errors.New("EVERYAPI_VRAM_GB must not be negative")
 	}
+	if err := validateResourcePolicy(c.ResourcePolicy, c.VRAMTotalGB); err != nil {
+		return err
+	}
 	if c.MaxConcurrentRequests <= 0 || c.MaxConcurrentRequests > 64 {
 		return errors.New("EVERYAPI_MAX_CONCURRENT_REQUESTS must be between 1 and 64")
 	}
@@ -88,6 +98,72 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateResourcePolicy(policy protocol.ResourcePolicy, totalVRAMGB int) error {
+	policies := []struct {
+		name   string
+		policy protocol.RuntimeResourcePolicy
+	}{
+		{name: "text", policy: policy.Text},
+		{name: "image", policy: policy.Image},
+		{name: "speech", policy: policy.Speech},
+		{name: "video", policy: policy.Video},
+		{name: "render", policy: policy.Render},
+		{name: "rerank", policy: policy.Rerank},
+	}
+	for _, item := range policies {
+		if item.policy.MaxConcurrent < 1 || item.policy.MaxConcurrent > 64 {
+			return fmt.Errorf("%s max concurrency must be between 1 and 64", item.name)
+		}
+		if item.policy.ReserveVRAMMB < 0 {
+			return fmt.Errorf("%s VRAM reserve must not be negative", item.name)
+		}
+		if totalVRAMGB > 0 && item.policy.ReserveVRAMMB > int64(totalVRAMGB)*1024 {
+			return fmt.Errorf("%s VRAM reserve exceeds the detected device total", item.name)
+		}
+	}
+	return nil
+}
+
+func defaultResourcePolicy() protocol.ResourcePolicy {
+	return protocol.ResourcePolicy{
+		Text:   protocol.RuntimeResourcePolicy{MaxConcurrent: 4},
+		Image:  protocol.RuntimeResourcePolicy{MaxConcurrent: 1},
+		Speech: protocol.RuntimeResourcePolicy{MaxConcurrent: 2},
+		Video:  protocol.RuntimeResourcePolicy{MaxConcurrent: 1},
+		Render: protocol.RuntimeResourcePolicy{MaxConcurrent: 1},
+		Rerank: protocol.RuntimeResourcePolicy{MaxConcurrent: 2},
+	}
+}
+
+func resourcePolicyFromEnv() protocol.ResourcePolicy {
+	policy := defaultResourcePolicy()
+	globalRaw := os.Getenv("EVERYAPI_MAX_CONCURRENT_REQUESTS")
+	if strings.TrimSpace(globalRaw) != "" {
+		if global := parseConcurrentRequests(globalRaw); global > 0 {
+			policy.Text.MaxConcurrent = global
+			policy.Image.MaxConcurrent = global
+			policy.Speech.MaxConcurrent = global
+			policy.Video.MaxConcurrent = global
+			policy.Render.MaxConcurrent = global
+			policy.Rerank.MaxConcurrent = global
+		}
+	}
+	policy.Text = resourceRuntimePolicyFromEnv("TEXT", policy.Text.MaxConcurrent)
+	policy.Image = resourceRuntimePolicyFromEnv("IMAGE", policy.Image.MaxConcurrent)
+	policy.Speech = resourceRuntimePolicyFromEnv("SPEECH", policy.Speech.MaxConcurrent)
+	policy.Video = resourceRuntimePolicyFromEnv("VIDEO", policy.Video.MaxConcurrent)
+	policy.Render = resourceRuntimePolicyFromEnv("RENDER", policy.Render.MaxConcurrent)
+	policy.Rerank = resourceRuntimePolicyFromEnv("RERANK", policy.Rerank.MaxConcurrent)
+	return policy
+}
+
+func resourceRuntimePolicyFromEnv(name string, defaultMax int) protocol.RuntimeResourcePolicy {
+	return protocol.RuntimeResourcePolicy{
+		MaxConcurrent: int(parseInt64(defaultStr(os.Getenv("EVERYAPI_MAX_CONCURRENT_"+name), strconv.Itoa(defaultMax)))),
+		ReserveVRAMMB: parseInt64(os.Getenv("EVERYAPI_RESERVE_VRAM_MB_" + name)),
+	}
 }
 
 func knownWorkload(w string) bool {
@@ -110,10 +186,15 @@ func FromEnv() Config {
 		OllamaURL:             defaultStr(os.Getenv("OLLAMA_URL"), "http://ollama:11434"),
 		DiffusersURL:          strings.TrimSpace(os.Getenv("EVERYAPI_DIFFUSERS_URL")),
 		SpeechURL:             strings.TrimSpace(os.Getenv("EVERYAPI_SPEECH_URL")),
+		TranscriptionURL:      strings.TrimSpace(os.Getenv("EVERYAPI_TRANSCRIPTION_URL")),
+		VideoURL:              strings.TrimSpace(os.Getenv("EVERYAPI_VIDEO_URL")),
+		RenderURL:             strings.TrimSpace(os.Getenv("EVERYAPI_RENDER_URL")),
+		RerankURL:             strings.TrimSpace(os.Getenv("EVERYAPI_RERANK_URL")),
 		NodeName:              os.Getenv("EVERYAPI_NODE_NAME"),
 		GPUModel:              os.Getenv("EVERYAPI_GPU_MODEL"),
 		VRAMTotalGB:           int(parseInt64(os.Getenv("EVERYAPI_VRAM_GB"))),
 		CountryISO2:           strings.ToUpper(os.Getenv("EVERYAPI_COUNTRY")),
+		ResourcePolicy:        resourcePolicyFromEnv(),
 		Workloads:             parseWorkloads(os.Getenv("EVERYAPI_WORKLOADS")),
 		ConsoleAddr:           defaultStr(os.Getenv("EVERYAPI_CONSOLE_ADDR"), "127.0.0.1:8421"),
 		ConsoleToken:          strings.TrimSpace(os.Getenv("EVERYAPI_CONSOLE_TOKEN")),

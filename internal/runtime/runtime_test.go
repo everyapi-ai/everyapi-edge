@@ -123,19 +123,26 @@ func TestRuntimeErrorDoesNotExposeImplementationBrand(t *testing.T) {
 }
 
 func TestRouterAllowsOnlyKnownRuntimePaths(t *testing.T) {
-	router := NewRouter("http://text.internal", "http://image.internal", "http://speech.internal", http.DefaultClient)
+	router := NewRouterWithAdvanced("http://text.internal", "http://image.internal", "http://speech.internal", "http://transcription.internal", "http://video.internal", "http://render.internal", "http://rerank.internal", http.DefaultClient)
 
 	for path, wantKind := range map[string]Kind{
-		"/v1/chat/completions":     KindText,
-		"/v1/completions":          KindText,
-		"/v1/responses":            KindText,
-		"/v1/embeddings":           KindText,
-		"/v1/models":               KindText,
-		"/v1/images/generations":   KindImage,
-		"/v1/images/edits":         KindImage,
-		"/v1/audio/speech":         KindSpeech,
-		"/v1/audio/transcriptions": KindSpeech,
-		"/v1/audio/translations":   KindSpeech,
+		"/v1/chat/completions":               KindText,
+		"/v1/completions":                    KindText,
+		"/v1/responses":                      KindText,
+		"/v1/embeddings":                     KindText,
+		"/v1/models":                         KindText,
+		"/v1/images/generations":             KindImage,
+		"/v1/images/edits":                   KindImage,
+		"/v1/audio/speech":                   KindSpeech,
+		"/v1/audio/transcriptions":           KindSpeech,
+		"/v1/audio/translations":             KindSpeech,
+		"/v1/videos":                         KindVideo,
+		"/v1/videos/vid_1":                   KindVideo,
+		"/v1/videos/vid_1/content":           KindVideo,
+		"/v1/render/jobs":                    KindRender,
+		"/v1/render/jobs/render_1":           KindRender,
+		"/v1/render/jobs/render_1/content/0": KindRender,
+		"/v1/rerank":                         KindRerank,
 	} {
 		target, err := router.Resolve(path)
 		if err != nil || target.Kind() != wantKind {
@@ -146,9 +153,12 @@ func TestRouterAllowsOnlyKnownRuntimePaths(t *testing.T) {
 		t.Fatalf("disallowed path error = %v", err)
 	}
 
-	withoutImages := NewRouter("http://text.internal", "", "http://speech.internal", http.DefaultClient)
-	if _, err := withoutImages.Resolve("/v1/images/edits"); !errors.Is(err, ErrRuntimeUnavailable) {
+	withoutMedia := NewRouter("http://text.internal", "", "", http.DefaultClient)
+	if _, err := withoutMedia.Resolve("/v1/images/edits"); !errors.Is(err, ErrRuntimeUnavailable) {
 		t.Fatalf("missing image runtime error = %v", err)
+	}
+	if _, err := withoutMedia.Resolve("/v1/audio/transcriptions"); !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("missing transcription runtime error = %v", err)
 	}
 }
 

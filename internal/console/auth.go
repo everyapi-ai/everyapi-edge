@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,7 @@ const (
 )
 
 type sessionAuthenticator struct {
+	mu          sync.RWMutex
 	enabled     bool
 	tokenDigest [sha256.Size]byte
 	signingKey  [sha256.Size]byte
@@ -52,7 +54,11 @@ func newSessionAuthenticator(token string) *sessionAuthenticator {
 func (a *sessionAuthenticator) session(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, sessionState{Authenticated: a.authenticated(r), PairingRequired: a.enabled})
+		authenticated := a.authenticated(r)
+		a.mu.RLock()
+		pairingRequired := a.enabled
+		a.mu.RUnlock()
+		writeJSON(w, http.StatusOK, sessionState{Authenticated: authenticated, PairingRequired: pairingRequired})
 	case http.MethodPost:
 		a.login(w, r)
 	case http.MethodDelete:
@@ -63,7 +69,22 @@ func (a *sessionAuthenticator) session(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *sessionAuthenticator) rotate(token string) error {
+	trimmed := strings.TrimSpace(token)
+	if len(trimmed) < 32 {
+		return errors.New("pairing token must be at least 32 characters")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.enabled = true
+	a.tokenDigest = sha256.Sum256([]byte(trimmed))
+	a.signingKey = sha256.Sum256([]byte("everyapi-edge-console-session\x00" + trimmed))
+	return nil
+}
+
 func (a *sessionAuthenticator) login(w http.ResponseWriter, r *http.Request) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	if !a.enabled {
 		writeJSON(w, http.StatusOK, sessionState{Authenticated: true, PairingRequired: false})
 		return
@@ -103,6 +124,12 @@ func (a *sessionAuthenticator) require(next http.Handler) http.Handler {
 }
 
 func (a *sessionAuthenticator) authenticated(r *http.Request) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.authenticatedLocked(r)
+}
+
+func (a *sessionAuthenticator) authenticatedLocked(r *http.Request) bool {
 	if !a.enabled {
 		return true
 	}

@@ -3,12 +3,14 @@
 # NVIDIA GPU visible to both Windows and Docker Desktop.
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][long]$NodeId,
+    [long]$NodeId = 0,
     [string]$Token = "",
     [string]$Gateway = "https://api.everyapi.ai",
     [string]$Name = $env:COMPUTERNAME,
     [string]$Model = "qwen2.5:3b",
-    [string]$InstallDir = (Join-Path $HOME "everyapi-edge")
+    [string]$InstallDir = (Join-Path $HOME "everyapi-edge"),
+    [switch]$Uninstall,
+    [switch]$PurgeModels
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,11 +54,40 @@ foreach ($entry in @{
 }.GetEnumerator()) {
     Assert-SingleLine $entry.Key $entry.Value
 }
+if ($PurgeModels -and -not $Uninstall) { throw "-PurgeModels requires -Uninstall" }
+$canonicalHome = [IO.Path]::GetFullPath($HOME).TrimEnd('\', '/')
+$canonicalInstall = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\', '/')
+if (-not $canonicalInstall -or $canonicalInstall -eq [IO.Path]::GetPathRoot($canonicalInstall).TrimEnd('\', '/') -or $canonicalInstall -eq $canonicalHome) {
+    throw "refusing unsafe install directory: $InstallDir"
+}
+if ($Uninstall) {
+    $modelRoot = Join-Path $HOME ".everyapi/edge"
+    if (-not (Test-Path -LiteralPath $canonicalInstall)) {
+        if ($PurgeModels -and (Test-Path -LiteralPath $modelRoot)) { Remove-Item -LiteralPath $modelRoot -Recurse -Force }
+        Write-Host "EveryAPI Edge is already uninstalled"
+        return
+    }
+    if ((Get-Item -LiteralPath $canonicalInstall).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "refusing a symlink or junction install directory" }
+    Require-Command git
+    Require-Command docker
+    if (-not (Test-Path -LiteralPath (Join-Path $canonicalInstall ".git"))) { throw "refusing existing non-EveryAPI directory: $canonicalInstall" }
+    $origin = (Invoke-CheckedNative git @("-C", $canonicalInstall, "remote", "get-url", "origin") | Out-String).Trim()
+    if ($origin -notin @($bundleSource, "$bundleSource.git")) { throw "refusing an existing directory that is not an official Edge checkout" }
+    foreach ($candidate in @("docker-compose.windows.yml", "docker-compose.yml", "docker-compose.rocm.yml", "docker-compose.macos.yml")) {
+        if (Test-Path -LiteralPath (Join-Path $canonicalInstall $candidate)) {
+            try { Push-Location $canonicalInstall; Invoke-CheckedNative docker @("compose", "-f", $candidate, "down", "--remove-orphans") } catch { Write-Warning $_ } finally { Pop-Location }
+        }
+    }
+    Remove-Item -LiteralPath $canonicalInstall -Recurse -Force
+    if ($PurgeModels -and (Test-Path -LiteralPath $modelRoot)) { Remove-Item -LiteralPath $modelRoot -Recurse -Force } else { Write-Host "Preserved models at $modelRoot" }
+    Write-Host "EveryAPI Edge uninstalled"
+    return
+}
 if ($NodeId -le 0) { throw "node id must be a positive integer" }
 if ($Gateway -notmatch '^https://[A-Za-z0-9._:-]+(/[A-Za-z0-9._~:/?@%+=,-]*)?$') {
     throw "gateway must use HTTPS"
 }
-if ($Token -and $Token -notmatch '^edgert_[A-Za-z0-9_-]+$') {
+if ($Token -and $Token -notmatch '^(edgert|edgerekey)_[A-Za-z0-9_-]+$') {
     throw "registration token has an invalid format"
 }
 if ($Name -notmatch '^[A-Za-z0-9._ -]{1,128}$') {
@@ -97,16 +128,28 @@ if (Test-Path -LiteralPath $InstallDir) {
 }
 
 $identityPath = Join-Path $InstallDir "data/agent/identity.json"
+$rekeyPending = $false
 if ((Test-Path -LiteralPath $identityPath) -and (Get-Item $identityPath).Length -gt 0) {
-    $Token = ""
+    if ($Token.StartsWith("edgerekey_")) {
+        if (Test-Path -LiteralPath "$identityPath.rekey-backup") { Remove-Item -LiteralPath $identityPath -Force } else { Move-Item -LiteralPath $identityPath -Destination "$identityPath.rekey-backup" }
+        $rekeyPending = $true
+        Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $identityPath) ".revoked") -Force -ErrorAction SilentlyContinue
+    } else {
+        $Token = ""
+    }
 } elseif (-not $Token) {
     throw "registration token is required for a new node"
 }
+if ($Token.StartsWith("edgerekey_") -and (Test-Path -LiteralPath "$identityPath.rekey-backup")) { $rekeyPending = $true }
 
 $modelRoot = (Join-Path $HOME ".everyapi/edge").Replace('\', '/')
 $imageModelRoot = (Join-Path $modelRoot "images").Replace('\', '/')
 $speechModelRoot = (Join-Path $modelRoot "speech").Replace('\', '/')
-New-Item -ItemType Directory -Force -Path $modelRoot, $imageModelRoot, $speechModelRoot | Out-Null
+$transcriptionModelRoot = (Join-Path $modelRoot "transcription").Replace('\', '/')
+$videoModelRoot = (Join-Path $modelRoot "video").Replace('\', '/')
+$rerankModelRoot = (Join-Path $modelRoot "rerank").Replace('\', '/')
+New-Item -ItemType Directory -Force -Path $modelRoot, $imageModelRoot, $speechModelRoot, $transcriptionModelRoot, $videoModelRoot, $rerankModelRoot | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "data/render-workflows"), (Join-Path $InstallDir "data/render") | Out-Null
 $envPath = Join-Path $InstallDir ".env"
 $consoleToken = ""
 if (Test-Path -LiteralPath $envPath) {
@@ -135,8 +178,16 @@ $envLines = @(
     "EVERYAPI_MODEL_PATH=$modelRoot",
     "EVERYAPI_IMAGE_MODEL_PATH=$imageModelRoot",
     "EVERYAPI_SPEECH_MODEL_PATH=$speechModelRoot",
+    "EVERYAPI_TRANSCRIPTION_MODEL_PATH=$transcriptionModelRoot",
+    "EVERYAPI_VIDEO_MODEL_PATH=$videoModelRoot",
+    "EVERYAPI_RERANK_MODEL_PATH=$rerankModelRoot",
     "EVERYAPI_DIFFUSERS_URL=http://diffusers:8188",
-    "EVERYAPI_SPEECH_URL=http://speech:8189"
+    "EVERYAPI_SPEECH_URL=http://speech:8189",
+    "EVERYAPI_TRANSCRIPTION_URL=http://transcription:8190",
+    "EVERYAPI_VIDEO_URL=http://video:8191",
+    "EVERYAPI_RENDER_URL=http://render:8192",
+    "EVERYAPI_RERANK_URL=http://rerank:8193",
+    "EVERYAPI_RENDER_WORKFLOW_PATH=./data/render-workflows",
     "EVERYAPI_CONSOLE_TOKEN=$consoleToken"
 )
 [IO.File]::WriteAllLines($temporaryEnv, $envLines, [Text.UTF8Encoding]::new($false))
@@ -145,10 +196,11 @@ Move-Item -LiteralPath $temporaryEnv -Destination $envPath -Force
 Push-Location $InstallDir
 try {
     Invoke-CheckedNative docker @("compose", "-f", $composeFile, "pull", "--ignore-buildable")
-    Invoke-CheckedNative docker @("compose", "-f", $composeFile, "build", "diffusers", "speech")
+    Invoke-CheckedNative docker @("compose", "-f", $composeFile, "build", "diffusers", "speech", "transcription", "video", "render", "rerank")
     $logSince = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     Invoke-CheckedNative docker @("compose", "-f", $composeFile, "up", "-d")
     Wait-AgentConnection $logSince
+    if ($rekeyPending -and (Test-Path -LiteralPath "$identityPath.rekey-backup")) { Remove-Item -LiteralPath "$identityPath.rekey-backup" -Force; $rekeyPending = $false }
 
     if ($Token) {
         $envLines = $envLines | Where-Object { -not $_.StartsWith("EVERYAPI_REGISTRATION_TOKEN=") }
@@ -161,6 +213,7 @@ try {
     Invoke-CheckedNative docker @("compose", "-f", $composeFile, "up", "-d", "--force-recreate", "agent")
     Wait-AgentConnection $logSince
 } finally {
+    if ($rekeyPending -and (Test-Path -LiteralPath "$identityPath.rekey-backup")) { Remove-Item -LiteralPath $identityPath -Force -ErrorAction SilentlyContinue; Move-Item -LiteralPath "$identityPath.rekey-backup" -Destination $identityPath -Force }
     Pop-Location
 }
 
