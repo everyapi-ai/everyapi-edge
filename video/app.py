@@ -221,12 +221,13 @@ def generate_video(state: dict, output_path: Path, cancelled: Event):
 
 def run_job(job_id: str, cancelled: Event):
     try:
-        state = read_state(job_id)
-        if cancelled.is_set():
-            return
-        state["status"] = "in_progress"
-        state["progress"] = 10
-        write_state(state)
+        with state_lock:
+            state = read_state(job_id)
+            if cancelled.is_set() or state.get("status") == "cancelled":
+                return
+            state["status"] = "in_progress"
+            state["progress"] = 10
+            write_state(state)
         temporary = job_dir(job_id) / f"output.{secrets.token_hex(8)}.tmp.mp4"
         with runtime_lock:
             generate_video(state, temporary, cancelled)
@@ -237,20 +238,27 @@ def run_job(job_id: str, cancelled: Event):
         if not temporary.is_file() or temporary.stat().st_size <= 0 or temporary.stat().st_size > MAX_OUTPUT_BYTES:
             raise RuntimeError("video output is empty or exceeds 64 MiB")
         os.replace(temporary, job_dir(job_id) / "output.mp4")
-        state["status"] = "completed"
-        state["progress"] = 100
-        state["completed_at"] = int(time.time())
-        state.pop("prompt", None)
-        write_state(state)
+        with state_lock:
+            state = read_state(job_id)
+            if cancelled.is_set() or state.get("status") == "cancelled":
+                with suppress(OSError):
+                    (job_dir(job_id) / "output.mp4").unlink()
+                return
+            state["status"] = "completed"
+            state["progress"] = 100
+            state["completed_at"] = int(time.time())
+            state.pop("prompt", None)
+            write_state(state)
     except Exception as error:  # noqa: BLE001 — persisted as a bounded task failure
         with suppress(HTTPException):
-            state = read_state(job_id)
-            if state.get("status") != "cancelled":
-                state["status"] = "failed"
-                state["error"] = {"code": "generation_failed", "message": "video generation failed"}
-                state["completed_at"] = int(time.time())
-                state.pop("prompt", None)
-                write_state(state)
+            with state_lock:
+                state = read_state(job_id)
+                if state.get("status") != "cancelled":
+                    state["status"] = "failed"
+                    state["error"] = {"code": "generation_failed", "message": "video generation failed"}
+                    state["completed_at"] = int(time.time())
+                    state.pop("prompt", None)
+                    write_state(state)
         for temporary in job_dir(job_id).glob("output.*.tmp.mp4"):
             with suppress(OSError):
                 temporary.unlink()
@@ -301,18 +309,18 @@ def get_video(job_id: str):
 
 @app.delete("/v1/videos/{job_id}")
 def cancel_video(job_id: str):
-    state = read_state(job_id)
-    if state["status"] in {"completed", "failed", "cancelled"}:
-        return public_state(state)
     with state_lock:
+        state = read_state(job_id)
+        if state["status"] in {"completed", "failed", "cancelled"}:
+            return public_state(state)
         cancelled = cancel_events.get(job_id)
-    if cancelled is not None:
-        cancelled.set()
-    state["status"] = "cancelled"
-    state["progress"] = 0
-    state["completed_at"] = int(time.time())
-    state.pop("prompt", None)
-    write_state(state)
+        if cancelled is not None:
+            cancelled.set()
+        state["status"] = "cancelled"
+        state["progress"] = 0
+        state["completed_at"] = int(time.time())
+        state.pop("prompt", None)
+        write_state(state)
     return public_state(state)
 
 

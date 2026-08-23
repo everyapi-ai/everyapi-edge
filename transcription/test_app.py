@@ -1,7 +1,9 @@
+import asyncio
 import io
 import os
-from threading import Event
+from threading import Event, Thread
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -75,3 +77,37 @@ def test_cancellation_criteria_reads_request_event():
     assert criteria(None, None) is False
     cancelled.set()
     assert criteria(None, None) is True
+
+
+def test_transcription_endpoint_waits_for_runtime_lock_off_event_loop(monkeypatch):
+    monkeypatch.setattr(runtime, "infer", lambda *_args: {"text": "ready"})
+    event_loop_progressed = Event()
+    unlock_fallback_used = Event()
+    runtime.runtime_lock.acquire()
+
+    def unlock_after_event_loop_progress():
+        if not event_loop_progressed.wait(1):
+            unlock_fallback_used.set()
+        runtime.runtime_lock.release()
+
+    unlocker = Thread(target=unlock_after_event_loop_progress, daemon=True)
+    unlocker.start()
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=runtime.app), base_url="http://test") as client:
+            request = asyncio.create_task(client.post("/v1/audio/transcriptions", data={"model": runtime.DEFAULT_MODEL}, files={"file": ("sample.wav", b"RIFFtest", "audio/wav")}))
+            await asyncio.sleep(0)
+            event_loop_progressed.set()
+            response = await request
+        assert response.status_code == 200
+        assert response.json() == {"text": "ready"}
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        event_loop_progressed.set()
+        unlocker.join(2)
+        if runtime.runtime_lock.locked():
+            runtime.runtime_lock.release()
+
+    assert not unlock_fallback_used.is_set(), "the request blocked the event loop while waiting for the runtime lock"

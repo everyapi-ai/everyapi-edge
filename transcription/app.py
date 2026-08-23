@@ -92,6 +92,11 @@ def infer(path: str, task: str, language: str | None, prompt: str, temperature: 
     return transcriber()(path, generate_kwargs=generate_kwargs, return_timestamps=True)
 
 
+def infer_serialized(path: str, task: str, language: str | None, prompt: str, temperature: float, cancelled: Event):
+    with runtime_lock:
+        return infer(path, task, language, prompt, temperature, cancelled)
+
+
 def preload():
     global transcription_error, transcription_ready, transcription_status
     transcription_ready = False
@@ -210,8 +215,7 @@ async def recognize(request: Request, upload: UploadFile, model: str, language: 
 
     monitor = asyncio.create_task(monitor_disconnect())
     try:
-        with runtime_lock:
-            result = await asyncio.to_thread(infer, path, task, language, prompt, temperature, cancelled)
+        result = await asyncio.to_thread(infer_serialized, path, task, language, prompt, temperature, cancelled)
         if cancelled.is_set():
             raise HTTPException(status_code=499, detail="request was cancelled")
     finally:

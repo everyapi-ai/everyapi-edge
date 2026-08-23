@@ -1,4 +1,5 @@
 import time
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
@@ -65,6 +66,34 @@ def test_cancelled_job_does_not_publish_content(monkeypatch):
     cancelled = client.delete(f"/v1/videos/{created['id']}")
     assert cancelled.json()["status"] == "cancelled"
     time.sleep(0.05)
+    assert client.get(f"/v1/videos/{created['id']}/content").status_code == 409
+
+
+def test_cancellation_wins_after_generation_before_output_publish(monkeypatch):
+    publish_started = Event()
+    release_publish = Event()
+    real_replace = runtime.os.replace
+
+    def fake_generate(_state, output, _cancelled):
+        output.write_bytes(b"late-video")
+
+    def gated_replace(source, destination):
+        if destination.name == "output.mp4":
+            publish_started.set()
+            assert release_publish.wait(1)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(runtime, "generate_video", fake_generate)
+    monkeypatch.setattr(runtime.os, "replace", gated_replace)
+    client = TestClient(runtime.app)
+    created = client.post("/v1/videos", json={"prompt": "cancel late"}).json()
+    assert publish_started.wait(1)
+    assert client.delete(f"/v1/videos/{created['id']}").json()["status"] == "cancelled"
+    release_publish.set()
+    deadline = time.time() + 1
+    while created["id"] in runtime.cancel_events and time.time() < deadline:
+        time.sleep(0.01)
+    assert client.get(f"/v1/videos/{created['id']}").json()["status"] == "cancelled"
     assert client.get(f"/v1/videos/{created['id']}/content").status_code == 409
 
 

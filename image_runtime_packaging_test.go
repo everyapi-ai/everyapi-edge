@@ -315,10 +315,14 @@ func TestMacOSInstallerStartsNativeMPSTranscriptionRuntime(t *testing.T) {
 		}
 	}
 	helper := readPackagingFile(t, "scripts/install-macos-transcription.sh")
-	for _, required := range []string{"transcription/requirements.txt", "com.everyapi.edge-transcription.plist.in", "127.0.0.1:8190/health", "+ 1200"} {
+	for _, required := range []string{"transcription/requirements-macos.txt", "com.everyapi.edge-transcription.plist.in", "127.0.0.1:8190/health", "+ 1200"} {
 		if !strings.Contains(helper, required) {
 			t.Errorf("native transcription installer is missing %q", required)
 		}
+	}
+	requirements := readPackagingFile(t, "transcription/requirements-macos.txt")
+	if !strings.Contains(requirements, "-r requirements.txt") || !strings.Contains(requirements, "torch>=2.4,<3") {
+		t.Fatal("native transcription requirements must extend the shared runtime dependencies with an Apple MPS-capable torch build")
 	}
 }
 

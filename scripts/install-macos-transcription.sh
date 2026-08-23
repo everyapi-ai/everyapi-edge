@@ -33,7 +33,7 @@ mkdir -p "$RUNTIME_DIR" "$MODEL_ROOT" "$(dirname "$PLIST_PATH")" "$LOG_DIR"
 if [ ! -x "$VENV_DIR/bin/python" ]; then
   python3 -m venv "$VENV_DIR"
 fi
-"$VENV_DIR/bin/pip" install --disable-pip-version-check -r "$BUNDLE_DIR/transcription/requirements.txt"
+"$VENV_DIR/bin/pip" install --disable-pip-version-check -r "$BUNDLE_DIR/transcription/requirements-macos.txt"
 
 TMP_PLIST=$(mktemp "$PLIST_PATH.XXXXXX")
 trap 'rm -f "$TMP_PLIST"' EXIT
