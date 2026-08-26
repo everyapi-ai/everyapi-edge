@@ -125,6 +125,28 @@ func TestFromEnvReadsConsoleTokenWithoutLoggingIt(t *testing.T) {
 	}
 }
 
+// The console's Host allowlist is what a supplier reaches for after a wildcard bind stops answering to their LAN
+// name, so the env var has to survive the shapes people actually paste: extra spaces, mixed case, and a port
+// copied out of the browser's address bar.
+func TestFromEnvNormalizesConsoleAllowedHosts(t *testing.T) {
+	t.Setenv("EVERYAPI_CONSOLE_ALLOWED_HOSTS", " Studio.Local:8421 , edge.internal ,, [fd00::1]:8421 ")
+	cfg := FromEnv()
+	want := []string{"studio.local", "edge.internal", "fd00::1"}
+	if len(cfg.ConsoleAllowedHosts) != len(want) {
+		t.Fatalf("ConsoleAllowedHosts = %#v", cfg.ConsoleAllowedHosts)
+	}
+	for i, host := range want {
+		if cfg.ConsoleAllowedHosts[i] != host {
+			t.Fatalf("ConsoleAllowedHosts = %#v, want %#v", cfg.ConsoleAllowedHosts, want)
+		}
+	}
+
+	t.Setenv("EVERYAPI_CONSOLE_ALLOWED_HOSTS", "")
+	if hosts := FromEnv().ConsoleAllowedHosts; hosts != nil {
+		t.Fatalf("unset allowlist = %#v, want nil", hosts)
+	}
+}
+
 func TestValidateRejectsNegativeVRAM(t *testing.T) {
 	cfg := validBase()
 	cfg.VRAMTotalGB = -1

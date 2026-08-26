@@ -19,15 +19,19 @@ var webAssets embed.FS
 
 // Config is local-only console configuration.
 type Config struct {
-	OllamaURL            string
-	DiffusersURL         string
-	SpeechURL            string
-	TranscriptionURL     string
-	VideoURL             string
-	RenderURL            string
-	RerankURL            string
-	ConsoleToken         string
-	RotateConsoleToken   func() (string, error)
+	OllamaURL          string
+	DiffusersURL       string
+	SpeechURL          string
+	TranscriptionURL   string
+	VideoURL           string
+	RenderURL          string
+	RerankURL          string
+	ConsoleToken       string
+	RotateConsoleToken func() (string, error)
+	// ConsoleAddr is the address the console listens on, and AllowedHosts the extra names it answers to. Together
+	// they form the Host allowlist that keeps DNS rebinding out; see guardHostHeader.
+	ConsoleAddr          string
+	AllowedHosts         []string
 	StoragePath          string
 	VRAMTotalGB          int
 	NodeName             string
@@ -356,7 +360,10 @@ func newHandlers(cfg Config, store *Store, picker func() (string, error)) Handle
 	control := http.NewServeMux()
 	control.HandleFunc("/api/", h.api)
 	return Handlers{
-		Browser:            securityHeaders(browser),
+		// The Host guard wraps everything the browser can reach, including GET and the SPA itself — DNS
+		// rebinding defeats the same-origin check completely, and reads were never covered by it anyway.
+		// Control is the metadata-free internal surface and deliberately stays unguarded, as with sameOriginMutations.
+		Browser:            securityHeaders(guardHostHeader(cfg.ConsoleAddr, cfg.AllowedHosts, browser)),
 		Control:            securityHeaders(control),
 		ReportUpdateStatus: h.reportUpdateStatus,
 	}

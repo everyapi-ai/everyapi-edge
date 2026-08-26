@@ -149,6 +149,8 @@ func main() {
 		RenderURL:        cfg.RenderURL,
 		RerankURL:        cfg.RerankURL,
 		ConsoleToken:     consoleToken,
+		ConsoleAddr:      cfg.ConsoleAddr,
+		AllowedHosts:     cfg.ConsoleAllowedHosts,
 		RotateConsoleToken: func() (string, error) {
 			return rotateConsoleToken(cfg.IdentityPath)
 		},

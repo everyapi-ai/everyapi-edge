@@ -41,7 +41,7 @@ func TestResourceSettingsAPIReadsAndSavesPolicy(t *testing.T) {
 	}, NewStore(16)).Control
 
 	getResponse := httptest.NewRecorder()
-	h.ServeHTTP(getResponse, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	h.ServeHTTP(getResponse, consoleHTTPRequest(http.MethodGet, "/api/settings", nil))
 	if getResponse.Code != http.StatusOK {
 		t.Fatalf("GET status = %d, body = %s", getResponse.Code, getResponse.Body.String())
 	}
@@ -59,7 +59,7 @@ func TestResourceSettingsAPIReadsAndSavesPolicy(t *testing.T) {
 		ResourcePolicy protocol.ResourcePolicy `json:"resource_policy"`
 	}{ResourcePolicy: next})
 	putResponse := httptest.NewRecorder()
-	h.ServeHTTP(putResponse, httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader(body)))
+	h.ServeHTTP(putResponse, consoleHTTPRequest(http.MethodPut, "/api/settings", bytes.NewReader(body)))
 	if putResponse.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d, body = %s", putResponse.Code, putResponse.Body.String())
 	}
@@ -89,7 +89,7 @@ func TestDrainAPIStartsAndCancelsDrain(t *testing.T) {
 		{body: `{"enabled":false}`, want: false},
 	} {
 		response := httptest.NewRecorder()
-		h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/drain", strings.NewReader(test.body)))
+		h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/drain", strings.NewReader(test.body)))
 		if response.Code != http.StatusOK {
 			t.Fatalf("POST status = %d, body = %s", response.Code, response.Body.String())
 		}
@@ -110,7 +110,7 @@ func TestHandlerListsModelsWithoutLocalToken(t *testing.T) {
 
 	h := NewHandler(Config{OllamaURL: ollama.URL, VRAMTotalGB: 24}, NewStore(16))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := consoleHTTPRequest(http.MethodGet, "/api/models", nil)
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, req)
 	if response.Code != http.StatusOK {
@@ -142,7 +142,7 @@ func newRuntimeControlHandlers(t *testing.T) Handlers {
 
 func TestBrowserHandlerRejectsCrossSiteMutation(t *testing.T) {
 	handlers := newRuntimeControlHandlers(t)
-	request := httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil)
+	request := consoleHTTPRequest(http.MethodPost, "/api/runtime/unload-all", nil)
 	request.Header.Set("Sec-Fetch-Site", "cross-site")
 	response := httptest.NewRecorder()
 
@@ -155,7 +155,7 @@ func TestBrowserHandlerRejectsCrossSiteMutation(t *testing.T) {
 
 func TestBrowserHandlerRejectsMutationWithoutOriginEvidence(t *testing.T) {
 	handlers := newRuntimeControlHandlers(t)
-	request := httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil)
+	request := consoleHTTPRequest(http.MethodPost, "/api/runtime/unload-all", nil)
 	response := httptest.NewRecorder()
 
 	handlers.Browser.ServeHTTP(response, request)
@@ -167,7 +167,7 @@ func TestBrowserHandlerRejectsMutationWithoutOriginEvidence(t *testing.T) {
 
 func TestBrowserHandlerAllowsSameOriginMutation(t *testing.T) {
 	handlers := newRuntimeControlHandlers(t)
-	request := httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil)
+	request := consoleHTTPRequest(http.MethodPost, "/api/runtime/unload-all", nil)
 	request.Header.Set("Sec-Fetch-Site", "same-origin")
 	response := httptest.NewRecorder()
 
@@ -182,7 +182,7 @@ func TestControlHandlerDoesNotRequireBrowserFetchMetadata(t *testing.T) {
 	handlers := newRuntimeControlHandlers(t)
 	response := httptest.NewRecorder()
 
-	handlers.Control.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil))
+	handlers.Control.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/runtime/unload-all", nil))
 
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("internal control status = %d, want %d; body=%s", response.Code, http.StatusNoContent, response.Body.String())
@@ -201,7 +201,7 @@ func TestHandlerReportsTheConfiguredNodeProfile(t *testing.T) {
 	}, NewStore(16))
 
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/node", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/node", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("node profile status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -215,7 +215,7 @@ func TestHandlerReportsTheConfiguredNodeProfile(t *testing.T) {
 func TestOverviewFallsBackToTheConfiguredAgentVersion(t *testing.T) {
 	h := NewHandler(Config{AgentVersion: "v1.2.3"}, NewStore(16))
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/overview", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"agent_version":"v1.2.3"`) {
 		t.Fatalf("overview version = %d %s", response.Code, response.Body.String())
 	}
@@ -236,7 +236,7 @@ func TestHandlerRejectsRemovingModelLoadedInMemory(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: localRuntime.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/models?name=llama3.1%3A8b", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodDelete, "/api/models?name=llama3.1%3A8b", nil))
 
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "unload the model before removing it") {
 		t.Fatalf("remove loaded model = %d %s", response.Code, response.Body.String())
@@ -258,7 +258,7 @@ func TestHandlerRequiresConfirmedRemovalAfterRuntimeRefresh(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: localRuntime.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/models?name=llama3.1%3A8b", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodDelete, "/api/models?name=llama3.1%3A8b", nil))
 
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "confirm removal") {
 		t.Fatalf("unconfirmed remove = %d %s", response.Code, response.Body.String())
@@ -285,7 +285,7 @@ func TestHandlerReportsLocalModelCapabilities(t *testing.T) {
 
 	h := NewHandler(Config{OllamaURL: ollama.URL}, NewStore(16))
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/models/capabilities?name=qwen3-vl%3A8b", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/models/capabilities?name=qwen3-vl%3A8b", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"model":"qwen3-vl:8b"`) || !strings.Contains(response.Body.String(), `"vision"`) {
 		t.Fatalf("model capabilities = %d %s", response.Code, response.Body.String())
 	}
@@ -316,7 +316,7 @@ func TestHandlerReportsExactNodeCapabilities(t *testing.T) {
 
 	h := NewHandler(Config{OllamaURL: textRuntime.URL, DiffusersURL: imageRuntime.URL, SpeechURL: speechRuntime.URL}, NewStore(16))
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/capabilities", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("capabilities = %d %s", response.Code, response.Body.String())
 	}
@@ -331,7 +331,7 @@ func TestHandlerReportsExactNodeCapabilities(t *testing.T) {
 func TestEmbeddedControlRoomServesSelfContainedDocument(t *testing.T) {
 	h := NewHandler(Config{OllamaURL: "http://ollama:11434"}, NewStore(16))
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("index status = %d", response.Code)
 	}
@@ -361,7 +361,7 @@ func TestOverviewIncludesLoadedVRAMFromOllama(t *testing.T) {
 	}))
 	defer ollama.Close()
 	h := NewHandler(Config{OllamaURL: ollama.URL, VRAMTotalGB: 24}, NewStore(16))
-	req := httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	req := consoleHTTPRequest(http.MethodGet, "/api/overview", nil)
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, req)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"loaded_vram_bytes":3221225472`) || !strings.Contains(response.Body.String(), `"vram_total_gb":24`) {
@@ -398,7 +398,7 @@ func TestOverviewIncludesAllManagedRuntimeMemory(t *testing.T) {
 
 	h := NewHandler(Config{OllamaURL: ollama.URL, DiffusersURL: image.URL, SpeechURL: speech.URL, VRAMTotalGB: 24}, NewStore(16))
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/overview", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"loaded_vram_bytes":3758096384`) {
 		t.Fatalf("overview = %d %s", response.Code, response.Body.String())
 	}
@@ -420,7 +420,7 @@ func TestHandlerShowsOllamaRuntime(t *testing.T) {
 	store := NewStore(16)
 	h := NewHandler(Config{OllamaURL: ollama.URL}, store)
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/runtime", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/runtime", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("runtime status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -442,7 +442,7 @@ func TestHandlerReportsDiffusersRuntimeReadiness(t *testing.T) {
 
 	h := NewHandler(Config{OllamaURL: "http://ollama:11434", DiffusersURL: diffusers.URL}, NewStore(16))
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/image-runtime", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/image-runtime", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"ready"`) || !strings.Contains(response.Body.String(), `Qwen/Qwen-Image-Edit-2511`) {
 		t.Fatalf("image runtime = %d %s", response.Code, response.Body.String())
 	}
@@ -451,7 +451,7 @@ func TestHandlerReportsDiffusersRuntimeReadiness(t *testing.T) {
 func TestImageRuntimeAvailabilityDoesNotExposeItsImplementation(t *testing.T) {
 	h := NewHandler(Config{}, NewStore(16))
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/image-runtime", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/image-runtime", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"error":"Image editing is unavailable on this node"`) || strings.Contains(strings.ToLower(response.Body.String()), "diffusers") {
 		t.Fatalf("image runtime availability = %d %s", response.Code, response.Body.String())
 	}
@@ -468,7 +468,7 @@ func TestImageRuntimePreservesTheSafeGPUReadinessReason(t *testing.T) {
 
 	h := NewHandler(Config{DiffusersURL: diffusers.URL}, NewStore(16))
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/image-runtime", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/image-runtime", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"error":"A CUDA-capable GPU is required for image editing."`) {
 		t.Fatalf("image runtime capability = %d %s", response.Code, response.Body.String())
 	}
@@ -495,7 +495,7 @@ func TestHandlerSelectsTheActiveImageEditingModel(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", DiffusersURL: diffusers.URL, ModelsChanged: func() { modelsChanged <- struct{}{} }}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/image-runtime/model", strings.NewReader(`{"model":"Qwen/Qwen-Image-Edit-2509"}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/image-runtime/model", strings.NewReader(`{"model":"Qwen/Qwen-Image-Edit-2509"}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `Qwen/Qwen-Image-Edit-2509`) {
 		t.Fatalf("select image model = %d %s", response.Code, response.Body.String())
 	}
@@ -538,7 +538,7 @@ func TestHandlerProxiesImageEditsToDiffusers(t *testing.T) {
 	_, _ = part.Write([]byte("image-bytes"))
 	_ = writer.Close()
 	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", DiffusersURL: diffusers.URL}, NewStore(16)).Control
-	request := httptest.NewRequest(http.MethodPost, "/api/image/edit", &body)
+	request := consoleHTTPRequest(http.MethodPost, "/api/image/edit", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, request)
@@ -580,7 +580,7 @@ func TestHandlerRunsImageSpeechAndEmbeddingPlaygrounds(t *testing.T) {
 		{path: "/api/playground/speech", body: `{"model":"kokoro","input":"hello","voice":"af_heart","response_format":"wav"}`, contains: "wave-bytes", contentType: "audio/wav"},
 	} {
 		response := httptest.NewRecorder()
-		h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body)))
+		h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, test.path, strings.NewReader(test.body)))
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), test.contains) || !strings.HasPrefix(response.Header().Get("Content-Type"), test.contentType) {
 			t.Fatalf("%s = %d %s (%s)", test.path, response.Code, response.Body.String(), response.Header().Get("Content-Type"))
 		}
@@ -599,7 +599,7 @@ func TestCopyBoundedPlaygroundResponseRejectsOversizedArtifactBeforeWriting(t *t
 func TestHandlerRejectsTrailingPlaygroundJSON(t *testing.T) {
 	h := NewHandlers(Config{OllamaURL: "http://127.0.0.1:1"}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/embedding", strings.NewReader(`{"model":"nomic-embed","input":"hello"} {}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/playground/embedding", strings.NewReader(`{"model":"nomic-embed","input":"hello"} {}`)))
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("trailing JSON status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -627,7 +627,7 @@ func TestHandlerUnloadsOllamaRuntimeModel(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/runtime/unload", strings.NewReader(`{"model":"llama3.1:8b"}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/runtime/unload", strings.NewReader(`{"model":"llama3.1:8b"}`)))
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("unload status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -667,7 +667,7 @@ func TestHandlerUnloadsAllRuntimeModels(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/runtime/unload-all", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/runtime/unload-all", nil))
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("unload all status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -706,7 +706,7 @@ func TestHandlerBenchmarksAnUnloadedModelAndReleasesIt(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: localRuntime.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/models/benchmark", strings.NewReader(`{"model":"llama3.1:8b"}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/models/benchmark", strings.NewReader(`{"model":"llama3.1:8b"}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("benchmark status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -732,7 +732,7 @@ func TestHandlerRequiresExplicitReleaseBeforeBenchmarkingAResidentModel(t *testi
 
 	h := NewHandlers(Config{OllamaURL: localRuntime.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/models/benchmark", strings.NewReader(`{"model":"llama3.1:8b"}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/models/benchmark", strings.NewReader(`{"model":"llama3.1:8b"}`)))
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "release the resident model") {
 		t.Fatalf("resident benchmark = %d %s", response.Code, response.Body.String())
 	}
@@ -755,7 +755,7 @@ func TestPlaygroundBlocksASecondModelThatExceedsTheLiveMemoryBudget(t *testing.T
 
 	h := NewHandlers(Config{OllamaURL: localRuntime.URL, VRAMTotalGB: 8}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}`)))
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "unload another model") {
 		t.Fatalf("memory admission = %d %s", response.Code, response.Body.String())
 	}
@@ -787,7 +787,7 @@ func TestHandlerRunsLocalPlaygroundChat(t *testing.T) {
 	store := NewStore(16)
 	h := NewHandlers(Config{OllamaURL: ollama.URL}, store).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("playground status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -816,7 +816,7 @@ func TestHandlerDoesNotExposeRuntimeBrandInPlaygroundErrors(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: runtime.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}`)))
 	if response.Code != http.StatusBadGateway || strings.Contains(strings.ToLower(response.Body.String()), "ollama") || !strings.Contains(response.Body.String(), "local runtime") {
 		t.Fatalf("playground error = %d %s", response.Code, response.Body.String())
 	}
@@ -856,7 +856,7 @@ func TestHandlerRunsImagePlaygroundChatAgainstTheLocalRuntime(t *testing.T) {
 	store := NewStore(16)
 	h := NewHandlers(Config{OllamaURL: ollama.URL}, store).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"qwen3-vl:8b","stream":false,"messages":[{"role":"user","content":"What is in this image?","images":["aW1hZ2U="]}]}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"qwen3-vl:8b","stream":false,"messages":[{"role":"user","content":"What is in this image?","images":["aW1hZ2U="]}]}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"content":"A cat."`) || !strings.Contains(response.Body.String(), `"prompt_tokens":3`) {
 		t.Fatalf("image playground response = %d %s", response.Code, response.Body.String())
 	}
@@ -876,7 +876,7 @@ func TestHandlerRejectsImagePlaygroundChatForTextOnlyModel(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"What is in this image?","images":["aW1hZ2U="]}]}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","messages":[{"role":"user","content":"What is in this image?","images":["aW1hZ2U="]}]}`)))
 	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "does not support images") {
 		t.Fatalf("text-only image playground = %d %s", response.Code, response.Body.String())
 	}
@@ -901,7 +901,7 @@ func TestHandlerStreamsImagePlaygroundChat(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"qwen3-vl:8b","stream":true,"messages":[{"role":"user","content":"Describe it","images":["aW1hZ2U="]}]}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"qwen3-vl:8b","stream":true,"messages":[{"role":"user","content":"Describe it","images":["aW1hZ2U="]}]}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("image playground stream = %d %s", response.Code, response.Body.String())
 	}
@@ -940,7 +940,7 @@ func TestHandlerStreamsLocalPlaygroundChat(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","system":"Be concise","temperature":0.4,"stream":true,"messages":[{"role":"user","content":"Hello"}]}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/playground/chat", strings.NewReader(`{"model":"llama3.1:8b","system":"Be concise","temperature":0.4,"stream":true,"messages":[{"role":"user","content":"Hello"}]}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("stream status = %d, type=%q, body=%s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
 	}
@@ -962,7 +962,7 @@ func TestHandlerReportsOllamaStorageLocationAndUsage(t *testing.T) {
 
 	h := NewHandler(Config{OllamaURL: "http://ollama:11434", StoragePath: storage}, NewStore(16))
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/storage", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/storage", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("storage status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -990,7 +990,7 @@ func TestHandlerPreflightsStorageMigrationTarget(t *testing.T) {
 	}
 	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"destination":"`+target+`"}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"destination":"`+target+`"}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("migration plan status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1010,7 +1010,7 @@ func TestHandlerPreflightsAnExplicitStorageMigrationSource(t *testing.T) {
 	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: filepath.Join(t.TempDir(), "empty-default")}, NewStore(16)).Control
 	response := httptest.NewRecorder()
 	body := `{"source":"` + source + `","destination":"` + target + `"}`
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(body)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(body)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("migration plan status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1030,7 +1030,7 @@ func TestHandlerRejectsStorageMigrationDestinationInsideSource(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"destination":"`+destination+`"}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"destination":"`+destination+`"}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("migration plan status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1050,7 +1050,7 @@ func TestHandlerCopiesModelsToPreparedMigrationTarget(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Control
 	start := httptest.NewRecorder()
-	h.ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/api/storage/migrate", strings.NewReader(`{"destination":"`+target+`"}`)))
+	h.ServeHTTP(start, consoleHTTPRequest(http.MethodPost, "/api/storage/migrate", strings.NewReader(`{"destination":"`+target+`"}`)))
 	if start.Code != http.StatusAccepted {
 		t.Fatalf("migration start status = %d, body=%s", start.Code, start.Body.String())
 	}
@@ -1064,7 +1064,7 @@ func TestHandlerCopiesModelsToPreparedMigrationTarget(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		response := httptest.NewRecorder()
-		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/storage/migrate", nil))
+		h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/storage/migrate", nil))
 		if response.Code != http.StatusOK {
 			t.Fatalf("migration status = %d, body=%s", response.Code, response.Body.String())
 		}
@@ -1095,7 +1095,7 @@ func TestHandlerDefersModelDownloadsWhileStorageMigrationIsCopying(t *testing.T)
 		migration:  &migrationJob{Status: "copying"},
 	}
 	response := httptest.NewRecorder()
-	h.startPull(response, httptest.NewRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`)))
+	h.startPull(response, consoleHTTPRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`)))
 	if response.Code != http.StatusConflict {
 		t.Fatalf("download during migration status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1104,7 +1104,7 @@ func TestHandlerDefersModelDownloadsWhileStorageMigrationIsCopying(t *testing.T)
 func TestHandlerCancelsQueuedModelDownload(t *testing.T) {
 	h := &handler{pullQueue: []*pullJob{{Name: "qwen3:14b", Status: "queued"}}}
 	response := httptest.NewRecorder()
-	h.api(response, httptest.NewRequest(http.MethodDelete, "/api/models/pull?name=qwen3:14b", nil))
+	h.api(response, consoleHTTPRequest(http.MethodDelete, "/api/models/pull?name=qwen3:14b", nil))
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("cancel queued download status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1151,7 +1151,7 @@ func TestHandlerStopsModelPullBeforeItExhaustsModelStorage(t *testing.T) {
 		storageAvailable: func(string) (int64, error) { return 64 << 20, nil },
 	}
 	response := httptest.NewRecorder()
-	h.startPull(response, httptest.NewRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`)))
+	h.startPull(response, consoleHTTPRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`)))
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("pull start status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1179,7 +1179,7 @@ func TestHandlerCancelsActiveModelDownload(t *testing.T) {
 	cancelled := make(chan struct{})
 	h := &handler{pull: &pullJob{Name: "qwen3:14b", Status: "downloading", cancel: func() { close(cancelled) }}}
 	response := httptest.NewRecorder()
-	h.api(response, httptest.NewRequest(http.MethodDelete, "/api/models/pull?name=qwen3:14b", nil))
+	h.api(response, consoleHTTPRequest(http.MethodDelete, "/api/models/pull?name=qwen3:14b", nil))
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("cancel active download status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1197,7 +1197,7 @@ func TestHandlerUsesNativeStoragePickerPath(t *testing.T) {
 	picker := func() (string, error) { return "/Volumes/models/ollama", nil }
 	h := newHandler(Config{OllamaURL: "http://ollama:11434"}, NewStore(16), picker)
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/storage/pick", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/storage/pick", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("storage picker status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1375,7 +1375,7 @@ func TestHandlerStartsModelPullAndExposesProgress(t *testing.T) {
 	defer ollama.Close()
 
 	h := NewHandlers(Config{OllamaURL: ollama.URL, ModelsChanged: func() { modelsChanged <- struct{}{} }}, NewStore(16)).Control
-	req := httptest.NewRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`))
+	req := consoleHTTPRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`))
 	req.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, req)
@@ -1447,7 +1447,7 @@ func TestHandlerExposesVersionAndStartsLatestUpdate(t *testing.T) {
 	}, NewStore(16)).Control
 
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/update", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/update", nil))
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1458,7 +1458,7 @@ func TestHandlerExposesVersionAndStartsLatestUpdate(t *testing.T) {
 	}
 
 	response = httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/overview", nil))
 	var overview Overview
 	if err := json.NewDecoder(response.Body).Decode(&overview); err != nil {
 		t.Fatal(err)
@@ -1481,7 +1481,7 @@ func TestHandlerPersistsAutomaticUpdateSettings(t *testing.T) {
 	}, NewStore(16)).Control
 
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/update/settings", nil))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/update/settings", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("GET status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1494,7 +1494,7 @@ func TestHandlerPersistsAutomaticUpdateSettings(t *testing.T) {
 	}
 
 	response = httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":true}`))
+	request := consoleHTTPRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":true}`))
 	request.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -1521,7 +1521,7 @@ func TestHandlerPersistsAutomaticUpdateMaintenanceWindow(t *testing.T) {
 	}, NewStore(16)).Control
 
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":true,"maintenance_start":"23:30","maintenance_end":"02:00"}`))
+	request := consoleHTTPRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":true,"maintenance_start":"23:30","maintenance_end":"02:00"}`))
 	request.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -1545,7 +1545,7 @@ func TestHandlerRejectsInvalidAutomaticUpdateMaintenanceWindow(t *testing.T) {
 	}, NewStore(16)).Control
 
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":true,"maintenance_start":"24:00","maintenance_end":"02:00"}`))
+	request := consoleHTTPRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":true,"maintenance_start":"24:00","maintenance_end":"02:00"}`))
 	request.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
@@ -1561,7 +1561,7 @@ func TestHandlersExposeBackgroundAutomaticUpdateStatus(t *testing.T) {
 	handlers.ReportUpdateStatus(UpdateStatus{State: "checking", Version: "1.2.4"})
 
 	response := httptest.NewRecorder()
-	handlers.Control.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	handlers.Control.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/overview", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1585,7 +1585,7 @@ func TestManualUpdateConflictDoesNotOverwriteAutomaticUpdateStatus(t *testing.T)
 	handlers.ReportUpdateStatus(UpdateStatus{State: "current", Version: "1.2.3"})
 
 	response := httptest.NewRecorder()
-	handlers.Control.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/update", nil))
+	handlers.Control.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/update", nil))
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("POST status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1598,7 +1598,7 @@ func TestManualUpdateConflictDoesNotOverwriteAutomaticUpdateStatus(t *testing.T)
 	deadline := time.Now().Add(time.Second)
 	for {
 		response = httptest.NewRecorder()
-		handlers.Control.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+		handlers.Control.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/overview", nil))
 		var overview Overview
 		if err := json.NewDecoder(response.Body).Decode(&overview); err != nil {
 			t.Fatal(err)
@@ -1626,7 +1626,7 @@ func TestHandlerRejectsMalformedAutomaticUpdateSettings(t *testing.T) {
 	}, NewStore(16)).Control
 
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":"yes"}`))
+	request := consoleHTTPRequest(http.MethodPut, "/api/update/settings", strings.NewReader(`{"auto_update":"yes"}`))
 	request.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
@@ -1652,7 +1652,7 @@ func TestHandlerRejectsPullForAnInstalledModel(t *testing.T) {
 
 	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`)))
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"qwen3:8b"}`)))
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "already installed") {
 		t.Fatalf("installed pull = %d %s", response.Code, response.Body.String())
 	}
@@ -1682,7 +1682,7 @@ func TestHandlerQueuesModelPullsInsteadOfRejectingTheSecondRequest(t *testing.T)
 
 	h := NewHandlers(Config{OllamaURL: ollama.URL}, NewStore(16)).Control
 	post := func(name string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"`+name+`"}`))
+		req := consoleHTTPRequest(http.MethodPost, "/api/models/pull", strings.NewReader(`{"name":"`+name+`"}`))
 		req.Header.Set("Content-Type", "application/json")
 		response := httptest.NewRecorder()
 		h.ServeHTTP(response, req)
@@ -1703,7 +1703,7 @@ func TestHandlerQueuesModelPullsInsteadOfRejectingTheSecondRequest(t *testing.T)
 		t.Fatalf("queued pull status = %d, body=%s", response.Code, response.Body.String())
 	}
 	queue := httptest.NewRecorder()
-	h.ServeHTTP(queue, httptest.NewRequest(http.MethodGet, "/api/models/pull", nil))
+	h.ServeHTTP(queue, consoleHTTPRequest(http.MethodGet, "/api/models/pull", nil))
 	if queue.Code != http.StatusOK || !strings.Contains(queue.Body.String(), `"active":{"name":"qwen3:8b"`) || !strings.Contains(queue.Body.String(), `"queued":[{"name":"gemma3:4b"`) {
 		t.Fatalf("queue = %d %s", queue.Code, queue.Body.String())
 	}

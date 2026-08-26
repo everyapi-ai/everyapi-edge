@@ -12,7 +12,7 @@ import (
 var testConsoleToken = strings.Repeat("a1", 32)
 
 func consoleRequest(method, target, body string) *http.Request {
-	request := httptest.NewRequest(method, target, strings.NewReader(body))
+	request := consoleHTTPRequest(method, target, strings.NewReader(body))
 	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
 		request.Header.Set("Sec-Fetch-Site", "same-origin")
 	}

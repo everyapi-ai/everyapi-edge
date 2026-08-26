@@ -54,7 +54,7 @@ func TestWritePrivateErrorNeverExposesFilesystemDetails(t *testing.T) {
 }
 
 func TestUnknownAPIRouteUsesJSONError(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/api/missing", nil)
+	request := consoleHTTPRequest(http.MethodGet, "/api/missing", nil)
 	response := httptest.NewRecorder()
 	NewHandler(Config{}, NewStore(1)).ServeHTTP(response, request)
 

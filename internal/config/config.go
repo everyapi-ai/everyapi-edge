@@ -49,6 +49,8 @@ type Config struct {
 	ConsoleAddr string
 	// ConsoleToken pairs a browser with a non-loopback Control Room. Installers generate and persist it; direct loopback-only binaries may leave it empty.
 	ConsoleToken string
+	// ConsoleAllowedHosts names the extra Host headers the console answers to (EVERYAPI_CONSOLE_ALLOWED_HOSTS, comma-separated). The console rejects any other name so DNS rebinding cannot reach it; IP literals, localhost, and the hostname in ConsoleAddr are always accepted. Set this when a wildcard bind is reached through an mDNS or LAN name (studio.local, edge.internal).
+	ConsoleAllowedHosts []string
 	// OllamaStoragePath is the model root visible to the agent process. It is used by the local console for storage inspection and migration planning.
 	OllamaStoragePath string
 	// MaxConcurrentRequests bounds accepted gateway work before the agent reports node_busy. GPU-backed requests are serialized separately, so this is the total queue plus CPU TTS capacity.
@@ -198,6 +200,7 @@ func FromEnv() Config {
 		Workloads:             parseWorkloads(os.Getenv("EVERYAPI_WORKLOADS")),
 		ConsoleAddr:           defaultStr(os.Getenv("EVERYAPI_CONSOLE_ADDR"), "127.0.0.1:8421"),
 		ConsoleToken:          strings.TrimSpace(os.Getenv("EVERYAPI_CONSOLE_TOKEN")),
+		ConsoleAllowedHosts:   parseHostList(os.Getenv("EVERYAPI_CONSOLE_ALLOWED_HOSTS")),
 		OllamaStoragePath:     defaultOllamaStoragePath(),
 		MaxConcurrentRequests: parseConcurrentRequests(os.Getenv("EVERYAPI_MAX_CONCURRENT_REQUESTS")),
 	}
@@ -240,6 +243,26 @@ func parseWorkloads(raw string) []string {
 	for _, part := range strings.Split(raw, ",") {
 		if w := strings.ToLower(strings.TrimSpace(part)); w != "" {
 			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// parseHostList splits a comma-separated Host allowlist. Ports are meaningless here — the console compares
+// hostnames only — but an operator who pastes "studio.local:8421" should still get a working console, so the
+// port is stripped rather than rejected.
+func parseHostList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		host := strings.TrimSpace(part)
+		if parsed, _, err := net.SplitHostPort(host); err == nil {
+			host = parsed
+		}
+		if host = strings.ToLower(strings.Trim(host, "[]")); host != "" {
+			out = append(out, host)
 		}
 	}
 	return out

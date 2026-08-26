@@ -73,6 +73,8 @@ services:
       EVERYAPI_RESERVE_VRAM_MB_RERANK: ${EVERYAPI_RESERVE_VRAM_MB_RERANK:-0}
       EVERYAPI_CONSOLE_ADDR: 0.0.0.0:8421
       EVERYAPI_CONSOLE_TOKEN: ${EVERYAPI_CONSOLE_TOKEN:?console token required}
+      # Extra Host headers the console answers to. The console rejects unknown names so DNS rebinding cannot drive it; IP literals and localhost always work. Set this to reach a container-published console by a LAN or mDNS name, e.g. studio.local,edge.internal.
+      EVERYAPI_CONSOLE_ALLOWED_HOSTS: ${EVERYAPI_CONSOLE_ALLOWED_HOSTS:-}
     volumes:
       - ./data/agent:/var/lib/everyapi-edge
       - ${EVERYAPI_MODEL_PATH:-${HOME}/.everyapi/edge}:/models
