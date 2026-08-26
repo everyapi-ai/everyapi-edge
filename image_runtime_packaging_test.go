@@ -224,15 +224,13 @@ func TestSpeechImagesBundleTheirPhonemiserAssets(t *testing.T) {
 //
 // It has to be CI and not edge-release.yml, which is where these builds used to live. The release workflow publishes clients/edge/ to the public mirror in a job that runs in parallel with the image job, so a broken Dockerfile is already shipped by the time a release-time build proves it broken; all the failure does downstream is block the GitHub Release, since `release` needs `image`. That is how edge-v0.1.27 through v0.1.31 ended up tagged with nothing published.
 func TestCIBuildsSpeechRuntimeImages(t *testing.T) {
-	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
+	selector := readPackagingFile(t, "../../scripts/ci/select-edge-runtime-matrix.sh")
 	// The trailing newline keeps the CUDA entry from being satisfied by the ROCm one, whose path has it as a prefix.
 	for _, required := range []string{
-		"name: speech-cuda",
-		"file: clients/edge/speech/Dockerfile\n",
-		"name: speech-rocm",
-		"file: clients/edge/speech/Dockerfile.rocm\n",
+		"add_entry speech-cuda clients/edge/speech clients/edge/speech/Dockerfile\n",
+		"add_entry speech-rocm clients/edge/speech clients/edge/speech/Dockerfile.rocm\n",
 	} {
-		if !strings.Contains(workflow, required) {
+		if !strings.Contains(selector, required) {
 			t.Errorf("CI is missing %q", required)
 		}
 	}
@@ -244,36 +242,36 @@ func TestCIBuildsSpeechRuntimeImages(t *testing.T) {
 }
 
 func TestCIBuildsTranscriptionRuntimeImages(t *testing.T) {
-	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
-	for _, required := range []string{"name: transcription-cuda", "file: clients/edge/transcription/Dockerfile\n", "name: transcription-rocm", "file: clients/edge/transcription/Dockerfile.rocm\n"} {
-		if !strings.Contains(workflow, required) {
+	selector := readPackagingFile(t, "../../scripts/ci/select-edge-runtime-matrix.sh")
+	for _, required := range []string{"add_entry transcription-cuda clients/edge/transcription clients/edge/transcription/Dockerfile\n", "add_entry transcription-rocm clients/edge/transcription clients/edge/transcription/Dockerfile.rocm\n"} {
+		if !strings.Contains(selector, required) {
 			t.Errorf("CI is missing %q", required)
 		}
 	}
 }
 
 func TestCIBuildsVideoRuntimeImages(t *testing.T) {
-	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
-	for _, required := range []string{"name: video-cuda", "file: clients/edge/video/Dockerfile\n", "name: video-rocm", "file: clients/edge/video/Dockerfile.rocm\n"} {
-		if !strings.Contains(workflow, required) {
+	selector := readPackagingFile(t, "../../scripts/ci/select-edge-runtime-matrix.sh")
+	for _, required := range []string{"add_entry video-cuda clients/edge/video clients/edge/video/Dockerfile\n", "add_entry video-rocm clients/edge/video clients/edge/video/Dockerfile.rocm\n"} {
+		if !strings.Contains(selector, required) {
 			t.Errorf("CI is missing %q", required)
 		}
 	}
 }
 
 func TestCIBuildsRenderAdapterImage(t *testing.T) {
-	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
-	for _, required := range []string{"name: render", "file: clients/edge/render/Dockerfile\n"} {
-		if !strings.Contains(workflow, required) {
+	selector := readPackagingFile(t, "../../scripts/ci/select-edge-runtime-matrix.sh")
+	for _, required := range []string{"add_entry render clients/edge/render clients/edge/render/Dockerfile\n"} {
+		if !strings.Contains(selector, required) {
 			t.Errorf("CI is missing %q", required)
 		}
 	}
 }
 
 func TestCIBuildsRerankRuntimeImages(t *testing.T) {
-	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
-	for _, required := range []string{"name: rerank-cuda", "file: clients/edge/rerank/Dockerfile\n", "name: rerank-rocm", "file: clients/edge/rerank/Dockerfile.rocm\n"} {
-		if !strings.Contains(workflow, required) {
+	selector := readPackagingFile(t, "../../scripts/ci/select-edge-runtime-matrix.sh")
+	for _, required := range []string{"add_entry rerank-cuda clients/edge/rerank clients/edge/rerank/Dockerfile\n", "add_entry rerank-rocm clients/edge/rerank clients/edge/rerank/Dockerfile.rocm\n"} {
+		if !strings.Contains(selector, required) {
 			t.Errorf("CI is missing %q", required)
 		}
 	}
@@ -382,14 +380,12 @@ func TestEdgeReleaseBuildsWindowsAgentBinary(t *testing.T) {
 
 // Same reasoning as TestCIBuildsSpeechRuntimeImages: `build: ./diffusers` in the compose bundles means suppliers compile this one too, so the build that catches a broken Dockerfile has to run before the merge rather than during the release.
 func TestCIBuildsDiffusersRuntimeImages(t *testing.T) {
-	workflow := readPackagingFile(t, "../../.github/workflows/ci.yml")
+	selector := readPackagingFile(t, "../../scripts/ci/select-edge-runtime-matrix.sh")
 	for _, required := range []string{
-		"name: diffusers-cuda",
-		"file: clients/edge/diffusers/Dockerfile\n",
-		"name: diffusers-rocm",
-		"file: clients/edge/diffusers/Dockerfile.rocm\n",
+		"add_entry diffusers-cuda clients/edge/diffusers clients/edge/diffusers/Dockerfile\n",
+		"add_entry diffusers-rocm clients/edge/diffusers clients/edge/diffusers/Dockerfile.rocm\n",
 	} {
-		if !strings.Contains(workflow, required) {
+		if !strings.Contains(selector, required) {
 			t.Errorf("CI is missing %q", required)
 		}
 	}
