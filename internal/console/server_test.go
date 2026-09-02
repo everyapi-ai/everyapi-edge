@@ -990,9 +990,9 @@ func TestHandlerPreflightsStorageMigrationTarget(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(source, "model"), []byte("model"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Control
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Browser
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"destination":"`+target+`"}`)))
+	h.ServeHTTP(response, consoleRequest(http.MethodPost, "/api/storage/plan", `{"destination":"`+target+`"}`))
 	if response.Code != http.StatusOK {
 		t.Fatalf("migration plan status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1009,10 +1009,10 @@ func TestHandlerPreflightsAnExplicitStorageMigrationSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: filepath.Join(t.TempDir(), "empty-default")}, NewStore(16)).Control
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: filepath.Join(t.TempDir(), "empty-default")}, NewStore(16)).Browser
 	response := httptest.NewRecorder()
 	body := `{"source":"` + source + `","destination":"` + target + `"}`
-	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(body)))
+	h.ServeHTTP(response, consoleRequest(http.MethodPost, "/api/storage/plan", body))
 	if response.Code != http.StatusOK {
 		t.Fatalf("migration plan status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1030,9 +1030,9 @@ func TestHandlerRejectsStorageMigrationDestinationInsideSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Control
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Browser
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"destination":"`+destination+`"}`)))
+	h.ServeHTTP(response, consoleRequest(http.MethodPost, "/api/storage/plan", `{"destination":"`+destination+`"}`))
 	if response.Code != http.StatusOK {
 		t.Fatalf("migration plan status = %d, body=%s", response.Code, response.Body.String())
 	}
@@ -1050,9 +1050,9 @@ func TestHandlerCopiesModelsToPreparedMigrationTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Control
+	h := NewHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16)).Browser
 	start := httptest.NewRecorder()
-	h.ServeHTTP(start, consoleHTTPRequest(http.MethodPost, "/api/storage/migrate", strings.NewReader(`{"destination":"`+target+`"}`)))
+	h.ServeHTTP(start, consoleRequest(http.MethodPost, "/api/storage/migrate", `{"destination":"`+target+`"}`))
 	if start.Code != http.StatusAccepted {
 		t.Fatalf("migration start status = %d, body=%s", start.Code, start.Body.String())
 	}
@@ -1066,7 +1066,7 @@ func TestHandlerCopiesModelsToPreparedMigrationTarget(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		response := httptest.NewRecorder()
-		h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/storage/migrate", nil))
+		h.ServeHTTP(response, consoleRequest(http.MethodGet, "/api/storage/migrate", ""))
 		if response.Code != http.StatusOK {
 			t.Fatalf("migration status = %d, body=%s", response.Code, response.Body.String())
 		}
@@ -1086,6 +1086,78 @@ func TestHandlerCopiesModelsToPreparedMigrationTarget(t *testing.T) {
 	}
 	if original, err := os.ReadFile(filepath.Join(source, "blobs", "sha256-model")); err != nil || string(original) != "model-data" {
 		t.Fatalf("source model = %q, err=%v", original, err)
+	}
+}
+
+// TestGatewayControlStorageMigrationRefusesForeignPaths pins the confinement of the two allowlisted storage
+// endpoints. The gateway reaches them on a supplier's machine, so a caller that names its own source or
+// destination could stat, size and recursively copy arbitrary trees on hardware it does not own. Only the
+// configured model directory, and a destination the person at the machine chose in the native picker, are
+// legitimate over that link.
+func TestGatewayControlStorageMigrationRefusesForeignPaths(t *testing.T) {
+	source, target, foreign := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(foreign, "id_ed25519"), []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	control := newHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16), func() (string, error) {
+		return target, nil
+	}).Control
+
+	probe := httptest.NewRecorder()
+	control.ServeHTTP(probe, consoleHTTPRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"source":"`+foreign+`","destination":"`+target+`"}`)))
+	if probe.Code != http.StatusBadRequest {
+		t.Fatalf("foreign source plan status = %d, body=%s", probe.Code, probe.Body.String())
+	}
+	if strings.Contains(probe.Body.String(), "used_bytes") || strings.Contains(probe.Body.String(), foreign) {
+		t.Fatalf("foreign source plan disclosed host filesystem state: %s", probe.Body.String())
+	}
+
+	unpicked := httptest.NewRecorder()
+	control.ServeHTTP(unpicked, consoleHTTPRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"destination":"`+foreign+`"}`)))
+	if unpicked.Code != http.StatusBadRequest {
+		t.Fatalf("unpicked destination plan status = %d, body=%s", unpicked.Code, unpicked.Body.String())
+	}
+	if strings.Contains(unpicked.Body.String(), "used_bytes") {
+		t.Fatalf("unpicked destination plan disclosed host filesystem state: %s", unpicked.Body.String())
+	}
+
+	copyAttempt := httptest.NewRecorder()
+	control.ServeHTTP(copyAttempt, consoleHTTPRequest(http.MethodPost, "/api/storage/migrate", strings.NewReader(`{"source":"`+foreign+`","destination":"`+target+`"}`)))
+	if copyAttempt.Code != http.StatusBadRequest {
+		t.Fatalf("foreign source migrate status = %d, body=%s", copyAttempt.Code, copyAttempt.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(target, "id_ed25519")); !os.IsNotExist(err) {
+		t.Fatalf("foreign tree was copied into the destination: %v", err)
+	}
+}
+
+// TestGatewayControlStorageMigrationAcceptsOperatorPickedDestination keeps the shipped remote flow working: the
+// dashboard asks the node's own native picker for a destination, then plans a migration out of the configured
+// model directory.
+func TestGatewayControlStorageMigrationAcceptsOperatorPickedDestination(t *testing.T) {
+	source, target := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "model"), []byte("model"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	control := newHandlers(Config{OllamaURL: "http://ollama:11434", StoragePath: source}, NewStore(16), func() (string, error) {
+		return target, nil
+	}).Control
+
+	pick := httptest.NewRecorder()
+	control.ServeHTTP(pick, consoleHTTPRequest(http.MethodPost, "/api/storage/pick", nil))
+	if pick.Code != http.StatusOK {
+		t.Fatalf("storage picker status = %d, body=%s", pick.Code, pick.Body.String())
+	}
+
+	plan := httptest.NewRecorder()
+	control.ServeHTTP(plan, consoleHTTPRequest(http.MethodPost, "/api/storage/plan", strings.NewReader(`{"source":"`+source+`","destination":"`+target+`"}`)))
+	if plan.Code != http.StatusOK {
+		t.Fatalf("picked destination plan status = %d, body=%s", plan.Code, plan.Body.String())
+	}
+	for _, want := range []string{`"ready":true`, `"path":"` + target + `"`, `"used_bytes":5`, `"blockers":[]`} {
+		if !strings.Contains(plan.Body.String(), want) {
+			t.Fatalf("picked destination plan missing %s: %s", want, plan.Body.String())
+		}
 	}
 }
 

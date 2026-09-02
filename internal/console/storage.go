@@ -1,6 +1,7 @@
 package console
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,23 @@ import (
 	"strings"
 	"time"
 )
+
+type consoleContextKey int
+
+// gatewayControlContextKey marks a request that arrived over the agent's outbound gateway session instead of the operator's own browser.
+const gatewayControlContextKey consoleContextKey = iota
+
+// gatewayControlSurface stamps every request served on the internal control mux. The gateway is a remote party on someone else's hardware: the storage endpoints must only act on directories the machine's own operator chose, so they need to tell the two callers apart.
+func gatewayControlSurface(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), gatewayControlContextKey, true)))
+	})
+}
+
+func fromGatewayControl(r *http.Request) bool {
+	marked, _ := r.Context().Value(gatewayControlContextKey).(bool)
+	return marked
+}
 
 func (h *handler) storagePicker(w http.ResponseWriter, _ *http.Request) {
 	path, err := h.pickStorage()
@@ -23,13 +41,16 @@ func (h *handler) storagePicker(w http.ResponseWriter, _ *http.Request) {
 		writePrivateError(w, http.StatusBadRequest, "Storage directory selection failed.", err)
 		return
 	}
+	h.mu.Lock()
+	h.pickedStorage = filepath.Clean(path)
+	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, struct {
 		Path string `json:"path"`
 	}{Path: path})
 }
 
 func (h *handler) storageMigrationPlan(w http.ResponseWriter, r *http.Request) {
-	source, destination, err := storageMigrationPaths(r, h.cfg.StoragePath)
+	source, destination, err := h.storageMigrationPaths(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -37,7 +58,8 @@ func (h *handler) storageMigrationPlan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.migrationPlan(source, destination))
 }
 
-func storageMigrationPaths(r *http.Request, defaultSource string) (string, string, error) {
+// storageMigrationPaths resolves the directories a migration plan or copy will touch. The operator browsing the console locally may name any directory on their own machine, but a request arriving over the gateway is confined to directories the machine's operator picked: the configured model directory as the source, and a destination that came back from this agent's own native directory chooser. Without that confinement the allowlisted control endpoints would let the platform stat, size and recursively copy arbitrary trees on a supplier's host.
+func (h *handler) storageMigrationPaths(r *http.Request) (string, string, error) {
 	var input struct {
 		Source      string `json:"source"`
 		Destination string `json:"destination"`
@@ -47,7 +69,7 @@ func storageMigrationPaths(r *http.Request, defaultSource string) (string, strin
 	}
 	source := strings.TrimSpace(input.Source)
 	if source == "" {
-		source = defaultSource
+		source = h.cfg.StoragePath
 	}
 	if !filepath.IsAbs(source) {
 		return "", "", errors.New("source must be an absolute directory")
@@ -56,7 +78,23 @@ func storageMigrationPaths(r *http.Request, defaultSource string) (string, strin
 	if !filepath.IsAbs(destination) {
 		return "", "", errors.New("destination must be an absolute directory")
 	}
-	return filepath.Clean(source), filepath.Clean(destination), nil
+	source, destination = filepath.Clean(source), filepath.Clean(destination)
+	if fromGatewayControl(r) {
+		if source != filepath.Clean(h.cfg.StoragePath) {
+			return "", "", errors.New("remote migration can only copy the configured model directory")
+		}
+		if !h.operatorPickedStorage(destination) {
+			return "", "", errors.New("choose the destination directory on the node before starting a remote migration")
+		}
+	}
+	return source, destination, nil
+}
+
+// operatorPickedStorage reports whether the directory came back from this agent's native chooser, which only a person at the machine can answer.
+func (h *handler) operatorPickedStorage(path string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.pickedStorage != "" && h.pickedStorage == path
 }
 
 func (h *handler) migrationPlan(sourcePath, destinationPath string) MigrationPlan {
@@ -110,7 +148,7 @@ func isDescendantDirectory(parent, candidate string) bool {
 }
 
 func (h *handler) startStorageMigration(w http.ResponseWriter, r *http.Request) {
-	source, destination, err := storageMigrationPaths(r, h.cfg.StoragePath)
+	source, destination, err := h.storageMigrationPaths(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

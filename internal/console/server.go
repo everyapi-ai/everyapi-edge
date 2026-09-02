@@ -235,6 +235,7 @@ type handler struct {
 	migration            *migrationJob
 	storage              Storage
 	storageAt            time.Time
+	pickedStorage        string
 	pickStorage          func() (string, error)
 	storageAvailable     func(string) (int64, error)
 	update               UpdateStatus
@@ -373,7 +374,7 @@ func newHandlers(cfg Config, store *Store, picker func() (string, error)) Handle
 	}))))
 	browser.Handle("/api/", sameOriginMutations(authenticator.require(http.HandlerFunc(h.api))))
 	control := http.NewServeMux()
-	control.HandleFunc("/api/", h.api)
+	control.Handle("/api/", gatewayControlSurface(http.HandlerFunc(h.api)))
 	return Handlers{
 		// The Host guard wraps everything the browser can reach, including GET and the SPA itself — DNS
 		// rebinding defeats the same-origin check completely, and reads were never covered by it anyway.

@@ -710,7 +710,7 @@ func (c *Client) startHandler(ctx context.Context, id string, kind protocol.Runt
 			return ctx.Err()
 		default:
 		}
-		if kind != "" && c.isDraining() {
+		if !c.admitInflight(kind) {
 			<-pool
 			c.trySendError(id, "node_draining", "node is draining and is not accepting new inference requests")
 			return nil
@@ -731,13 +731,13 @@ func (c *Client) startHandler(ctx context.Context, id string, kind protocol.Runt
 		c.requestMu.Unlock()
 		requestCancel()
 		<-pool
+		c.finishInflightRequest()
 		c.trySendError(id, "malformed_request", "duplicate active request id")
 		return nil
 	}
 	c.activeRequests[id] = active
 	c.requestMu.Unlock()
 	c.wg.Add(1)
-	c.inflight.Add(1)
 	go func() {
 		defer c.wg.Done()
 		defer c.finishInflightRequest()
@@ -764,6 +764,17 @@ func (c *Client) reserveVRAMMB(kind protocol.RuntimeKind) int64 {
 	default:
 		return c.cfg.ResourcePolicy.Text.ReserveVRAMMB
 	}
+}
+
+// admitInflight performs the final drain gate and the in-flight increment under a single hold of drainMu, so an admitted request is never invisible to drainStateLocked. Splitting the two lets a BeginDrain + WaitForDrained pair that runs off the reader goroutine — the console's SetDrain/Save handler and the auto-updater's maintenance hook, which follows the wait with syscall.Exec — observe inflight == 0 and report DRAINED while a request admitted microseconds earlier is about to run. Control requests (empty kind) bypass the drain gate but still count as in-flight work, matching the drain contract that only inference admission stops.
+func (c *Client) admitInflight(kind protocol.RuntimeKind) bool {
+	c.drainMu.Lock()
+	defer c.drainMu.Unlock()
+	if kind != "" && c.draining {
+		return false
+	}
+	c.inflight.Add(1)
+	return true
 }
 
 func (c *Client) finishInflightRequest() {

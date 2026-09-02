@@ -1356,6 +1356,63 @@ func TestDrainRejectsNewRequestsAndWaitsForInflightWork(t *testing.T) {
 	}
 }
 
+// TestDrainDoesNotReportDrainedWhileAdmittingRequest pins the admission/counter atomicity that BeginDrain + WaitForDrained callers running off the reader goroutine depend on (the console drain handler, and the auto-updater hook that follows the wait with syscall.Exec). The test freezes a dispatch inside the window between the drain gate and the point where the handler becomes visible by holding requestMu, then drains: the node must report DRAINING, and WaitForDrained must block, because a request has already been admitted. With the gate and the counter in separate critical sections the frozen request is invisible and the node reports DRAINED with live work about to start.
+func TestDrainDoesNotReportDrainedWhileAdmittingRequest(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	c := newCappedClient(t, 1, started, release)
+	pool := c.pools[protocol.RuntimeText]
+
+	c.requestMu.Lock()
+	dispatched := make(chan error, 1)
+	go func() {
+		dispatched <- c.dispatchRequest(context.Background(), "admitted", protocol.RequestBody{Path: "/v1/chat/completions"})
+	}()
+	deadline := time.Now().Add(shortBudget)
+	for len(pool) == 0 {
+		if time.Now().After(deadline) {
+			c.requestMu.Unlock()
+			t.Fatal("dispatch never acquired an admission slot")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The slot is held, so the dispatch has passed the drain gate and is now parked on requestMu. Give it a moment to actually park before drawing conclusions from the drain state.
+	time.Sleep(50 * time.Millisecond)
+
+	c.BeginDrain()
+	if got := c.DrainState(); got != protocol.DrainStateDraining {
+		t.Fatalf("drain state = %q, want draining: an admitted request was reported as drained", got)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	drained := make(chan error, 1)
+	go func() { drained <- c.WaitForDrained(waitCtx) }()
+	select {
+	case err := <-drained:
+		c.requestMu.Unlock()
+		t.Fatalf("WaitForDrained returned while a request was being admitted: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	c.requestMu.Unlock()
+	if err := <-dispatched; err != nil {
+		t.Fatalf("dispatchRequest: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(shortBudget):
+		t.Fatal("admitted request did not start")
+	}
+	close(release)
+	if err := <-drained; err != nil {
+		t.Fatalf("WaitForDrained: %v", err)
+	}
+	if got := c.DrainState(); got != protocol.DrainStateDrained {
+		t.Fatalf("drain state = %q, want drained", got)
+	}
+	c.wg.Wait()
+}
+
 func TestHeartbeatReportsDrainState(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
