@@ -239,6 +239,14 @@ type handler struct {
 	storageAvailable     func(string) (int64, error)
 	update               UpdateStatus
 	updateStarting       bool
+	modelCapabilityMu    sync.Mutex
+	modelCapabilityCache map[string]cachedModelCapability
+}
+
+// cachedModelCapability remembers what one installed model can serve. The answer comes from the model's own contents, so it only changes when the model does — and `/api/tags` reports that as a new version. Re-asking on every poll cost one `POST /api/show` per installed model, serialized, every fifteen seconds for as long as a console tab stayed open.
+type cachedModelCapability struct {
+	version      string
+	capabilities []string
 }
 
 func (h *handler) textClient() *edgeruntime.TextClient {

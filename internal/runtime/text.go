@@ -25,7 +25,14 @@ func (c *TextClient) Do(ctx context.Context, method, path string, headers http.H
 	return c.target.Do(ctx, method, path, headers, body)
 }
 
-func (c *TextClient) Models(ctx context.Context) ([]string, error) {
+// InstalledModel names one model the local text runtime has on disk together with the marker that changes when the same tag is re-pulled. Callers that cache anything derived from a model's contents key on both: the name alone cannot tell `qwen3:8b` from the `qwen3:8b` that replaced it.
+type InstalledModel struct {
+	Name    string
+	Version string
+}
+
+// InstalledModels reads the native tag list. Version carries Ollama's `modified_at` and is empty when the runtime does not report one, which callers must read as "cannot tell whether this changed".
+func (c *TextClient) InstalledModels(ctx context.Context) ([]InstalledModel, error) {
 	response, err := c.target.Do(ctx, http.MethodGet, "/api/tags", nil, nil)
 	if err != nil {
 		return nil, err
@@ -37,13 +44,14 @@ func (c *TextClient) Models(ctx context.Context) ([]string, error) {
 
 	var payload struct {
 		Models []struct {
-			Name string `json:"name"`
+			Name       string `json:"name"`
+			ModifiedAt string `json:"modified_at"`
 		} `json:"models"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxDiscoveryResponseBytes)).Decode(&payload); err != nil {
 		return nil, fmt.Errorf("decode local text runtime models: %w", err)
 	}
-	models := make([]string, 0, len(payload.Models))
+	models := make([]InstalledModel, 0, len(payload.Models))
 	seen := make(map[string]struct{}, len(payload.Models))
 	for _, model := range payload.Models {
 		name := strings.TrimSpace(model.Name)
@@ -54,13 +62,24 @@ func (c *TextClient) Models(ctx context.Context) ([]string, error) {
 			continue
 		}
 		seen[name] = struct{}{}
-		models = append(models, name)
+		models = append(models, InstalledModel{Name: name, Version: strings.TrimSpace(model.ModifiedAt)})
 	}
-	sort.Strings(models)
+	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
 	return models, nil
 }
 
-// SupportsResponses verifies the Ollama runtime version before the agent advertises /v1/responses. Ollama added the stateless endpoint in 0.13.3; model completion capability alone is insufficient on older native macOS installations.
+func (c *TextClient) Models(ctx context.Context) ([]string, error) {
+	installed, err := c.InstalledModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, len(installed))
+	for _, model := range installed {
+		models = append(models, model.Name)
+	}
+	return models, nil
+}
+
 func (c *TextClient) SupportsResponses(ctx context.Context) (bool, error) {
 	response, err := c.target.Do(ctx, http.MethodGet, "/api/version", nil, nil)
 	if err != nil {

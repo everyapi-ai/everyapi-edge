@@ -1,6 +1,7 @@
 package console
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strings"
@@ -93,14 +94,16 @@ func bestCapabilityPerID(capabilities []protocol.Capability) []protocol.Capabili
 }
 
 func (h *handler) textCapabilities(r *http.Request) []protocol.Capability {
-	models, err := h.textClient().Models(r.Context())
+	models, err := h.textClient().InstalledModels(r.Context())
 	if err != nil {
 		return []protocol.Capability{unavailableCapability(protocol.CapabilityTextChat, protocol.RuntimeText, "text runtime is unavailable"), unavailableCapability(protocol.CapabilityTextCompletion, protocol.RuntimeText, "text runtime is unavailable"), unavailableCapability(protocol.CapabilityTextResponses, protocol.RuntimeText, "text runtime is unavailable"), unavailableCapability(protocol.CapabilityTextEmbedding, protocol.RuntimeText, "text runtime is unavailable"), unavailableCapability(protocol.CapabilityTextVision, protocol.RuntimeText, "text runtime is unavailable")}
 	}
 	modelsByID := map[protocol.CapabilityID][]string{}
 	responsesSupported, _ := h.textClient().SupportsResponses(r.Context())
-	for _, model := range models {
-		native, err := h.textClient().ModelCapabilities(r.Context(), model)
+	h.forgetUninstalledModelCapabilities(models)
+	for _, installed := range models {
+		model := installed.Name
+		native, err := h.cachedModelCapabilities(r.Context(), installed)
 		if err != nil {
 			continue
 		}
@@ -189,4 +192,48 @@ func normalizedValues(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// cachedModelCapabilities answers from the last reply for this exact model version. A runtime that reports no version is never cached: without a marker there is no way to tell a stale answer from a current one, so it keeps today's behaviour of asking every time.
+func (h *handler) cachedModelCapabilities(ctx context.Context, installed edgeruntime.InstalledModel) ([]string, error) {
+	if installed.Version != "" {
+		h.modelCapabilityMu.Lock()
+		entry, ok := h.modelCapabilityCache[installed.Name]
+		h.modelCapabilityMu.Unlock()
+		if ok && entry.version == installed.Version {
+			return entry.capabilities, nil
+		}
+	}
+	native, err := h.textClient().ModelCapabilities(ctx, installed.Name)
+	if err != nil {
+		return nil, err
+	}
+	if installed.Version == "" {
+		return native, nil
+	}
+	h.modelCapabilityMu.Lock()
+	if h.modelCapabilityCache == nil {
+		h.modelCapabilityCache = map[string]cachedModelCapability{}
+	}
+	h.modelCapabilityCache[installed.Name] = cachedModelCapability{version: installed.Version, capabilities: native}
+	h.modelCapabilityMu.Unlock()
+	return native, nil
+}
+
+// forgetUninstalledModelCapabilities keeps the cache the size of the model library rather than of everything the node has ever had installed.
+func (h *handler) forgetUninstalledModelCapabilities(models []edgeruntime.InstalledModel) {
+	h.modelCapabilityMu.Lock()
+	defer h.modelCapabilityMu.Unlock()
+	if len(h.modelCapabilityCache) == 0 {
+		return
+	}
+	installed := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		installed[model.Name] = struct{}{}
+	}
+	for name := range h.modelCapabilityCache {
+		if _, ok := installed[name]; !ok {
+			delete(h.modelCapabilityCache, name)
+		}
+	}
 }
