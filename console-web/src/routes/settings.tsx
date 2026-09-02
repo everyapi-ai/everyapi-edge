@@ -11,7 +11,14 @@ import {
   useUpdateSettings,
 } from '@/api/queries'
 import type { ResourcePolicy } from '@/api/schemas'
-import { Button, Input, PageHeader, Panel, QueryState } from '@/components/primitives'
+import {
+  Button,
+  Input,
+  MutationStatus,
+  PageHeader,
+  Panel,
+  QueryState,
+} from '@/components/primitives'
 import { useTranslation, type Translate } from '@/i18n/useTranslation'
 
 import { rootRoute } from './root'
@@ -57,12 +64,15 @@ const SettingsPage = () => {
     setMaintenanceEnd(updates.data.maintenance_end)
   }, [updates.data])
 
+  const busy = save.isPending || drain.isPending
+
   const updatePolicy = (
     runtime: RuntimeKey,
     field: 'max_concurrent' | 'reserve_vram_mb',
     value: string,
   ) => {
     const parsed = Number.parseInt(value, 10)
+    if (!save.isPending) save.reset()
     setPolicy((current) =>
       current
         ? {
@@ -83,6 +93,7 @@ const SettingsPage = () => {
         max={isConcurrency ? 64 : undefined}
         step={isConcurrency ? undefined : 256}
         required
+        disabled={busy}
         value={policy?.[runtime][field] ?? 0}
         onChange={(event) => updatePolicy(runtime, field, event.target.value)}
         aria-label={`${runtimeLabel(t, runtime)} ${fieldLabel}`}
@@ -91,7 +102,6 @@ const SettingsPage = () => {
   }
 
   const isDrained = settings.data?.drain_state !== 'serving'
-  const busy = save.isPending || drain.isPending
 
   return (
     <div className='flex flex-col gap-5'>
@@ -99,6 +109,7 @@ const SettingsPage = () => {
       <QueryState
         isPending={settings.isPending}
         isError={settings.isError}
+        error={settings.error}
         onRetry={() => void settings.refetch()}
       >
         <div className='grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.6fr)]'>
@@ -166,11 +177,13 @@ const SettingsPage = () => {
                   </Button>
                   <span className='text-xs text-muted'>{t('settings.saveHint')}</span>
                 </div>
-                {save.isError ? (
-                  <p className='mt-3 text-sm text-danger' role='alert'>
-                    {save.error.message}
-                  </p>
-                ) : null}
+                <MutationStatus
+                  className='mt-3'
+                  isError={save.isError}
+                  error={save.error}
+                  isSuccess={save.isSuccess}
+                  successMessage={t('settings.saved')}
+                />
               </form>
             ) : null}
           </Panel>
@@ -194,11 +207,13 @@ const SettingsPage = () => {
             >
               {isDrained ? t('settings.resume') : t('settings.drain')}
             </Button>
-            {drain.isError ? (
-              <p className='mt-3 text-sm text-danger' role='alert'>
-                {drain.error.message}
-              </p>
-            ) : null}
+            <MutationStatus
+              className='mt-3'
+              isError={drain.isError}
+              error={drain.error}
+              isSuccess={drain.isSuccess}
+              successMessage={t('settings.drainApplied')}
+            />
           </Panel>
         </div>
       </QueryState>
@@ -206,6 +221,7 @@ const SettingsPage = () => {
       <QueryState
         isPending={updates.isPending}
         isError={updates.isError}
+        error={updates.error}
         onRetry={() => void updates.refetch()}
       >
         <Panel title={t('settings.updateTitle')}>
@@ -225,8 +241,11 @@ const SettingsPage = () => {
                 <input
                   type='checkbox'
                   checked={autoUpdate}
-                  onChange={(event) => setAutoUpdate(event.target.checked)}
-                  className='mt-1 h-4 w-4 accent-brand'
+                  onChange={(event) => {
+                    if (!saveUpdates.isPending) saveUpdates.reset()
+                    setAutoUpdate(event.target.checked)
+                  }}
+                  className='mt-1 h-4 w-4 accent-accent'
                 />
                 <span>
                   <span className='block font-medium'>{t('settings.autoUpdate')}</span>
@@ -243,7 +262,10 @@ const SettingsPage = () => {
                     type='time'
                     required
                     value={maintenanceStart}
-                    onChange={(event) => setMaintenanceStart(event.target.value)}
+                    onChange={(event) => {
+                      if (!saveUpdates.isPending) saveUpdates.reset()
+                      setMaintenanceStart(event.target.value)
+                    }}
                   />
                 </label>
                 <label className='text-sm text-muted'>
@@ -253,7 +275,10 @@ const SettingsPage = () => {
                     type='time'
                     required
                     value={maintenanceEnd}
-                    onChange={(event) => setMaintenanceEnd(event.target.value)}
+                    onChange={(event) => {
+                      if (!saveUpdates.isPending) saveUpdates.reset()
+                      setMaintenanceEnd(event.target.value)
+                    }}
                   />
                 </label>
               </div>
@@ -261,11 +286,13 @@ const SettingsPage = () => {
               <Button className='mt-4' type='submit' disabled={saveUpdates.isPending}>
                 {saveUpdates.isPending ? t('settings.updateSaving') : t('settings.updateSave')}
               </Button>
-              {saveUpdates.isError ? (
-                <p className='mt-3 text-sm text-danger' role='alert'>
-                  {saveUpdates.error.message}
-                </p>
-              ) : null}
+              <MutationStatus
+                className='mt-3'
+                isError={saveUpdates.isError}
+                error={saveUpdates.error}
+                isSuccess={saveUpdates.isSuccess}
+                successMessage={t('settings.updateSaved')}
+              />
             </div>
             <div>
               <dl className='grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm'>
@@ -332,19 +359,19 @@ const SettingsPage = () => {
             : t('settings.pairingRotate')}
         </Button>
         {rotatePairingToken.data ? (
-          <div className='mt-4 rounded-md border border-line bg-panel-2 p-3'>
+          <div className='mt-4 rounded-md border border-line bg-surface-2 p-3'>
             <p className='text-xs text-muted'>{t('settings.pairingNewToken')}</p>
             <code className='mt-2 block break-all select-all font-mono text-sm text-ink'>
               {rotatePairingToken.data.token}
             </code>
-            <p className='mt-2 text-xs text-warning'>{t('settings.pairingSignedOut')}</p>
+            <p className='mt-2 text-xs text-warn'>{t('settings.pairingSignedOut')}</p>
           </div>
         ) : null}
-        {rotatePairingToken.isError ? (
-          <p className='mt-3 text-sm text-danger' role='alert'>
-            {rotatePairingToken.error.message}
-          </p>
-        ) : null}
+        <MutationStatus
+          className='mt-3'
+          isError={rotatePairingToken.isError}
+          error={rotatePairingToken.error}
+        />
       </Panel>
     </div>
   )

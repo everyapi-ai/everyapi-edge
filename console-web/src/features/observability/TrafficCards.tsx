@@ -46,6 +46,12 @@ export const TrafficCards = ({ requests }: { requests: EdgeRequest[] }) => {
               <dt className='text-faint'>{t('traffic.columnDuration')}</dt>
               <dd className='mt-1 text-ink-2'>{formatCount(request.duration_ms, locale)}ms</dd>
             </div>
+            <div>
+              <dt className='text-faint'>{t('traffic.columnTTFT')}</dt>
+              <dd className='mt-1 text-ink-2'>
+                {request.ttft_ms ? `${formatCount(request.ttft_ms, locale)}ms` : '—'}
+              </dd>
+            </div>
           </dl>
           {request.error ? (
             <p className='mt-3 break-words border-t border-line pt-3 text-xs text-danger'>

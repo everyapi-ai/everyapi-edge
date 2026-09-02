@@ -596,7 +596,7 @@ def test_chinese_navigation_uses_four_character_labels() -> None:
         labels = page.locator("aside nav a > span.flex-1").all_inner_texts()
         browser.close()
 
-    assert labels == ["节点总览", "本地推理", "模型管理", "本地对话", "图像编辑", "存储迁移", "请求流量", "运行日志"]
+    assert labels == ["节点总览", "本地推理", "模型管理", "本地对话", "图像编辑", "存储迁移", "机器设置", "请求流量", "运行日志"]
 
 
 def test_storage_page_offers_a_native_folder_picker() -> None:

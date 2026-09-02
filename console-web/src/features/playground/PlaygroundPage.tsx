@@ -349,6 +349,7 @@ export const ChatPlayground = ({ initialModel = '' }: { initialModel?: string })
       <QueryState
         isPending={models.isPending}
         isError={models.isError}
+        error={models.error}
         onRetry={() => void models.refetch()}
       >
         {availableModels.length === 0 ? (

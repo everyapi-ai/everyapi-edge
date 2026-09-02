@@ -1,8 +1,30 @@
 import { forwardRef, type InputHTMLAttributes, type ReactNode } from 'react'
 
-import { Loader2, TriangleAlert } from 'lucide-react'
+import { CircleCheck, Loader2, TriangleAlert } from 'lucide-react'
 
+import { describeError, type DescribedError } from '@/api/errors'
 import { useTranslation } from '@/i18n/useTranslation'
+
+/** One rendering of a described failure, shared by the query and mutation surfaces: the same error must not read differently depending on which of the two reported it. */
+const DescribedErrorText = ({
+  described,
+  className,
+}: {
+  described: DescribedError
+  className: string
+}) => (
+  <span className={className}>
+    <TriangleAlert className='mt-0.5 size-4 shrink-0' aria-hidden='true' />
+    <span className='min-w-0'>
+      {described.headline}
+      {described.detail ? (
+        <span className='mt-1 block break-words font-mono text-xs text-ink-2'>
+          {described.detail}
+        </span>
+      ) : null}
+    </span>
+  </span>
+)
 
 export const Panel = ({
   title,
@@ -103,6 +125,7 @@ Input.displayName = 'Input'
 export const QueryState = ({
   isPending,
   isError,
+  error,
   isEmpty,
   emptyMessage,
   onRetry,
@@ -110,6 +133,7 @@ export const QueryState = ({
 }: {
   isPending: boolean
   isError: boolean
+  error?: unknown
   isEmpty?: boolean
   emptyMessage?: string
   onRetry?: () => void
@@ -133,13 +157,13 @@ export const QueryState = ({
   if (isError) {
     return (
       <div
-        className='flex flex-wrap items-center gap-3 rounded-lg border border-danger/25 bg-danger/8 px-3.5 py-3 text-sm'
+        className='flex flex-wrap items-start gap-3 rounded-lg border border-danger/25 bg-danger/8 px-3.5 py-3 text-sm'
         role='alert'
       >
-        <span className='flex items-center gap-2 text-danger'>
-          <TriangleAlert className='size-4' aria-hidden='true' />
-          {t('state.error')}
-        </span>
+        <DescribedErrorText
+          className='flex min-w-0 flex-1 items-start gap-2 text-danger'
+          described={describeError(error, t)}
+        />
         {onRetry ? (
           <Button variant='ghost' type='button' onClick={onRetry}>
             {t('state.retry')}
@@ -152,4 +176,44 @@ export const QueryState = ({
   if (isEmpty) return <p className='py-8 text-sm text-muted'>{emptyMessage}</p>
 
   return <>{children}</>
+}
+
+/** Mutations changed machine state, so silence is the worst possible answer: an
+ *  operator who clicks Unload and sees nothing cannot tell a rejected request
+ *  from a slow one. Errors reuse the same localized description as QueryState. */
+export const MutationStatus = ({
+  isError,
+  error,
+  isSuccess,
+  successMessage,
+  className = '',
+}: {
+  isError: boolean
+  error?: unknown
+  isSuccess?: boolean
+  successMessage?: string
+  className?: string
+}) => {
+  const { t } = useTranslation()
+  const described = isError ? describeError(error, t) : null
+
+  // The live region is mounted even while idle: a polite region that appears together with its first message is announced unreliably, and an empty block takes no vertical space.
+  return (
+    <div
+      aria-live='polite'
+      className={described || (isSuccess && successMessage) ? className : undefined}
+    >
+      {described ? (
+        <p className='text-sm text-danger' role='alert'>
+          <DescribedErrorText className='flex items-start gap-2' described={described} />
+        </p>
+      ) : null}
+      {!described && isSuccess && successMessage ? (
+        <p className='flex items-center gap-2 text-sm text-good'>
+          <CircleCheck className='size-4 shrink-0' aria-hidden='true' />
+          {successMessage}
+        </p>
+      ) : null}
+    </div>
+  )
 }

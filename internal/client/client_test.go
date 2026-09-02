@@ -826,6 +826,102 @@ func TestRuntimeMonitorDetectsOutOfBandTextModelChange(t *testing.T) {
 	}
 }
 
+func TestRuntimeMonitorKeepsSpeechAndTranscriptionNodeStable(t *testing.T) {
+	speech := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ready","version":"speech-1.0.0","vram_bytes":0,"capabilities":[{"id":"audio.tts","status":"ready","models":["kokoro"],"paths":["/v1/audio/speech"],"limits":{"max_input_characters":4096,"formats":["mp3","wav"]}}]}`)
+	}))
+	defer speech.Close()
+	transcription := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ready","version":"whisper-2.0.0","vram_bytes":0,"capabilities":[{"id":"audio.transcription","status":"ready","models":["whisper-large"],"paths":["/v1/audio/transcriptions"],"limits":{"max_input_bytes":26214400,"formats":["mp3","wav"]}},{"id":"audio.translation","status":"ready","models":["whisper-large"],"paths":["/v1/audio/translations"],"limits":{"max_input_bytes":26214400}}]}`)
+	}))
+	defer transcription.Close()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := make(chan struct{}, 1)
+	c, err := New(Config{
+		GatewayURL: "https://localhost", NodeID: 1, Identity: identity.Decoded{Public: pub, Private: priv}, HTTPClient: speech.Client(), SpeechURL: speech.URL, TranscriptionURL: transcription.URL, MetadataChanged: changes,
+		Meta: protocol.NodeMeta{Capabilities: []protocol.Capability{
+			{ID: protocol.CapabilityAudioTTS, Runtime: protocol.RuntimeSpeech, Status: protocol.CapabilityReady, Models: []string{"kokoro"}, Paths: []string{"/v1/audio/speech"}, Version: "speech-1.0.0", Limits: protocol.CapabilityLimits{MaxInputCharacters: 4096, Formats: []string{"mp3", "wav"}}},
+			{ID: protocol.CapabilityAudioTranscription, Runtime: protocol.RuntimeSpeech, Status: protocol.CapabilityReady, Models: []string{"whisper-large"}, Paths: []string{"/v1/audio/transcriptions"}, Version: "whisper-2.0.0", Limits: protocol.CapabilityLimits{MaxInputBytes: 26214400, Formats: []string{"mp3", "wav"}}},
+			{ID: protocol.CapabilityAudioTranslation, Runtime: protocol.RuntimeSpeech, Status: protocol.CapabilityReady, Models: []string{"whisper-large"}, Paths: []string{"/v1/audio/translations"}, Version: "whisper-2.0.0", Limits: protocol.CapabilityLimits{MaxInputBytes: 26214400}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.monitorRuntimeState(context.Background())
+	c.monitorRuntimeState(context.Background())
+	select {
+	case <-changes:
+		t.Fatal("unchanged speech and transcription runtimes requested a metadata refresh")
+	default:
+	}
+}
+
+func TestRuntimeMonitorKeepsWarmingRuntimeStable(t *testing.T) {
+	// Every Python runtime reports "starting" until its model finishes loading, and the session baseline normalizes that to "warming". A probe that forwarded the raw value would mismatch its own baseline on every pass for the whole warm-up and re-register the session in a loop.
+	video := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"starting","version":"video-1.0.0","vram_bytes":0,"capabilities":[{"id":"video.generate","status":"starting","models":["wan-2.1"],"paths":["/v1/videos"]},{"id":"audio.tts","status":"ready","models":["not-mine"],"paths":["/v1/audio/speech"]}]}`)
+	}))
+	defer video.Close()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := make(chan struct{}, 1)
+	c, err := New(Config{
+		GatewayURL: "https://localhost", NodeID: 1, Identity: identity.Decoded{Public: pub, Private: priv}, HTTPClient: video.Client(), VideoURL: video.URL, MetadataChanged: changes,
+		Meta: protocol.NodeMeta{Capabilities: []protocol.Capability{
+			{ID: protocol.CapabilityVideoGenerate, Runtime: protocol.RuntimeVideo, Status: protocol.CapabilityWarming, Models: []string{"wan-2.1"}, Paths: []string{"/v1/videos"}, Version: "video-1.0.0"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.monitorRuntimeState(context.Background())
+	c.monitorRuntimeState(context.Background())
+	select {
+	case <-changes:
+		t.Fatal("a runtime still warming up requested a metadata refresh")
+	default:
+	}
+}
+
+func TestRuntimeMonitorDetectsTranscriptionOnlyChange(t *testing.T) {
+	speech := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ready","version":"speech-1.0.0","vram_bytes":0,"capabilities":[{"id":"audio.tts","status":"ready","models":["kokoro"],"paths":["/v1/audio/speech"]}]}`)
+	}))
+	defer speech.Close()
+	transcription := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ready","version":"whisper-2.0.0","vram_bytes":0,"capabilities":[{"id":"audio.transcription","status":"ready","models":["whisper-turbo"],"paths":["/v1/audio/transcriptions"]}]}`)
+	}))
+	defer transcription.Close()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := make(chan struct{}, 1)
+	c, err := New(Config{
+		GatewayURL: "https://localhost", NodeID: 1, Identity: identity.Decoded{Public: pub, Private: priv}, HTTPClient: speech.Client(), SpeechURL: speech.URL, TranscriptionURL: transcription.URL, MetadataChanged: changes,
+		Meta: protocol.NodeMeta{Capabilities: []protocol.Capability{
+			{ID: protocol.CapabilityAudioTTS, Runtime: protocol.RuntimeSpeech, Status: protocol.CapabilityReady, Models: []string{"kokoro"}, Paths: []string{"/v1/audio/speech"}, Version: "speech-1.0.0"},
+			{ID: protocol.CapabilityAudioTranscription, Runtime: protocol.RuntimeSpeech, Status: protocol.CapabilityReady, Models: []string{"whisper-large"}, Paths: []string{"/v1/audio/transcriptions"}, Version: "whisper-2.0.0"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.monitorRuntimeState(context.Background())
+	c.monitorRuntimeState(context.Background())
+	select {
+	case <-changes:
+	case <-time.After(time.Second):
+		t.Fatal("out-of-band transcription model change did not request metadata refresh")
+	}
+}
+
 func TestRuntimeMonitorUsesDiscoverySizedBudgetForSlowHealthyRuntime(t *testing.T) {
 	image := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(2100 * time.Millisecond)

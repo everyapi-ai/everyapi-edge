@@ -48,6 +48,7 @@ export const TrafficPage = () => {
         <QueryState
           isPending={requests.isPending}
           isError={requests.isError}
+          error={requests.error}
           isEmpty={requests.data?.length === 0}
           emptyMessage={t('traffic.empty')}
           onRetry={() => void requests.refetch()}

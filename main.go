@@ -497,17 +497,10 @@ func protocolCapabilities(runtimeKind protocol.RuntimeKind, health edgeruntime.R
 	result := make([]protocol.Capability, 0, len(health.Capabilities))
 	for _, capability := range health.Capabilities {
 		id := protocol.CapabilityID(capability.ID)
-		if !capabilityBelongsToRuntime(id, runtimeKind) {
+		if !protocol.CapabilityBelongsToRuntime(id, runtimeKind) {
 			continue
 		}
-		status := protocol.CapabilityStatus(capability.Status)
-		switch status {
-		case protocol.CapabilityReady, protocol.CapabilityWarming, protocol.CapabilityDegraded, protocol.CapabilityUnavailable, protocol.CapabilityUnsupported:
-		case protocol.CapabilityStatus(edgeruntime.StatusStarting):
-			status = protocol.CapabilityWarming
-		default:
-			status = protocol.CapabilityUnavailable
-		}
+		status := protocol.NormalizeCapabilityStatus(protocol.CapabilityStatus(capability.Status))
 		reason := strings.TrimSpace(capability.Reason)
 		if reason == "" && status != protocol.CapabilityReady {
 			reason = strings.TrimSpace(health.Error)
@@ -531,25 +524,6 @@ func readyRuntimeModels(health edgeruntime.RuntimeHealth) []string {
 		models = health.Models
 	}
 	return mergeModels(models)
-}
-
-func capabilityBelongsToRuntime(id protocol.CapabilityID, runtimeKind protocol.RuntimeKind) bool {
-	switch runtimeKind {
-	case protocol.RuntimeText:
-		return id == protocol.CapabilityTextChat || id == protocol.CapabilityTextCompletion || id == protocol.CapabilityTextEmbedding || id == protocol.CapabilityTextVision
-	case protocol.RuntimeImage:
-		return id == protocol.CapabilityImageGenerate || id == protocol.CapabilityImageEdit
-	case protocol.RuntimeSpeech:
-		return id == protocol.CapabilityAudioTTS || id == protocol.CapabilityAudioTranscription || id == protocol.CapabilityAudioTranslation
-	case protocol.RuntimeVideo:
-		return id == protocol.CapabilityVideoGenerate
-	case protocol.RuntimeRender:
-		return id == protocol.CapabilityRenderExecute
-	case protocol.RuntimeRerank:
-		return id == protocol.CapabilityTextRerank
-	default:
-		return false
-	}
 }
 
 func mergeModels(groups ...[]string) []string {

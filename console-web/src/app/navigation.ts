@@ -3,6 +3,7 @@ import {
   Boxes,
   Cpu,
   HardDrive,
+  ImagePlus,
   MessageSquareText,
   ScrollText,
   Settings,
@@ -31,6 +32,7 @@ export const NAVIGATION_GROUPS: NavigationGroup[] = [
       { to: '/runtime', labelKey: 'nav.runtime', icon: Cpu },
       { to: '/models', labelKey: 'nav.models', icon: Boxes },
       { to: '/playground', labelKey: 'nav.playground', icon: MessageSquareText },
+      { to: '/image-edit', labelKey: 'nav.imageEdit', icon: ImagePlus },
     ],
   },
   {

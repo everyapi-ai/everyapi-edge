@@ -5,5 +5,5 @@ package console
 import "fmt"
 
 func chooseStorageDirectory() (string, error) {
-	return "", fmt.Errorf("native directory picker is not available on this platform")
+	return "", fmt.Errorf("%w on this platform", errPickerUnavailable)
 }

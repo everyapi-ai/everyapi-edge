@@ -291,6 +291,7 @@ export const requestSchema = z.object({
   started_at: timestamp,
   completed_at: timestamp,
   duration_ms: z.number().optional().default(0),
+  ttft_ms: z.number().optional().default(0),
   prompt_tokens: z.number().optional().default(0),
   completion_tokens: z.number().optional().default(0),
   error: z.string().optional().default(''),

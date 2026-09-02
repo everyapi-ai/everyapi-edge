@@ -8,7 +8,7 @@ import { formatTime } from '@/lib/format'
 const levelColor = (level: string): string => {
   const normalized = level.toLowerCase()
   if (normalized === 'error' || normalized === 'fatal') return 'text-danger'
-  if (normalized === 'warn' || normalized === 'warning') return 'text-amber'
+  if (normalized === 'warn' || normalized === 'warning') return 'text-warn'
   return 'text-good'
 }
 
@@ -40,6 +40,7 @@ export const LogsPage = () => {
         <QueryState
           isPending={logs.isPending}
           isError={logs.isError}
+          error={logs.error}
           isEmpty={logs.data?.length === 0}
           emptyMessage={t('logs.empty')}
           onRetry={() => void logs.refetch()}

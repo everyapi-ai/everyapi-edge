@@ -11,6 +11,7 @@ type NodeDetailsProps = {
   settlements?: Settlement[]
   settlementsPending: boolean
   settlementsError: boolean
+  settlementsErrorDetail?: unknown
   updatePending: boolean
   updateError?: string
   updateStateLabel: string
@@ -29,6 +30,7 @@ export const NodeDetails = ({
   settlements,
   settlementsPending,
   settlementsError,
+  settlementsErrorDetail,
   updatePending,
   updateError,
   updateStateLabel,
@@ -132,6 +134,7 @@ export const NodeDetails = ({
           <QueryState
             isPending={settlementsPending}
             isError={settlementsError}
+            error={settlementsErrorDetail}
             isEmpty={settlements?.length === 0}
             emptyMessage={t('settlement.waiting')}
             onRetry={onRetrySettlements}

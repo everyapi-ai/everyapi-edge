@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -1203,6 +1205,66 @@ func TestHandlerUsesNativeStoragePickerPath(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"path":"/Volumes/models/ollama"`) {
 		t.Fatalf("storage picker response = %s", response.Body.String())
+	}
+}
+
+func TestCapabilitiesReportEachIDOnceAtItsBestStatus(t *testing.T) {
+	// Speech and transcription are separate services that both claim audio.transcription and audio.translation, so an unconfigured node used to answer with each of them twice and contradictory reasons.
+	h := newHandler(Config{OllamaURL: "http://ollama:11434"}, NewStore(16), nil)
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/capabilities", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("capabilities status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Capabilities []protocol.Capability `json:"capabilities"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[protocol.CapabilityID]int{}
+	for _, capability := range payload.Capabilities {
+		seen[capability.ID]++
+	}
+	for id, count := range seen {
+		if count != 1 {
+			t.Fatalf("capability %s reported %d times: %s", id, count, response.Body.String())
+		}
+	}
+	if len(payload.Capabilities) == 0 {
+		t.Fatal("expected the node to report its unavailable capabilities")
+	}
+
+	best := bestCapabilityPerID([]protocol.Capability{
+		unavailableCapability(protocol.CapabilityAudioTranscription, protocol.RuntimeSpeech, "speech runtime is not configured"),
+		{ID: protocol.CapabilityAudioTranscription, Runtime: protocol.RuntimeSpeech, Status: protocol.CapabilityReady, Models: []string{"whisper-small"}},
+	})
+	if len(best) != 1 || best[0].Status != protocol.CapabilityReady {
+		t.Fatalf("a capability served by one of two runtimes must report the serviceable status: %+v", best)
+	}
+}
+
+func TestHandlerReportsPickerRemedyButStillRedactsPathFailures(t *testing.T) {
+	unavailable := func() (string, error) { return "", fmt.Errorf("%w; install zenity or kdialog", errPickerUnavailable) }
+	h := newHandler(Config{OllamaURL: "http://ollama:11434"}, NewStore(16), unavailable)
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/storage/pick", nil))
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing picker status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "install zenity or kdialog") {
+		t.Fatalf("a headless node must be told how to install a chooser: %s", response.Body.String())
+	}
+
+	denied := func() (string, error) { return "", errors.New("open /Users/operator/private: permission denied") }
+	h = newHandler(Config{OllamaURL: "http://ollama:11434"}, NewStore(16), denied)
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, consoleHTTPRequest(http.MethodPost, "/api/storage/pick", nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("denied picker status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "/Users/operator") {
+		t.Fatalf("a picker failure carrying a host path must stay redacted: %s", response.Body.String())
 	}
 }
 

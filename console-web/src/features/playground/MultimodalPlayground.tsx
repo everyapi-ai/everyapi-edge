@@ -50,7 +50,7 @@ export const MultimodalPlayground = ({ initialModel = '' }: { initialModel?: str
               {t(`playground.mode.${tab.mode}`)}
               {unavailable ? (
                 <span
-                  className='size-1.5 rounded-full bg-warning'
+                  className='size-1.5 rounded-full bg-warn'
                   aria-label={capability?.status ?? 'unavailable'}
                 />
               ) : null}
@@ -62,6 +62,7 @@ export const MultimodalPlayground = ({ initialModel = '' }: { initialModel?: str
       <QueryState
         isPending={capabilities.isPending}
         isError={capabilities.isError}
+        error={capabilities.error}
         onRetry={() => void capabilities.refetch()}
       >
         {mode === 'image' ? (
@@ -80,7 +81,7 @@ const CapabilityNotice = ({ capability }: { capability?: Capability }) => {
   const { t } = useTranslation()
   if (capability?.status === 'ready') return null
   return (
-    <p className='rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning'>
+    <p className='rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-warn'>
       {capability?.reason || t('playground.capabilityUnavailable')}
     </p>
   )

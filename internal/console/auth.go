@@ -69,17 +69,27 @@ func (a *sessionAuthenticator) session(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *sessionAuthenticator) rotate(token string) error {
+// sessionNonce draws the one piece of randomness a replacement cookie needs. Rotation reads it before the new token is written to disk, because the caller persists first and swaps second: a failure between those two steps would leave a node whose stored token nobody holds.
+func (a *sessionAuthenticator) sessionNonce() ([]byte, error) {
+	nonce := make([]byte, 16)
+	if _, err := io.ReadFull(a.random, nonce); err != nil {
+		return nil, err
+	}
+	return nonce, nil
+}
+
+// Replacing the signing key revokes every outstanding cookie, which is the point of rotation — but the caller doing the rotating must survive it, or the operator is signed out before they can read the only copy of the new token the response carries. Minting their replacement cookie from an already-drawn nonce, under the same lock, keeps that window closed for everyone else and leaves nothing here that can fail after the swap.
+func (a *sessionAuthenticator) rotate(token string, secure bool, nonce []byte) (*http.Cookie, error) {
 	trimmed := strings.TrimSpace(token)
 	if len(trimmed) < 32 {
-		return errors.New("pairing token must be at least 32 characters")
+		return nil, errors.New("pairing token must be at least 32 characters")
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.enabled = true
 	a.tokenDigest = sha256.Sum256([]byte(trimmed))
 	a.signingKey = sha256.Sum256([]byte("everyapi-edge-console-session\x00" + trimmed))
-	return nil
+	return a.sessionCookie(secure, nonce), nil
 }
 
 func (a *sessionAuthenticator) login(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +173,11 @@ func (a *sessionAuthenticator) newSessionCookie(secure bool) (*http.Cookie, erro
 	if _, err := io.ReadFull(a.random, nonce); err != nil {
 		return nil, err
 	}
+	return a.sessionCookie(secure, nonce), nil
+}
+
+// sessionCookie signs a cookie with whatever key is installed now, so a caller that has just replaced the key gets one the new key validates.
+func (a *sessionAuthenticator) sessionCookie(secure bool, nonce []byte) *http.Cookie {
 	expiresAt := a.now().UTC().Add(sessionLifetime)
 	payload := strconv.FormatInt(expiresAt.Unix(), 10) + "." + base64.RawURLEncoding.EncodeToString(nonce)
 	value := payload + "." + base64.RawURLEncoding.EncodeToString(a.signature(payload))
@@ -175,7 +190,7 @@ func (a *sessionAuthenticator) newSessionCookie(secure bool) (*http.Cookie, erro
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
-	}, nil
+	}
 }
 
 func (a *sessionAuthenticator) expiredCookie(secure bool) *http.Cookie {

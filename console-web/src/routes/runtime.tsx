@@ -2,12 +2,14 @@ import { createRoute } from '@tanstack/react-router'
 import { ZapOff } from 'lucide-react'
 
 import {
+  useCapabilities,
   useOverview,
   useRuntime,
   useUnloadAllRuntimeModels,
   useUnloadRuntimeModel,
 } from '@/api/queries'
-import { Button, PageHeader, Panel, QueryState } from '@/components/primitives'
+import { Button, MutationStatus, PageHeader, Panel, QueryState } from '@/components/primitives'
+import { CapabilityMatrix } from '@/features/runtime/CapabilityMatrix'
 import { useTranslation } from '@/i18n/useTranslation'
 import { formatCount, formatTime, formatVRAMGigabytes } from '@/lib/format'
 
@@ -17,6 +19,7 @@ const RuntimePage = () => {
   const { t, locale } = useTranslation()
   const overview = useOverview()
   const runtime = useRuntime()
+  const capabilities = useCapabilities()
   const unload = useUnloadRuntimeModel()
   const unloadAll = useUnloadAllRuntimeModels()
 
@@ -50,6 +53,7 @@ const RuntimePage = () => {
       <QueryState
         isPending={runtime.isPending}
         isError={runtime.isError}
+        error={runtime.error}
         onRetry={() => void runtime.refetch()}
       >
         <div className='grid gap-4 lg:grid-cols-[minmax(0,0.72fr)_minmax(0,1.28fr)]'>
@@ -73,6 +77,13 @@ const RuntimePage = () => {
                 {t('runtime.unloadAll')}
               </Button>
             ) : null}
+            <MutationStatus
+              className='mt-3'
+              isError={unloadAll.isError}
+              error={unloadAll.error}
+              isSuccess={unloadAll.isSuccess}
+              successMessage={t('runtime.unloadedAll')}
+            />
             {overview.data?.vram_total_gb ? (
               <section data-runtime-memory-budget className='mt-5 border-t border-line pt-4'>
                 <h3 className='text-sm font-medium text-ink'>{t('runtime.memoryBudget')}</h3>
@@ -184,9 +195,27 @@ const RuntimePage = () => {
             ) : (
               <p className='text-sm text-muted'>{t('runtime.empty')}</p>
             )}
+            <MutationStatus
+              className='mt-3'
+              isError={unload.isError}
+              error={unload.error}
+              isSuccess={unload.isSuccess}
+              successMessage={t('runtime.unloaded')}
+            />
           </Panel>
         </div>
       </QueryState>
+
+      <Panel title={t('runtime.capabilities')}>
+        <QueryState
+          isPending={capabilities.isPending}
+          isError={capabilities.isError}
+          error={capabilities.error}
+          onRetry={() => void capabilities.refetch()}
+        >
+          <CapabilityMatrix capabilities={capabilities.data ?? []} />
+        </QueryState>
+      </Panel>
     </div>
   )
 }

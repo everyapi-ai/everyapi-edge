@@ -23,5 +23,5 @@ func chooseStorageDirectory() (string, error) {
 		}
 		return pickedStorageDirectory(output)
 	}
-	return "", fmt.Errorf("no native directory picker is available; install zenity or kdialog")
+	return "", fmt.Errorf("%w; install zenity or kdialog", errPickerUnavailable)
 }

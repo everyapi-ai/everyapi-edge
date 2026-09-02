@@ -15,6 +15,11 @@ import (
 func (h *handler) storagePicker(w http.ResponseWriter, _ *http.Request) {
 	path, err := h.pickStorage()
 	if err != nil {
+		// A missing chooser is a fact about the host, not about a path the operator picked, so the remedy is safe to show and useless to hide: without it a headless node reports only that selection failed, forever.
+		if errors.Is(err, errPickerUnavailable) {
+			writeError(w, http.StatusUnprocessableEntity, err)
+			return
+		}
 		writePrivateError(w, http.StatusBadRequest, "Storage directory selection failed.", err)
 		return
 	}

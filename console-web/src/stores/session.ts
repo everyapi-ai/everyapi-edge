@@ -8,8 +8,12 @@ interface SessionState {
   setLocale: (locale: Locale) => void
 }
 
+/** `navigator` is a host value, not ours. A browser always fills these in, but the store is created at module load, so any environment that leaves `languages` and `language` unset — a test runner, a server-side import — would take the whole console down on an entry nobody validated. */
 const detectLocale = (): Locale => {
-  for (const candidate of navigator.languages ?? [navigator.language]) {
+  const host = typeof navigator === 'undefined' ? undefined : navigator
+  const candidates = host?.languages?.length ? host.languages : [host?.language]
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue
     const base = candidate.toLowerCase().split('-')[0]
     if (isSupportedLocale(base)) return base
   }

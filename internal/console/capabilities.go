@@ -55,7 +55,41 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Capabilities []protocol.Capability `json:"capabilities"`
-	}{Capabilities: capabilities})
+	}{Capabilities: bestCapabilityPerID(capabilities)})
+}
+
+// capabilityStatusRank orders statuses from most to least serviceable so a capability offered by two runtimes is reported at the better of the two.
+func capabilityStatusRank(status protocol.CapabilityStatus) int {
+	switch status {
+	case protocol.CapabilityReady:
+		return 0
+	case protocol.CapabilityWarming:
+		return 1
+	case protocol.CapabilityDegraded:
+		return 2
+	case protocol.CapabilityUnavailable:
+		return 3
+	default:
+		return 4
+	}
+}
+
+// bestCapabilityPerID collapses the speech and transcription services' overlapping claims. Both can serve audio.transcription and audio.translation, so an unconfigured node used to report each of them twice with contradictory reasons; the forwarder routes to whichever service answers, and this reports that same single truth.
+func bestCapabilityPerID(capabilities []protocol.Capability) []protocol.Capability {
+	result := make([]protocol.Capability, 0, len(capabilities))
+	index := make(map[protocol.CapabilityID]int, len(capabilities))
+	for _, capability := range capabilities {
+		position, seen := index[capability.ID]
+		if !seen {
+			index[capability.ID] = len(result)
+			result = append(result, capability)
+			continue
+		}
+		if capabilityStatusRank(capability.Status) < capabilityStatusRank(result[position].Status) {
+			result[position] = capability
+		}
+	}
+	return result
 }
 
 func (h *handler) textCapabilities(r *http.Request) []protocol.Capability {

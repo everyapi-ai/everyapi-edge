@@ -11,6 +11,7 @@ export const TrafficTable = ({ requests }: { requests: EdgeRequest[] }) => {
     t('traffic.columnPath'),
     t('traffic.columnCapability'),
     t('traffic.columnUsage'),
+    t('traffic.columnTTFT'),
     t('traffic.columnDuration'),
     t('traffic.columnResult'),
   ]
@@ -22,7 +23,7 @@ export const TrafficTable = ({ requests }: { requests: EdgeRequest[] }) => {
       tabIndex={0}
       className='hidden overflow-x-auto rounded-sm focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none md:block'
     >
-      <table className='w-full min-w-[860px] border-collapse text-sm'>
+      <table className='w-full min-w-[960px] border-collapse text-sm'>
         <thead>
           <tr>
             {columns.map((heading) => (
@@ -57,6 +58,9 @@ export const TrafficTable = ({ requests }: { requests: EdgeRequest[] }) => {
               <td className='border-b border-line px-3 py-3 whitespace-nowrap text-ink-2'>
                 {formatCount(request.prompt_tokens, locale)} +{' '}
                 {formatCount(request.completion_tokens, locale)}
+              </td>
+              <td className='border-b border-line px-3 py-3 whitespace-nowrap text-ink-2'>
+                {request.ttft_ms ? `${formatCount(request.ttft_ms, locale)}ms` : '—'}
               </td>
               <td className='border-b border-line px-3 py-3 whitespace-nowrap text-ink-2'>
                 {formatCount(request.duration_ms, locale)}ms

@@ -5,7 +5,7 @@ import { useMutation } from '@tanstack/react-query'
 import { useModels, useStartStorageMigration, useStorage, useStorageMigration } from '@/api/queries'
 import { postJSONResponse } from '@/api/client'
 import { migrationPlanSchema, storagePickerSchema } from '@/api/schemas'
-import { Button, PageHeader, Panel, QueryState } from '@/components/primitives'
+import { Button, MutationStatus, PageHeader, Panel, QueryState } from '@/components/primitives'
 import { useTranslation } from '@/i18n/useTranslation'
 import { formatGigabytes } from '@/lib/format'
 
@@ -73,6 +73,7 @@ export const StoragePage = () => {
       <QueryState
         isPending={storage.isPending}
         isError={storage.isError}
+        error={storage.error}
         onRetry={() => void storage.refetch()}
       >
         <div className='grid gap-4 lg:grid-cols-2'>
@@ -182,11 +183,7 @@ export const StoragePage = () => {
                 {t('storage.prepare')}
               </Button>
             </form>
-            {picker.isError ? (
-              <p role='alert' className='mt-3 text-sm text-danger'>
-                {picker.error.message}
-              </p>
-            ) : null}
+            <MutationStatus className='mt-3' isError={picker.isError} error={picker.error} />
             {plan.data ? (
               plan.data.ready ? (
                 <div className='mt-3 rounded-md border border-good/25 bg-good/8 p-3'>
@@ -215,16 +212,12 @@ export const StoragePage = () => {
                 </div>
               )
             ) : null}
-            {plan.isError ? (
-              <p role='alert' className='mt-3 text-sm text-danger'>
-                {plan.error.message}
-              </p>
-            ) : null}
-            {startMigration.isError ? (
-              <p role='alert' className='mt-3 text-sm text-danger'>
-                {startMigration.error.message}
-              </p>
-            ) : null}
+            <MutationStatus className='mt-3' isError={plan.isError} error={plan.error} />
+            <MutationStatus
+              className='mt-3'
+              isError={startMigration.isError}
+              error={startMigration.error}
+            />
             {job && job.status !== 'idle' ? (
               <div className='mt-4 border-t border-line pt-4'>
                 <div className='flex items-center justify-between gap-3 text-xs text-muted'>

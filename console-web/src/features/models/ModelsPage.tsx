@@ -470,6 +470,7 @@ export const ModelsPage = () => {
           <QueryState
             isPending={models.isPending}
             isError={models.isError}
+            error={models.error}
             isEmpty={models.data?.length === 0}
             emptyMessage={t('models.empty')}
             onRetry={() => void models.refetch()}

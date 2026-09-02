@@ -1317,20 +1317,26 @@ func (c *Client) ollamaVRAMBytes(ctx context.Context) int64 {
 }
 
 func (c *Client) runtimeSnapshot(ctx context.Context, baseURL string, kind protocol.RuntimeKind) (int64, string) {
+	vramBytes, capabilities := c.runtimeCapabilities(ctx, baseURL, kind)
+	return vramBytes, capabilityFingerprint(kind, capabilities)
+}
+
+// runtimeCapabilities reads one runtime service's /health capabilities so callers that own several services of the same runtime kind can fingerprint their union. Speech and transcription are separate services that both publish protocol.RuntimeSpeech capabilities, and the session baseline built in New is a single capabilityFingerprint over every speech capability the node reported, so a per-service encoding could never equal it.
+func (c *Client) runtimeCapabilities(ctx context.Context, baseURL string, kind protocol.RuntimeKind) (int64, []protocol.Capability) {
 	if strings.TrimSpace(baseURL) == "" {
-		return 0, "unavailable"
+		return 0, nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/health", nil)
 	if err != nil {
-		return 0, "unavailable"
+		return 0, nil
 	}
 	response, err := c.cfg.HTTPClient.Do(req)
 	if err != nil {
-		return 0, "unavailable"
+		return 0, nil
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable {
-		return 0, "unavailable"
+		return 0, nil
 	}
 	var payload struct {
 		Version      string                `json:"version"`
@@ -1338,13 +1344,20 @@ func (c *Client) runtimeSnapshot(ctx context.Context, baseURL string, kind proto
 		Capabilities []protocol.Capability `json:"capabilities"`
 	}
 	if json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&payload) != nil || payload.VRAMBytes < 0 {
-		return 0, "unavailable"
+		return 0, nil
 	}
-	for index := range payload.Capabilities {
-		payload.Capabilities[index].Runtime = kind
-		payload.Capabilities[index].Version = payload.Version
+	// The session baseline runs every reported capability through the same filter and status mapping (see protocolCapabilities in main.go), so the probe must too: a runtime that reports "starting" while a model warms up would otherwise mismatch its own baseline on every pass and re-register the session forever.
+	capabilities := make([]protocol.Capability, 0, len(payload.Capabilities))
+	for _, capability := range payload.Capabilities {
+		if !protocol.CapabilityBelongsToRuntime(capability.ID, kind) {
+			continue
+		}
+		capability.Runtime = kind
+		capability.Version = payload.Version
+		capability.Status = protocol.NormalizeCapabilityStatus(capability.Status)
+		capabilities = append(capabilities, capability)
 	}
-	return payload.VRAMBytes, capabilityFingerprint(kind, payload.Capabilities)
+	return payload.VRAMBytes, capabilities
 }
 
 func (c *Client) probeTextRuntimeFingerprint(ctx context.Context) string {
@@ -1439,9 +1452,9 @@ func (c *Client) monitorRuntimeState(ctx context.Context) {
 		return fingerprint
 	})
 	probe(protocol.RuntimeSpeech, func(probeCtx context.Context) string {
-		_, speechFingerprint := c.runtimeSnapshot(probeCtx, c.cfg.SpeechURL, protocol.RuntimeSpeech)
-		_, transcriptionFingerprint := c.runtimeSnapshot(probeCtx, c.cfg.TranscriptionURL, protocol.RuntimeSpeech)
-		return speechFingerprint + "\n" + transcriptionFingerprint
+		_, speechCapabilities := c.runtimeCapabilities(probeCtx, c.cfg.SpeechURL, protocol.RuntimeSpeech)
+		_, transcriptionCapabilities := c.runtimeCapabilities(probeCtx, c.cfg.TranscriptionURL, protocol.RuntimeSpeech)
+		return capabilityFingerprint(protocol.RuntimeSpeech, append(speechCapabilities, transcriptionCapabilities...))
 	})
 	probe(protocol.RuntimeVideo, func(probeCtx context.Context) string {
 		_, fingerprint := c.runtimeSnapshot(probeCtx, c.cfg.VideoURL, protocol.RuntimeVideo)

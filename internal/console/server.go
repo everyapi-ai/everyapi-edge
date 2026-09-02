@@ -342,16 +342,23 @@ func newHandlers(cfg Config, store *Store, picker func() (string, error)) Handle
 			writeError(w, http.StatusNotImplemented, errors.New("pairing token rotation is unavailable"))
 			return
 		}
+		// RotateConsoleToken persists the new token, so everything that can fail is drawn first: a failure after that write would leave the stored token and the running process disagreeing, and the node would accept only a token nobody was ever shown.
+		nonce, err := authenticator.sessionNonce()
+		if err != nil {
+			writePrivateError(w, http.StatusInternalServerError, "The pairing token could not be rotated.", err)
+			return
+		}
 		token, err := cfg.RotateConsoleToken()
 		if err != nil {
 			writePrivateError(w, http.StatusInternalServerError, "The pairing token could not be rotated.", err)
 			return
 		}
-		if err := authenticator.rotate(token); err != nil {
+		cookie, err := authenticator.rotate(token, r.TLS != nil, nonce)
+		if err != nil {
 			writePrivateError(w, http.StatusInternalServerError, "The pairing token could not be rotated.", err)
 			return
 		}
-		http.SetCookie(w, authenticator.expiredCookie(r.TLS != nil))
+		http.SetCookie(w, cookie)
 		writeJSON(w, http.StatusOK, struct {
 			Token string `json:"token"`
 		}{Token: token})

@@ -1,11 +1,14 @@
 package console
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -113,6 +116,59 @@ func TestPairingTokenRotationInvalidatesExistingSessionAndOldToken(t *testing.T)
 	}
 }
 
+func TestPairingTokenRotationKeepsTheRotatingOperatorSignedIn(t *testing.T) {
+	newToken := strings.Repeat("c3", 32)
+	handlers := NewHandlers(Config{
+		ConsoleToken: testConsoleToken,
+		NodeName:     "studio-gpu",
+		RotateConsoleToken: func() (string, error) {
+			return newToken, nil
+		},
+	}, NewStore(1))
+	operator := httptest.NewRecorder()
+	handlers.Browser.ServeHTTP(operator, consoleRequest(http.MethodPost, "/api/session", `{"token":"`+testConsoleToken+`"}`))
+	operatorCookie := operator.Result().Cookies()[0]
+	bystander := httptest.NewRecorder()
+	handlers.Browser.ServeHTTP(bystander, consoleRequest(http.MethodPost, "/api/session", `{"token":"`+testConsoleToken+`"}`))
+	bystanderCookie := bystander.Result().Cookies()[0]
+
+	rotate := httptest.NewRecorder()
+	request := consoleRequest(http.MethodPost, "/api/session/rotate", "{}")
+	request.AddCookie(operatorCookie)
+	handlers.Browser.ServeHTTP(rotate, request)
+	if rotate.Code != http.StatusOK || !strings.Contains(rotate.Body.String(), newToken) {
+		t.Fatalf("rotate = %d %s", rotate.Code, rotate.Body.String())
+	}
+	rotated := rotate.Result().Cookies()
+	if len(rotated) != 1 || rotated[0].Name != sessionCookieName || rotated[0].MaxAge <= 0 {
+		t.Fatalf("rotation cookie = %#v", rotated)
+	}
+
+	profile := httptest.NewRecorder()
+	request = consoleRequest(http.MethodGet, "/api/node", "")
+	request.AddCookie(rotated[0])
+	handlers.Browser.ServeHTTP(profile, request)
+	if profile.Code != http.StatusOK || !strings.Contains(profile.Body.String(), "studio-gpu") {
+		t.Fatalf("rotating operator lost the session that carries the new token: %d %s", profile.Code, profile.Body.String())
+	}
+
+	poll := httptest.NewRecorder()
+	request = consoleRequest(http.MethodGet, "/api/session", "")
+	request.AddCookie(rotated[0])
+	handlers.Browser.ServeHTTP(poll, request)
+	if poll.Code != http.StatusOK || !strings.Contains(poll.Body.String(), `"authenticated":true`) {
+		t.Fatalf("session poll after rotation = %d %s", poll.Code, poll.Body.String())
+	}
+
+	other := httptest.NewRecorder()
+	request = consoleRequest(http.MethodGet, "/api/node", "")
+	request.AddCookie(bystanderCookie)
+	handlers.Browser.ServeHTTP(other, request)
+	if other.Code != http.StatusUnauthorized {
+		t.Fatalf("a session opened before rotation survived it: %d %s", other.Code, other.Body.String())
+	}
+}
+
 func TestPairingTokenRotationIsNotAvailableThroughRemoteControl(t *testing.T) {
 	handlers := NewHandlers(Config{
 		ConsoleToken: testConsoleToken,
@@ -210,5 +266,64 @@ func TestControlAPIBypassesBrowserSession(t *testing.T) {
 	handlers.Control.ServeHTTP(response, consoleRequest(http.MethodGet, "/api/node", ""))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "studio-gpu") {
 		t.Fatalf("control API = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRotateLeavesCredentialsIntactWhenEntropyFails(t *testing.T) {
+	// A rotation that swapped the key and then failed would leave a node whose stored token nobody holds and whose every session is already void, with no way back in.
+	authenticator := newSessionAuthenticator(testConsoleToken)
+	before := authenticator.signingKey
+	authenticator.random = iotest.ErrReader(errors.New("entropy source failed"))
+
+	nonce, err := authenticator.sessionNonce()
+	if err == nil {
+		t.Fatal("rotation must fail when it cannot draw a nonce for the replacement cookie")
+	}
+	if nonce != nil {
+		t.Fatalf("failed nonce draw returned bytes: %v", nonce)
+	}
+	if authenticator.signingKey != before {
+		t.Fatal("failed rotation replaced the signing key anyway")
+	}
+	if authenticator.tokenDigest != sha256.Sum256([]byte(testConsoleToken)) {
+		t.Fatal("failed rotation invalidated the original pairing token")
+	}
+}
+
+func TestFailedPairingRotationLeavesTheOperatorSignedInWithTheOldToken(t *testing.T) {
+	// Rotation persists the new token and then installs it. If the write fails, nothing may have moved: the operator keeps the session they still hold and the token they still know.
+	handlers := NewHandlers(Config{
+		ConsoleToken: testConsoleToken,
+		RotateConsoleToken: func() (string, error) {
+			return "", errors.New("identity file is read-only")
+		},
+	}, NewStore(1))
+	login := httptest.NewRecorder()
+	handlers.Browser.ServeHTTP(login, consoleRequest(http.MethodPost, "/api/session", `{"token":"`+testConsoleToken+`"}`))
+	cookie := login.Result().Cookies()[0]
+
+	rotate := httptest.NewRecorder()
+	request := consoleRequest(http.MethodPost, "/api/session/rotate", "{}")
+	request.AddCookie(cookie)
+	handlers.Browser.ServeHTTP(rotate, request)
+	if rotate.Code != http.StatusInternalServerError {
+		t.Fatalf("failed rotation status = %d, body=%s", rotate.Code, rotate.Body.String())
+	}
+	if strings.Contains(rotate.Body.String(), "read-only") {
+		t.Fatalf("the failure leaked the agent's own message: %s", rotate.Body.String())
+	}
+
+	stillOn := httptest.NewRecorder()
+	request = consoleRequest(http.MethodGet, "/api/node", "")
+	request.AddCookie(cookie)
+	handlers.Browser.ServeHTTP(stillOn, request)
+	if stillOn.Code == http.StatusUnauthorized {
+		t.Fatal("a failed rotation signed the operator out")
+	}
+
+	stillPairs := httptest.NewRecorder()
+	handlers.Browser.ServeHTTP(stillPairs, consoleRequest(http.MethodPost, "/api/session", `{"token":"`+testConsoleToken+`"}`))
+	if stillPairs.Code != http.StatusOK {
+		t.Fatalf("a failed rotation invalidated the token the operator still holds: %d", stillPairs.Code)
 	}
 }

@@ -9,16 +9,8 @@ import {
   type AnyRoute,
 } from '@tanstack/react-router'
 
-import { logsRoute } from '@/routes/logs'
-import { modelsRoute } from '@/routes/models'
-import { overviewRoute } from '@/routes/overview'
-import { playgroundRoute } from '@/routes/playground'
-import { imageEditRoute } from '@/routes/image-edit'
-import { runtimeRoute } from '@/routes/runtime'
-import { storageRoute } from '@/routes/storage'
-import { settingsRoute } from '@/routes/settings'
+import { ROUTES } from '@/app/routes'
 import { rootRoute } from '@/routes/root'
-import { trafficRoute } from '@/routes/traffic'
 
 import './styles.css'
 
@@ -27,17 +19,7 @@ import './styles.css'
 // bookmarkable, including LAN URLs such as http://edge-host:8421/models.
 const history = createBrowserHistory()
 
-const routeTree: AnyRoute = rootRoute.addChildren([
-  overviewRoute,
-  runtimeRoute,
-  storageRoute,
-  settingsRoute,
-  modelsRoute,
-  playgroundRoute,
-  imageEditRoute,
-  trafficRoute,
-  logsRoute,
-])
+const routeTree: AnyRoute = rootRoute.addChildren(ROUTES)
 
 const router = createRouter({ routeTree, history, defaultPreload: false })
 

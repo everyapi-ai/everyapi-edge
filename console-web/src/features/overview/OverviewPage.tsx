@@ -133,6 +133,7 @@ export const OverviewPage = () => {
       <QueryState
         isPending={overview.isPending}
         isError={overview.isError}
+        error={overview.error}
         onRetry={() => void overview.refetch()}
       >
         <section className='grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4'>
@@ -249,6 +250,7 @@ export const OverviewPage = () => {
         settlements={settlements.data}
         settlementsPending={settlements.isPending}
         settlementsError={settlements.isError}
+        settlementsErrorDetail={settlements.error}
         updatePending={update.isPending}
         updateError={update.error?.message}
         updateStateLabel={updateStateLabel}
