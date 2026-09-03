@@ -1132,8 +1132,10 @@ func TestGatewayControlStorageMigrationRefusesForeignPaths(t *testing.T) {
 }
 
 // TestGatewayControlStorageMigrationAcceptsOperatorPickedDestination keeps the shipped remote flow working: the
-// dashboard asks the node's own native picker for a destination, then plans a migration out of the configured
-// model directory.
+// dashboard asks the node's own native picker for a destination, then plans and runs a migration out of the
+// configured model directory. The copy has to be asserted on the control surface itself, because that is the only
+// mux the gateway session reaches; the browser mux applies no confinement and would stay green through a
+// regression that rejects every legitimate remote migration.
 func TestGatewayControlStorageMigrationAcceptsOperatorPickedDestination(t *testing.T) {
 	source, target := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(source, "model"), []byte("model"), 0o600); err != nil {
@@ -1158,6 +1160,40 @@ func TestGatewayControlStorageMigrationAcceptsOperatorPickedDestination(t *testi
 		if !strings.Contains(plan.Body.String(), want) {
 			t.Fatalf("picked destination plan missing %s: %s", want, plan.Body.String())
 		}
+	}
+
+	start := httptest.NewRecorder()
+	control.ServeHTTP(start, consoleHTTPRequest(http.MethodPost, "/api/storage/migrate", strings.NewReader(`{"source":"`+source+`","destination":"`+target+`"}`)))
+	if start.Code != http.StatusAccepted {
+		t.Fatalf("picked destination migrate status = %d, body=%s", start.Code, start.Body.String())
+	}
+
+	var status struct {
+		Completed int64  `json:"completed"`
+		Total     int64  `json:"total"`
+		Done      bool   `json:"done"`
+		Error     string `json:"error"`
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		response := httptest.NewRecorder()
+		control.ServeHTTP(response, consoleHTTPRequest(http.MethodGet, "/api/storage/migrate", nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("migration status = %d, body=%s", response.Code, response.Body.String())
+		}
+		if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status.Done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !status.Done || status.Error != "" || status.Completed != int64(len("model")) || status.Total != int64(len("model")) {
+		t.Fatalf("migration status = %+v", status)
+	}
+	if copied, err := os.ReadFile(filepath.Join(target, "model")); err != nil || string(copied) != "model" {
+		t.Fatalf("copied model = %q, err=%v", copied, err)
 	}
 }
 
